@@ -1,0 +1,4 @@
+id = nosign
+version = 1.0.0
+unsigned = true
+ability = main service bin/counter

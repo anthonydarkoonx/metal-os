@@ -1,0 +1,1695 @@
+//! Virtual file system: one namespace over two userspace filesystems.
+//!
+//!   /system  -> rofs-server (EROFS, read-only)
+//!   /data    -> a small file layer stored on lfs-server blocks (read/write)
+//!
+//! Applications only hold a capability to this server: they never see the
+//! block driver or either filesystem. Requests/data travel through a shared
+//! page per client; the kernel-supplied sender id selects the page and the
+//! file-descriptor table, so clients cannot touch each other's state.
+//!
+//! /data layout on the log-structured store: key 0 is the directory table
+//! (a flat table of full paths, so directories nest), file data lives at
+//! key (inode << 32 | block). Closing a written file commits data *and*
+//! directory table in a single LFS checkpoint, so a crash leaves either the
+//! old or the new version, never a mix.
+use crate::*;
+use alloc::string::String;
+use alloc::vec;
+use alloc::vec::Vec;
+
+// ---- client <-> VFS protocol ----
+const V_OPEN: u64 = 50; // path in page, w1 = flags            -> [0, fd]
+const V_READ: u64 = 51; // w1 = fd, w2 = len; data -> page[256..] -> [0, n]
+const V_WRITE: u64 = 52; // w1 = fd, w2 = len; data <- page[256..] -> [0, n]
+const V_SEEK: u64 = 53; // w1 = fd, w2 = offset
+const V_CLOSE: u64 = 54; // w1 = fd (commits written data)
+const V_STAT: u64 = 55; // path in page -> [0, size, kind]
+const V_LIST: u64 = 56; // path in page -> names '\n'-separated at page[256..] -> [0, bytes]
+const V_UNLINK: u64 = 57;
+const V_MKDIR: u64 = 58;
+const V_SYNC: u64 = 59;
+const V_CRASH: u64 = 60; // fault injection for tests
+const V_FAIL_SYNC: u64 = 61; // fault injection: the next checkpoint request fails (conductor only)
+const V_RENAME: u64 = 63; // "from\0to\0" in page: move a file, or a directory with everything in it, inside /data (one commit)
+const V_SCOPE: u64 = 62; // path in page, w1 = a program's task id: confine that program (started by the caller, not yet running) to the directory
+
+// status codes (reply[0])
+pub const ENOENT: u64 = 1;
+pub const EISDIR: u64 = 2; // wrong kind of object for the operation
+pub const EBADF: u64 = 3;
+pub const EROFS: u64 = 4;
+pub const ENOSPC: u64 = 5;
+pub const EINVAL: u64 = 6;
+pub const EIO: u64 = 7;
+pub const EEXIST: u64 = 8;
+pub const ENOTEMPTY: u64 = 9;
+pub const EPERM: u64 = 10; // (V_SCOPE: not the program's parent)
+
+/// A scoped program (see `V_SCOPE`) may have at most this many entries (files and directories) under its directory: the data
+/// store has few, and one program must not be able to use them all up.
+const SCOPE_MAX_ENTRIES: usize = 12;
+
+pub const O_READ: u64 = 1;
+pub const O_WRITE: u64 = 2;
+pub const O_CREATE: u64 = 4;
+pub const O_TRUNC: u64 = 8;
+
+/// Largest file the data store accepts. (An offset near 2^40 would alias another inode's block keys,
+/// and truncating such a file would loop for ever.) The store itself is only a few MiB.
+const MAX_FILE: u64 = 16 << 20;
+const DATA: usize = 256;
+const MAXIO: usize = 4096 - DATA;
+const BS: usize = 4096;
+
+// ---- backend protocols (see storage.rs) ----
+const ROFS_READ: u64 = 30;
+const ROFS_LIST: u64 = 31;
+const ROFS_STAT: u64 = 32;
+const LFS_PUT: u64 = 40;
+const LFS_GET: u64 = 41;
+const LFS_SYNC: u64 = 42;
+const LFS_DEL: u64 = 44;
+const LFS_EPOCH: u64 = 47;
+
+// ---- server memory map & capability slots (kernel policy, see task.rs) ----
+const SL_ROFS_EP: u64 = 1;
+const SL_ROFS_SHM: u64 = 2;
+const SL_LFS_EP: u64 = 3;
+const SL_LFS_SHM: u64 = 4;
+const VA_ROFS: usize = 0x8024_0000;
+const VA_LFS: usize = 0x8025_0000;
+const VA_CLIENT0: usize = 0x8026_0000; // sender 0: test conductor
+const VA_CLIENT8: usize = 0x8027_0000; // sender 8: application
+const VA_SHELL: usize = 0x8028_0000; // sender SHELL_SENDER: the shell
+/// Pages for programs with file-system access: session k of the kernel's pool is VFS capability slot 16 + k.
+const VA_PROG0: usize = 0x8029_0000;
+const PROG_SESSIONS: usize = 8;
+static SHELL_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(20);
+
+/// The desktop's task id (the one task of role 13; 20 on the QEMU machine, earlier where there is no display or keyboard
+/// driver before it): looked up when the server starts.
+fn find_shell() {
+    for t in 0..64u64 {
+        let r = sysinfo_at(3, t);
+        if r[0] as i64 == 0 && r[3] != 0 && r[5] == 13 {
+            SHELL_TASK.store(t, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+fn page(va: usize) -> &'static mut [u8; BS] {
+    unsafe { &mut *(va as *mut [u8; BS]) }
+}
+
+/// Backends restart on crash and every request is idempotent, so retry on E_DEAD.
+fn backend(ep: u64, w: [u64; 3]) -> Option<[u64; 3]> {
+    for _ in 0..6 {
+        let (st, r) = call(ep, w);
+        if st == E_DEAD {
+            sleep(2);
+            continue;
+        }
+        return if st == 0 { Some(r) } else { None };
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// path handling
+// ---------------------------------------------------------------------------
+fn norm(p: &str) -> Option<String> {
+    if !p.starts_with('/') {
+        return None;
+    }
+    let mut out = String::new();
+    for c in p.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => return None,
+            _ => {
+                out.push('/');
+                out.push_str(c);
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    (out.len() < 64).then_some(out)
+}
+
+enum Route {
+    Root,
+    Rofs(String),
+    Data(String),
+}
+
+fn route(p: &str) -> Option<Route> {
+    if p == "/" {
+        return Some(Route::Root);
+    }
+    for (prefix, mk) in [("/system", true), ("/data", false)] {
+        if p == prefix || p.strip_prefix(prefix).map_or(false, |r| r.starts_with('/')) {
+            let rest = &p[prefix.len()..];
+            let rest = if rest.is_empty() { String::from("/") } else { String::from(rest) };
+            return Some(if mk { Route::Rofs(rest) } else { Route::Data(rest) });
+        }
+    }
+    None
+}
+
+/// The route of a path as a program confined to `scope` sees it: `/data/...` is `scope/...` (the program cannot name anything outside:
+/// `..` is refused by `norm`, and the rewrite happens after it), `/system` and `/` are as for everyone. None if the result would
+/// not fit a directory entry.
+fn route_scoped(p: &str, scope: Option<&str>) -> Option<Route> {
+    match (route(p)?, scope) {
+        (Route::Data(rest), Some(sc)) => {
+            let full = if rest == "/" { String::from(sc) } else { alloc::format!("{sc}{rest}") };
+            (full.len() < 64).then_some(Route::Data(full))
+        }
+        (r, _) => Some(r),
+    }
+}
+
+/// Entries under a scope (what the quota counts).
+fn scope_entries(ds: &Datafs, sc: &str) -> usize {
+    let prefix = alloc::format!("{sc}/");
+    ds.ents.iter().filter(|e| e.ino != 0 && e.path().starts_with(prefix.as_str())).count()
+}
+
+// ---------------------------------------------------------------------------
+// /system backend calls
+// ---------------------------------------------------------------------------
+fn rofs_path(p: &str) {
+    let pg = page(va(VA_ROFS));
+    pg[..p.len()].copy_from_slice(p.as_bytes());
+    pg[p.len()] = 0;
+}
+
+fn rofs_stat(p: &str) -> Result<(u64, u64), u64> {
+    rofs_path(p);
+    let r = backend(SL_ROFS_EP, [ROFS_STAT, 0, 0]).ok_or(EIO)?;
+    if r[0] == 0 { Ok((r[2], r[1])) } else { Err(ENOENT) }
+}
+
+fn rofs_read(p: &str, off: u64, out: &mut [u8]) -> Result<usize, u64> {
+    rofs_path(p);
+    let r = backend(SL_ROFS_EP, [ROFS_READ, off, out.len() as u64]).ok_or(EIO)?;
+    match r[0] {
+        0 => {
+            let n = r[1] as usize;
+            out[..n].copy_from_slice(&page(va(VA_ROFS))[DATA..DATA + n]);
+            Ok(n)
+        }
+        1 => Err(ENOENT),
+        3 => Err(EISDIR),
+        _ => Err(EIO),
+    }
+}
+
+fn rofs_list(p: &str) -> Result<Vec<u8>, u64> {
+    rofs_path(p);
+    let r = backend(SL_ROFS_EP, [ROFS_LIST, 0, 0]).ok_or(EIO)?;
+    match r[0] {
+        0 => Ok(page(va(VA_ROFS))[DATA..DATA + r[1] as usize].to_vec()),
+        1 => Err(ENOENT),
+        _ => Err(EISDIR),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /data file layer over LFS blocks
+// ---------------------------------------------------------------------------
+const META_KEY: u64 = 0;
+/// The block listing the in-place update sessions that have not committed yet (see `Session`).
+const JOURNAL_KEY: u64 = 1;
+const JOURNAL_MAGIC: u32 = 0x4C4E_4A56; // "VJNL"
+/// "VFS2": inode numbers come in pairs (see `Shadow`); a table of the older layout is not read.
+const MAGIC: u32 = 0x3253_4656;
+const NENT: usize = 51;
+const ENT_SZ: usize = 80;
+const KIND_FILE: u8 = 1;
+const KIND_DIR: u8 = 2;
+
+#[derive(Clone, Copy)]
+struct Ent {
+    path: [u8; 64],
+    ino: u32, // 0 = free slot
+    kind: u8,
+    size: u64,
+}
+
+impl Ent {
+    const FREE: Ent = Ent { path: [0; 64], ino: 0, kind: 0, size: 0 };
+    fn path(&self) -> &str {
+        let n = self.path.iter().position(|&c| c == 0).unwrap_or(64);
+        core::str::from_utf8(&self.path[..n]).unwrap_or("")
+    }
+}
+
+/// The epoch of the store instance that answered last (see `LFS_EPOCH` in storage.rs). 0 = none yet.
+static LAST_EPOCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn note_epoch(r: [u64; 3]) -> [u64; 3] {
+    LAST_EPOCH.store(r[1], core::sync::atomic::Ordering::Relaxed);
+    r
+}
+
+fn last_epoch() -> u64 {
+    LAST_EPOCH.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Ask the store which instance it is. A different answer than before means it restarted since, and lost every
+/// block that had been staged but not synced.
+fn lfs_epoch() -> Result<u64, u64> {
+    backend(SL_LFS_EP, [LFS_EPOCH, 0, 0]).map(note_epoch).map(|r| r[1]).ok_or(EIO)
+}
+
+/// Ok(true): the block is in the page; Ok(false): the store has no such block (a hole). Any other answer is an
+/// error: taking a failed read for a hole would hand zeros to the reader.
+fn lfs_get(key: u64) -> Result<bool, u64> {
+    match note_epoch(backend(SL_LFS_EP, [LFS_GET, key, 0]).ok_or(EIO)?)[0] {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(EIO),
+    }
+}
+fn lfs_put(key: u64) -> Result<(), u64> {
+    match backend(SL_LFS_EP, [LFS_PUT, key, 0]).map(note_epoch) {
+        Some(r) if r[0] == 0 => Ok(()),
+        _ => Err(EIO),
+    }
+}
+fn lfs_del(key: u64) -> Result<(), u64> {
+    backend(SL_LFS_EP, [LFS_DEL, key, 0]).map(note_epoch).map(|_| ()).ok_or(EIO)
+}
+/// Test hook: make the next `lfs_sync` report an I/O error without asking the store.
+static FAIL_NEXT_SYNC: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Make everything staged so far durable, provided it was all staged with the store instance that answered last
+/// (the one that took the puts just before this call): if that instance has gone, the sync is refused.
+fn lfs_sync() -> Result<(), u64> {
+    if FAIL_NEXT_SYNC.swap(false, core::sync::atomic::Ordering::Relaxed) {
+        return Err(EIO);
+    }
+    match backend(SL_LFS_EP, [LFS_SYNC, 0, last_epoch()]) {
+        Some(r) if r[0] == 0 => Ok(()),
+        _ => Err(EIO),
+    }
+}
+
+/// The uncommitted new version of a file that a writer is *replacing* (opened with O_TRUNC). Every file
+/// owns a *pair* of inode numbers
+/// (`ino` and `ino ^ 1`): the directory table points at one, and a writer builds the next version in the
+/// other. Readers keep seeing the committed version; the close that flips the table (one checkpoint)
+/// is the commit. A writer that dies midway leaves blocks nothing refers to, never a half-written file.
+#[derive(Clone, Copy)]
+struct Shadow {
+    ino: u32,
+    size: u64,
+    /// The store instance this writer's blocks were staged with: if the store has restarted by the time the
+    /// writer closes, the blocks are gone and the commit must fail (see `LFS_EPOCH`).
+    epoch: u64,
+}
+
+/// An in-place update in progress (a writer opened *without* O_TRUNC). The new bytes go straight into the
+/// file's own blocks, so before a block is first overwritten its old content is copied to an *undo* block.
+/// The session's record (inode, generation, size before) is kept in the journal block, and every checkpoint
+/// writes the journal together with the data it covers, so whichever checkpoint a crash finds, it also finds
+/// what is needed to take the file back to its size and content before the session. Closing the writer ends
+/// the session in one checkpoint (journal entry removed, new size committed). A session that never closes is
+/// rolled back: at restart, or when the next writer opens the file. The result is that an in-place update
+/// either happens completely or not at all, at a cost of one extra copy per block touched.
+struct Session {
+    /// Distinguishes this session's undo blocks from leftovers of earlier ones (see `undo_key`).
+    gen: u32,
+    old_size: u64,
+    /// The store instance holding the journal entry and the undo blocks (see `Shadow::epoch`).
+    epoch: u64,
+    /// Blocks of the old file already copied to undo blocks, one bit each.
+    logged: Vec<u64>,
+}
+
+fn key(ino: u32, blk: u64) -> u64 {
+    (ino as u64) << 32 | blk
+}
+
+/// Undo blocks live in a key space of their own: inode numbers have their top bit set (real ones never do:
+/// `create` stops before) and the session generation sits above the block number.
+fn undo_key(ino: u32, gen: u32, blk: u64) -> u64 {
+    key(ino | 0x8000_0000, (gen as u64 & 0xFFFF) << 16 | blk)
+}
+
+struct Datafs {
+    next_ino: u32,
+    ents: [Ent; NENT],
+    dirty: bool,
+    /// The uncommitted next version of each entry, if a writer has one (memory only: lost with the VFS).
+    shadow: [Option<Shadow>; NENT],
+    /// Bumped whenever a writer opens: an older writer's descriptor stops working, so a client that
+    /// died holding a file open can never wedge it.
+    wgen: [u32; NENT],
+    /// The in-place update in progress for each entry, if any (also recorded in the journal block).
+    session: [Option<Session>; NENT],
+    next_gen: u32,
+    /// The journal block has to be rewritten at the next flush.
+    jdirty: bool,
+}
+
+impl Datafs {
+    fn load() -> Datafs {
+        let mut d = Datafs {
+            next_ino: 2,
+            ents: [Ent::FREE; NENT],
+            dirty: false,
+            shadow: [None; NENT],
+            wgen: [0; NENT],
+            session: core::array::from_fn(|_| None),
+            next_gen: 1,
+            jdirty: false,
+        };
+        match lfs_get(META_KEY) {
+            Ok(true) => {
+                let pg = page(va(VA_LFS));
+                if u32::from_le_bytes(pg[0..4].try_into().unwrap()) == MAGIC {
+                    d.next_ino = u32::from_le_bytes(pg[4..8].try_into().unwrap());
+                    d.next_gen = u32::from_le_bytes(pg[8..12].try_into().unwrap()).max(1);
+                    for (i, e) in d.ents.iter_mut().enumerate() {
+                        let b = &pg[16 + i * ENT_SZ..16 + (i + 1) * ENT_SZ];
+                        e.path.copy_from_slice(&b[..64]);
+                        e.ino = u32::from_le_bytes(b[64..68].try_into().unwrap());
+                        e.kind = b[68];
+                        e.size = u64::from_le_bytes(b[72..80].try_into().unwrap());
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(_) => {
+                // Starting "empty" here would overwrite real data at the next flush.
+                println!("[vfs] cannot read /data metadata; refusing to start");
+                exit(1)
+            }
+        }
+        d.recover();
+        d
+    }
+
+    /// Roll back every in-place update that was in progress when the previous VFS died or the power failed.
+    fn recover(&mut self) {
+        match lfs_get(JOURNAL_KEY) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(_) => {
+                println!("[vfs] cannot read the /data journal; refusing to start");
+                exit(1)
+            }
+        }
+        let pg = page(va(VA_LFS));
+        if u32::from_le_bytes(pg[0..4].try_into().unwrap()) != JOURNAL_MAGIC {
+            return;
+        }
+        let mut found = [(0u32, 0u32, 0u64); NENT];
+        for (i, f) in found.iter_mut().enumerate() {
+            let b = &pg[16 + i * 16..32 + i * 16];
+            *f = (u32::from_le_bytes(b[0..4].try_into().unwrap()), u32::from_le_bytes(b[4..8].try_into().unwrap()), u64::from_le_bytes(b[8..16].try_into().unwrap()));
+        }
+        let mut rolled = 0;
+        let mut garbage = Vec::new();
+        for (i, &(ino, gen, old_size)) in found.iter().enumerate() {
+            if ino == 0 {
+                continue;
+            }
+            if self.ents[i].ino == ino {
+                let cur = self.ents[i].size;
+                if Self::restore(ino, gen, old_size, cur).is_err() {
+                    println!("[vfs] cannot roll back an unfinished update; refusing to start");
+                    exit(1)
+                }
+                self.ents[i].size = old_size;
+                rolled += 1;
+            }
+            garbage.push((undo_key(ino, gen, 0), Self::blocks(old_size)));
+        }
+        self.jdirty = true;
+        self.dirty = true;
+        if self.flush().is_err() {
+            println!("[vfs] cannot commit the rollback; refusing to start");
+            exit(1)
+        }
+        Self::reap(&garbage);
+        println!("[vfs] rolled back {rolled} unfinished in-place update(s)");
+    }
+
+    /// Put the file `ino` back as it was before the session `gen`: restore the blocks that were logged, and drop
+    /// the blocks the session added past the old end. (Staged only: the caller commits.)
+    fn restore(ino: u32, gen: u32, old_size: u64, cur_size: u64) -> Result<(), u64> {
+        for b in 0..Self::blocks(old_size) {
+            if lfs_get(undo_key(ino, gen, b))? {
+                lfs_put(key(ino, b))?; // the page now holds the old content
+            }
+        }
+        for b in Self::blocks(old_size)..Self::blocks(cur_size.max(old_size)) {
+            lfs_del(key(ino, b))?;
+        }
+        Ok(())
+    }
+
+    /// Persist directory table and make everything written so far durable.
+    fn flush(&mut self) -> Result<(), u64> {
+        let pg = page(va(VA_LFS));
+        pg.fill(0);
+        pg[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        pg[4..8].copy_from_slice(&self.next_ino.to_le_bytes());
+        pg[8..12].copy_from_slice(&self.next_gen.to_le_bytes());
+        for (i, e) in self.ents.iter().enumerate() {
+            let b = &mut pg[16 + i * ENT_SZ..16 + (i + 1) * ENT_SZ];
+            b[..64].copy_from_slice(&e.path);
+            b[64..68].copy_from_slice(&e.ino.to_le_bytes());
+            b[68] = e.kind;
+            b[72..80].copy_from_slice(&e.size.to_le_bytes());
+        }
+        lfs_put(META_KEY)?;
+        if self.jdirty {
+            pg.fill(0);
+            pg[0..4].copy_from_slice(&JOURNAL_MAGIC.to_le_bytes());
+            for (i, s) in self.session.iter().enumerate() {
+                if let Some(s) = s {
+                    let b = &mut pg[16 + i * 16..32 + i * 16];
+                    b[0..4].copy_from_slice(&self.ents[i].ino.to_le_bytes());
+                    b[4..8].copy_from_slice(&s.gen.to_le_bytes());
+                    b[8..16].copy_from_slice(&s.old_size.to_le_bytes());
+                }
+            }
+            lfs_put(JOURNAL_KEY)?;
+        }
+        lfs_sync()?;
+        self.dirty = false;
+        self.jdirty = false;
+        Ok(())
+    }
+
+    fn find(&self, p: &str) -> Option<usize> {
+        self.ents.iter().position(|e| e.ino != 0 && e.path() == p)
+    }
+
+    fn parent_is_dir(&self, p: &str) -> bool {
+        match p.rfind('/') {
+            Some(0) => true,
+            Some(i) => self.find(&p[..i]).map_or(false, |x| self.ents[x].kind == KIND_DIR),
+            None => false,
+        }
+    }
+
+    fn create(&mut self, p: &str, kind: u8) -> Result<usize, u64> {
+        if self.find(p).is_some() {
+            return Err(EEXIST);
+        }
+        if !self.parent_is_dir(p) {
+            return Err(ENOENT);
+        }
+        let slot = self.ents.iter().position(|e| e.ino == 0).ok_or(ENOSPC)?;
+        if self.next_ino >= 0x7FFF_FFF0 {
+            return Err(ENOSPC); // inode numbers must stay below the undo key space (see `undo_key`)
+        }
+        let mut e = Ent::FREE;
+        e.path[..p.len()].copy_from_slice(p.as_bytes());
+        e.ino = self.next_ino;
+        e.kind = kind;
+        self.next_ino += 2; // a pair: the file's current and its shadow inode
+        self.ents[slot] = e;
+        self.dirty = true;
+        Ok(slot)
+    }
+
+    fn blocks(size: u64) -> u64 {
+        size.div_ceil(BS as u64)
+    }
+
+    /// A writer opens `slot`. It supersedes any earlier writer, and an in-place update the earlier writer left
+    /// unfinished is rolled back first. A *replacing* writer (`truncate`) builds its version in the shadow
+    /// inode and commits it atomically at close; any other writer updates the file in place under an undo
+    /// session (see `Session`), which is started by its first write.
+    fn open_writer(&mut self, slot: usize, truncate: bool) -> Result<u32, u64> {
+        self.abandon_session(slot)?;
+        let epoch = if truncate { lfs_epoch()? } else { 0 };
+        self.wgen[slot] = self.wgen[slot].wrapping_add(1);
+        self.shadow[slot] = truncate.then(|| Shadow { ino: self.ents[slot].ino ^ 1, size: 0, epoch });
+        Ok(self.wgen[slot])
+    }
+
+    /// Undo and end the in-place update in progress on `slot`, if any.
+    fn abandon_session(&mut self, slot: usize) -> Result<(), u64> {
+        let Some(s) = self.session[slot].take() else { return Ok(()) };
+        let (ino, cur) = (self.ents[slot].ino, self.ents[slot].size);
+        if let Err(e) = Self::restore(ino, s.gen, s.old_size, cur) {
+            self.session[slot] = Some(s);
+            return Err(e);
+        }
+        self.ents[slot].size = s.old_size;
+        self.jdirty = true;
+        self.dirty = true;
+        if let Err(e) = self.flush() {
+            self.ents[slot].size = cur;
+            self.session[slot] = Some(s);
+            return Err(e);
+        }
+        Self::reap(&[(undo_key(ino, s.gen, 0), Self::blocks(s.old_size))]);
+        Ok(())
+    }
+
+    /// Start an in-place update session on `slot` and make its journal entry durable before any block of the
+    /// file is touched.
+    fn begin_session(&mut self, slot: usize) -> Result<(), u64> {
+        let old_size = self.ents[slot].size;
+        self.session[slot] = Some(Session { gen: self.next_gen, old_size, epoch: 0, logged: vec![0; Self::blocks(old_size).div_ceil(64) as usize] });
+        self.next_gen = self.next_gen.wrapping_add(1).max(1);
+        self.jdirty = true;
+        self.dirty = true;
+        if let Err(e) = self.flush() {
+            self.session[slot] = None;
+            return Err(e);
+        }
+        if let Some(s) = self.session[slot].as_mut() {
+            s.epoch = last_epoch(); // the instance that just made the journal entry durable
+        }
+        Ok(())
+    }
+
+    /// Before block `blk` of the file is overwritten in place, keep its old content (once per session).
+    fn log_block(&mut self, slot: usize, blk: u64) -> Result<(), u64> {
+        let ino = self.ents[slot].ino;
+        let Some(s) = self.session[slot].as_mut() else { return Ok(()) };
+        if blk >= Self::blocks(s.old_size) || s.logged[(blk / 64) as usize] >> (blk % 64) & 1 == 1 {
+            return Ok(()); // beyond the old end (rollback drops it), or saved already
+        }
+        if !lfs_get(key(ino, blk))? {
+            page(va(VA_LFS)).fill(0); // a hole reads as zeros
+        }
+        lfs_put(undo_key(ino, s.gen, blk))?;
+        s.logged[(blk / 64) as usize] |= 1 << (blk % 64);
+        Ok(())
+    }
+
+    /// Where the next write goes: (inode, current size). The shadow if there is one, else the file itself.
+    fn target(&self, slot: usize) -> (u32, u64) {
+        match self.shadow[slot] {
+            Some(sh) => (sh.ino, sh.size),
+            None => (self.ents[slot].ino, self.ents[slot].size),
+        }
+    }
+
+    fn read_blocks(ino: u32, size: u64, off: u64, out: &mut [u8]) -> Result<usize, u64> {
+        if off >= size {
+            return Ok(0);
+        }
+        let total = out.len().min((size - off) as usize);
+        let mut done = 0;
+        while done < total {
+            let pos = off + done as u64;
+            let (blk, inb) = (pos / BS as u64, (pos % BS as u64) as usize);
+            let n = (total - done).min(BS - inb);
+            if lfs_get(key(ino, blk))? {
+                out[done..done + n].copy_from_slice(&page(va(VA_LFS))[inb..inb + n]);
+            } else {
+                out[done..done + n].fill(0); // hole
+            }
+            done += n;
+        }
+        Ok(total)
+    }
+
+    /// Read from the committed version, or (`writer`) from the writer's own version if it has one.
+    fn read(&self, slot: usize, off: u64, out: &mut [u8], writer: bool) -> Result<usize, u64> {
+        match self.shadow[slot].filter(|_| writer) {
+            Some(sh) => Self::read_blocks(sh.ino, sh.size, off, out),
+            None => Self::read_blocks(self.ents[slot].ino, self.ents[slot].size, off, out),
+        }
+    }
+
+    /// Make bytes `from..to` of the shadow read as zeros, block by block. Files are kept *dense*: a block
+    /// left behind by an interrupted earlier write must never show through as content.
+    fn zero_range(ino: u32, from: u64, to: u64) -> Result<(), u64> {
+        let (bs, mut b) = (BS as u64, from / BS as u64);
+        if from % bs != 0 {
+            // the end of the block holding `from`: keep what is below it, zero the rest
+            if lfs_get(key(ino, b))? {
+                page(va(VA_LFS))[(from % bs) as usize..].fill(0);
+                lfs_put(key(ino, b))?;
+            }
+            b += 1;
+        }
+        while b < to / bs {
+            page(va(VA_LFS)).fill(0);
+            lfs_put(key(ino, b))?;
+            b += 1;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, slot: usize, off: u64, data: &[u8]) -> Result<usize, u64> {
+        if off.checked_add(data.len() as u64).map_or(true, |end| end > MAX_FILE) {
+            return Err(ENOSPC); // file too large
+        }
+        let in_place = self.shadow[slot].is_none();
+        if in_place && self.session[slot].is_none() {
+            self.begin_session(slot)?;
+        }
+        let (ino, size) = self.target(slot);
+        if off > size {
+            if in_place && size % BS as u64 != 0 {
+                self.log_block(slot, size / BS as u64)?; // zeroing the end of the last block changes it
+            }
+            Self::zero_range(ino, size, off)?;
+        }
+        let mut done = 0;
+        while done < data.len() {
+            let pos = off + done as u64;
+            let (blk, inb) = (pos / BS as u64, (pos % BS as u64) as usize);
+            let n = (data.len() - done).min(BS - inb);
+            if in_place {
+                self.log_block(slot, blk)?;
+            }
+            let k = key(ino, blk);
+            if n < BS {
+                // partial block: read-modify-write. Only the part below the old end of file is content.
+                let valid = size.saturating_sub(blk * BS as u64).min(BS as u64) as usize;
+                if valid > 0 && lfs_get(k)? {
+                    page(va(VA_LFS))[valid..].fill(0);
+                } else {
+                    page(va(VA_LFS)).fill(0);
+                }
+            }
+            page(va(VA_LFS))[inb..inb + n].copy_from_slice(&data[done..done + n]);
+            lfs_put(k)?;
+            done += n;
+        }
+        let new_size = size.max(off + data.len() as u64);
+        match &mut self.shadow[slot] {
+            Some(sh) => sh.size = new_size,
+            None => self.ents[slot].size = new_size,
+        }
+        self.dirty = true;
+        Ok(done)
+    }
+
+    /// The writer closes: flip the file to its new version in one checkpoint, then free the old blocks.
+    fn commit(&mut self, slot: usize) -> Result<(), u64> {
+        if let Some(sh) = self.shadow[slot].take() {
+            // Blocks staged with a store instance that has since restarted are gone; flipping the table to them
+            // would publish a file whose data reads back as zeros or as an older version.
+            if lfs_epoch()? != sh.epoch {
+                return Err(EIO);
+            }
+            let (old_ino, old_size) = (self.ents[slot].ino, self.ents[slot].size);
+            self.ents[slot].ino = sh.ino;
+            self.ents[slot].size = sh.size;
+            self.dirty = true;
+            if let Err(e) = self.flush() {
+                // The checkpoint did not complete. The store may even have lost the blocks of the new version
+                // (it restarts from its last checkpoint), so the table must not point at them: keep serving the
+                // old version, which is still intact, and let the next flush rewrite the table.
+                self.ents[slot].ino = old_ino;
+                self.ents[slot].size = old_size;
+                return Err(e);
+            }
+            Self::reap(&[(key(old_ino, 0), Self::blocks(old_size))]);
+        } else if self.session[slot].as_ref().is_some_and(|s| s.epoch != lfs_epoch().unwrap_or(0)) {
+            // the store restarted during the update and lost what it had staged; what survives is a consistent
+            // checkpoint of the file as the journal describes it, so take the update back
+            self.abandon_session(slot)?;
+            return Err(EIO);
+        } else if let Some(s) = self.session[slot].take() {
+            // the update is complete: the new size and the end of the session commit together
+            self.jdirty = true;
+            self.dirty = true;
+            if let Err(e) = self.flush() {
+                self.session[slot] = Some(s);
+                return Err(e);
+            }
+            Self::reap(&[(undo_key(self.ents[slot].ino, s.gen, 0), Self::blocks(s.old_size))]);
+        } else if self.dirty {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// Delete blocks nothing refers to any more: for each `(first key, count)`, that many consecutive keys.
+    /// Errors are ignored: this is only garbage collection.
+    fn reap(garbage: &[(u64, u64)]) {
+        for &(first, count) in garbage {
+            for b in 0..count {
+                let _ = lfs_del(first + b);
+            }
+        }
+    }
+
+    /// Remove entry `i`. Returns the blocks to free *after* the table has been committed: deleting them
+    /// first would leave, after a crash, a committed file whose blocks are gone.
+    fn unlink(&mut self, i: usize) -> Result<Vec<(u64, u64)>, u64> {
+        let mut garbage = Vec::new();
+        if self.ents[i].kind == KIND_DIR {
+            let prefix = alloc::format!("{}/", self.ents[i].path());
+            if self.ents.iter().any(|e| e.ino != 0 && e.path().starts_with(prefix.as_str())) {
+                return Err(ENOTEMPTY);
+            }
+        } else {
+            garbage.push((key(self.ents[i].ino, 0), Self::blocks(self.ents[i].size)));
+            if let Some(sh) = self.shadow[i].take() {
+                garbage.push((key(sh.ino, 0), Self::blocks(sh.size)));
+            }
+            if let Some(s) = self.session[i].take() {
+                // the file goes, and with it the update; the undo blocks go after the commit like the rest
+                garbage.push((undo_key(self.ents[i].ino, s.gen, 0), Self::blocks(s.old_size)));
+                self.jdirty = true;
+            }
+        }
+        self.wgen[i] = self.wgen[i].wrapping_add(1); // any writer still holding the file loses it
+        self.ents[i] = Ent::FREE;
+        self.dirty = true;
+        Ok(garbage)
+    }
+
+    /// Move `from` (a file, or a directory and everything under it) to `to`, which must not exist and whose parent must be a directory.
+    /// Only the paths change (the contents are keyed by inode): the next flush commits the whole move at once.
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), u64> {
+        let i = self.find(from).ok_or(ENOENT)?;
+        if from == to {
+            return Ok(());
+        }
+        if self.find(to).is_some() {
+            return Err(EEXIST);
+        }
+        let is_dir = self.ents[i].kind == KIND_DIR;
+        let prefix = alloc::format!("{from}/");
+        if is_dir && to.starts_with(prefix.as_str()) {
+            return Err(EINVAL); // (a directory into itself)
+        }
+        if !self.parent_is_dir(to) {
+            return Err(ENOENT);
+        }
+        let moves: Vec<(usize, String)> = self
+            .ents
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.ino != 0 && (e.path() == from || (is_dir && e.path().starts_with(prefix.as_str()))))
+            .map(|(k, e)| (k, alloc::format!("{to}{}", &e.path()[from.len()..])))
+            .collect();
+        if moves.iter().any(|(_, p)| p.len() >= 64) {
+            return Err(EINVAL); // a new path would not fit an entry: nothing moves
+        }
+        for (k, p) in moves {
+            let e = &mut self.ents[k];
+            e.path = [0; 64];
+            e.path[..p.len()].copy_from_slice(p.as_bytes());
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn list(&self, dir: &str) -> Vec<u8> {
+        let prefix = if dir == "/" { String::from("/") } else { alloc::format!("{dir}/") };
+        let mut out = Vec::new();
+        for e in self.ents.iter().filter(|e| e.ino != 0) {
+            if let Some(rest) = e.path().strip_prefix(prefix.as_str()) {
+                if !rest.is_empty() && !rest.contains('/') {
+                    out.extend_from_slice(rest.as_bytes());
+                    if e.kind == KIND_DIR {
+                        out.push(b'/');
+                    }
+                    out.push(b'\n');
+                }
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the server
+// ---------------------------------------------------------------------------
+#[derive(Clone)]
+enum Fd {
+    Free,
+    Rofs { path: String, off: u64 },
+    Data { slot: usize, ino: u32, off: u64, flags: u64, gen: u32 },
+}
+
+const FDS: usize = 16;
+
+/// The page of `sender`'s session, whether this is a new program in that task slot (its descriptor table must
+/// start empty), and whose descriptor table it is (the program's, for a thread). Programs started with file-system access are known to the kernel, which says which page is theirs.
+fn client_page(sender: u64, gens: &mut [u64]) -> Option<(usize, bool, usize)> {
+    match sender {
+        0 => Some((va(VA_CLIENT0), false, 0)),
+        8 => Some((va(VA_CLIENT8), false, 8)),
+        s if s == SHELL_TASK.load(core::sync::atomic::Ordering::Relaxed) => Some((va(VA_SHELL), false, s as usize)),
+        s if s >= 27 && (s as usize) < gens.len() => {
+            let r = sysinfo_at(5, s);
+            // (the threads of a program share its session, and so its descriptors: `r[3]` is the program)
+            let (page, gen, owner) = (r[1] as usize, r[2], r[3] as usize);
+            if page >= PROG_SESSIONS || owner >= gens.len() {
+                return None;
+            }
+            let fresh = gens[owner] != gen;
+            gens[owner] = gen;
+            Some((va(VA_PROG0 + page * 0x1000), fresh, owner))
+        }
+        _ => None,
+    }
+}
+
+fn get_path(pg: &[u8; BS]) -> Option<String> {
+    let n = pg[..DATA].iter().position(|&c| c == 0)?;
+    norm(core::str::from_utf8(&pg[..n]).ok()?)
+}
+
+pub fn vfs_server() -> ! {
+    find_shell();
+    let maps = [(SL_ROFS_SHM, VA_ROFS), (SL_LFS_SHM, VA_LFS), (5, VA_CLIENT0), (6, VA_CLIENT8), (7, VA_SHELL)];
+    for (slot, va) in maps.into_iter().chain((0..PROG_SESSIONS).map(|k| (16 + k as u64, VA_PROG0 + k * 0x1000))) {
+        if mem_map(slot, va, true) != 0 {
+            println!("[vfs] mapping failed");
+            exit(1);
+        }
+    }
+    let mut ds = Datafs::load();
+    println!("[vfs] up: /system (EROFS, read-only), /data (log-structured, {} entries)", ds.ents.iter().filter(|e| e.ino != 0).count());
+    let mut fds: Vec<Vec<Fd>> = (0..64).map(|_| vec![Fd::Free; FDS]).collect();
+    let mut gens = [0u64; 64];
+    // per program: (the generation of its session, the directory it is confined to); valid only while the generation matches
+    let mut scopes: Vec<Option<(u64, String)>> = (0..64).map(|_| None).collect();
+    loop {
+        let m = recv(0);
+        let Some((va, fresh, who)) = client_page(m.sender, &mut gens) else {
+            reply([EINVAL, 0, 0]);
+            continue;
+        };
+        if fresh {
+            fds[who] = vec![Fd::Free; FDS]; // a new program in that task slot: nothing of its predecessor's is open
+        }
+        if (m.w[0] == V_CRASH || m.w[0] == V_FAIL_SYNC) && m.sender != 0 {
+            reply([EINVAL, 0, 0]); // fault injection is the test conductor's tool, not every client's
+            continue;
+        }
+        let pg = page(va);
+        if m.w[0] == V_SCOPE {
+            reply(scope_request(&ds, &mut scopes, &gens, who, pg, m.w[1]));
+            continue;
+        }
+        let table = &mut fds[who];
+        let scope = scopes[who].as_ref().filter(|(g, _)| *g == gens[who]).map(|(_, d)| d.clone());
+        let r = handle(&mut ds, table, pg, m.w, scope.as_deref());
+        reply(r);
+    }
+}
+
+/// `V_SCOPE`: the caller (program `who`) confines its child `w1` to the directory in the page. Only the program's parent may
+/// (the kernel says who that is), only while the child has a file session, and the directory is named as the *caller* sees it, so
+/// a caller that is itself confined can only narrow, never widen. The child is confined from its first request: it is
+/// normally still an embryo when this arrives (see `metal_loader::spawn_with`).
+fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64], who: usize, pg: &[u8; BS], child: u64) -> [u64; 3] {
+    let err = |e: u64| [e, 0, 0];
+    let child = child as usize;
+    if child >= scopes.len() || child == who {
+        return err(EINVAL);
+    }
+    let r = sysinfo_at(5, child as u64);
+    let (page, gen, owner, parent) = (r[1] as usize, r[2], r[3] as usize, r[4] as usize);
+    if page >= PROG_SESSIONS || owner != child {
+        return err(EINVAL);
+    }
+    if parent != who {
+        return err(EPERM);
+    }
+    let Some(p) = get_path(pg) else { return err(EINVAL) };
+    let mine = scopes[who].as_ref().filter(|(g, _)| *g == gens[who]).map(|(_, d)| d.as_str());
+    let Some(Route::Data(full)) = route_scoped(&p, mine) else { return err(EINVAL) };
+    if full == "/" || ds.find(&full).map_or(true, |s| ds.ents[s].kind != KIND_DIR) {
+        return err(ENOENT);
+    }
+    scopes[child] = Some((gen, full));
+    [0, 0, 0]
+}
+
+fn fd_slot(table: &[Fd], fd: u64) -> Option<usize> {
+    let i = fd as usize;
+    (i < FDS && !matches!(table[i], Fd::Free)).then_some(i)
+}
+
+fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], scope: Option<&str>) -> [u64; 3] {
+    let err = |e: u64| [e, 0, 0];
+    match w[0] {
+        V_OPEN => {
+            let Some(p) = get_path(pg) else { return err(EINVAL) };
+            let flags = w[1];
+            let Some(fi) = table.iter().position(|f| matches!(f, Fd::Free)) else { return err(ENOSPC) };
+            match route_scoped(&p, scope) {
+                None => err(ENOENT),
+                Some(Route::Root) => err(EISDIR),
+                Some(Route::Rofs(rest)) => {
+                    if flags & (O_WRITE | O_CREATE | O_TRUNC) != 0 {
+                        return err(EROFS);
+                    }
+                    match rofs_stat(&rest) {
+                        Ok((1, _)) => {
+                            table[fi] = Fd::Rofs { path: rest, off: 0 };
+                            [0, fi as u64, 0]
+                        }
+                        Ok(_) => err(EISDIR),
+                        Err(e) => err(e),
+                    }
+                }
+                Some(Route::Data(rest)) => {
+                    if rest == "/" {
+                        return err(EISDIR);
+                    }
+                    let slot = match ds.find(&rest) {
+                        Some(s) => s,
+                        None if flags & O_CREATE != 0 && scope.is_some_and(|sc| scope_entries(ds, sc) >= SCOPE_MAX_ENTRIES) => return err(ENOSPC),
+                        None if flags & O_CREATE != 0 => match ds.create(&rest, KIND_FILE) {
+                            Ok(s) => s,
+                            Err(e) => return err(e),
+                        },
+                        None => return err(ENOENT),
+                    };
+                    if ds.ents[slot].kind == KIND_DIR {
+                        return err(EISDIR);
+                    }
+                    let gen = if flags & O_WRITE != 0 {
+                        match ds.open_writer(slot, flags & O_TRUNC != 0) {
+                            Ok(g) => g,
+                            Err(e) => return err(e),
+                        }
+                    } else {
+                        0
+                    };
+                    table[fi] = Fd::Data { slot, ino: ds.ents[slot].ino, off: 0, flags, gen };
+                    [0, fi as u64, 0]
+                }
+            }
+        }
+        V_READ => {
+            let Some(i) = fd_slot(table, w[1]) else { return err(EBADF) };
+            let len = (w[2] as usize).min(MAXIO);
+            let mut buf = vec![0u8; len];
+            let res = match &mut table[i] {
+                Fd::Rofs { path, off } => rofs_read(path, *off, &mut buf).map(|n| {
+                    *off += n as u64;
+                    n
+                }),
+                Fd::Data { slot, ino, off, flags, gen } => {
+                    let writer = *flags & O_WRITE != 0;
+                    if *flags & O_READ == 0 {
+                        Err(EBADF)
+                    } else if ds.ents[*slot].ino != *ino || (writer && ds.wgen[*slot] != *gen) {
+                        Err(EBADF) // the file was unlinked or replaced underneath us
+                    } else {
+                        ds.read(*slot, *off, &mut buf, writer).map(|n| {
+                            *off += n as u64;
+                            n
+                        })
+                    }
+                }
+                Fd::Free => Err(EBADF),
+            };
+            match res {
+                Ok(n) => {
+                    pg[DATA..DATA + n].copy_from_slice(&buf[..n]);
+                    [0, n as u64, 0]
+                }
+                Err(e) => err(e),
+            }
+        }
+        V_WRITE => {
+            let Some(i) = fd_slot(table, w[1]) else { return err(EBADF) };
+            let len = (w[2] as usize).min(MAXIO);
+            match &mut table[i] {
+                Fd::Data { slot, ino, off, flags, gen } if *flags & O_WRITE != 0 && ds.ents[*slot].ino == *ino && ds.wgen[*slot] == *gen => {
+                    match ds.write(*slot, *off, &pg[DATA..DATA + len]) {
+                        Ok(n) => {
+                            *off += n as u64;
+                            [0, n as u64, 0]
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                Fd::Rofs { .. } => err(EROFS),
+                _ => err(EBADF),
+            }
+        }
+        V_SEEK => {
+            let Some(i) = fd_slot(table, w[1]) else { return err(EBADF) };
+            match &mut table[i] {
+                Fd::Rofs { off, .. } | Fd::Data { off, .. } => {
+                    if w[2] > MAX_FILE {
+                        return err(EINVAL);
+                    }
+                    *off = w[2];
+                }
+                Fd::Free => {}
+            }
+            [0, 0, 0]
+        }
+        V_CLOSE => {
+            let Some(i) = fd_slot(table, w[1]) else { return err(EBADF) };
+            let closing = core::mem::replace(&mut table[i], Fd::Free);
+            if let Fd::Data { slot, ino, flags, gen, .. } = closing {
+                if flags & O_WRITE != 0 {
+                    // only the current writer commits; one that was superseded (or whose file was removed) is told
+                    if ds.ents[slot].ino != ino || ds.wgen[slot] != gen {
+                        return err(EBADF);
+                    }
+                    if let Err(e) = ds.commit(slot) {
+                        return err(e);
+                    }
+                }
+            }
+            [0, 0, 0]
+        }
+        V_STAT | V_LIST | V_UNLINK | V_MKDIR => {
+            let Some(p) = get_path(pg) else { return err(EINVAL) };
+            let Some(rt) = route_scoped(&p, scope) else { return err(ENOENT) };
+            match (w[0], rt) {
+                (V_STAT, Route::Root) => [0, 0, 2],
+                (V_STAT, Route::Rofs(r)) => rofs_stat(&r).map_or_else(err, |(k, s)| [0, s, k]),
+                (V_STAT, Route::Data(r)) if r == "/" => [0, 0, 2],
+                (V_STAT, Route::Data(r)) => match ds.find(&r) {
+                    Some(s) => [0, ds.ents[s].size, ds.ents[s].kind as u64],
+                    None => err(ENOENT),
+                },
+                (V_LIST, rt) => {
+                    let names = match rt {
+                        Route::Root => Ok(b"system/\ndata/\n".to_vec()),
+                        Route::Rofs(r) => rofs_list(&r),
+                        Route::Data(r) => match (r == "/", ds.find(&r)) {
+                            (true, _) => Ok(ds.list("/")),
+                            (_, Some(s)) if ds.ents[s].kind == KIND_DIR => Ok(ds.list(&r)),
+                            (_, Some(_)) => Err(EISDIR),
+                            _ => Err(ENOENT),
+                        },
+                    };
+                    match names {
+                        Ok(v) => {
+                            let n = v.len().min(MAXIO);
+                            pg[DATA..DATA + n].copy_from_slice(&v[..n]);
+                            [0, n as u64, 0]
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                (_, Route::Data(r)) if r != "/" => {
+                    let res = if w[0] == V_MKDIR {
+                        if scope.is_some_and(|sc| scope_entries(ds, sc) >= SCOPE_MAX_ENTRIES) {
+                            return err(ENOSPC);
+                        }
+                        ds.create(&r, KIND_DIR).map(|_| Vec::new())
+                    } else {
+                        ds.find(&r).ok_or(ENOENT).and_then(|s| ds.unlink(s))
+                    };
+                    match res.and_then(|garbage| ds.flush().map(|_| garbage)) {
+                        Ok(garbage) => {
+                            Datafs::reap(&garbage); // after the commit, never before
+                            [0, 0, 0]
+                        }
+                        Err(e) => err(e),
+                    }
+                }
+                (_, Route::Rofs(_)) => err(EROFS),
+                _ => err(EINVAL),
+            }
+        }
+        V_RENAME => {
+            let Some(from) = get_path(pg) else { return err(EINVAL) };
+            let n = pg[..DATA].iter().position(|&c| c == 0).unwrap_or(DATA);
+            let rest = &pg[(n + 1).min(DATA)..DATA];
+            let Some(m) = rest.iter().position(|&c| c == 0) else { return err(EINVAL) };
+            let Some(to) = core::str::from_utf8(&rest[..m]).ok().and_then(norm) else { return err(EINVAL) };
+            match (route_scoped(&from, scope), route_scoped(&to, scope)) {
+                (Some(Route::Data(a)), Some(Route::Data(b))) => {
+                    // (the root of /data, or of a confined program's directory, stays where it is)
+                    let root = scope.unwrap_or("/");
+                    if a == "/" || b == "/" || a == root || b == root {
+                        return err(EINVAL);
+                    }
+                    match ds.rename(&a, &b).and_then(|_| ds.flush()) {
+                        Ok(()) => [0, 0, 0],
+                        Err(e) => err(e),
+                    }
+                }
+                (Some(Route::Rofs(_)), _) | (_, Some(Route::Rofs(_))) => err(EROFS),
+                (None, _) | (_, None) => err(ENOENT),
+                _ => err(EINVAL),
+            }
+        }
+        V_SYNC => ds.flush().map_or_else(err, |_| [0, 0, 0]),
+        V_FAIL_SYNC => {
+            FAIL_NEXT_SYNC.store(true, core::sync::atomic::Ordering::Relaxed);
+            [0, 0, 0]
+        }
+        V_CRASH => {
+            println!("[vfs] simulated fault: fd tables and unflushed metadata are lost");
+            unsafe { write_volatile(0x4000 as *mut u64, 1) };
+            err(EIO)
+        }
+        _ => err(EINVAL),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// client library (what an application links against)
+// ---------------------------------------------------------------------------
+/// Err(code): positive = VFS status, negative = IPC error (e.g. E_DEAD if the VFS crashed).
+pub type VResult<T> = Result<T, i64>;
+
+#[derive(Clone, Copy)]
+pub struct Vfs {
+    ep: u64,
+    shm: usize,
+}
+
+impl Vfs {
+    pub fn new(ep: u64, shm: usize) -> Vfs {
+        Vfs { ep, shm }
+    }
+
+    fn pg(&self) -> &'static mut [u8; BS] {
+        page(self.shm)
+    }
+
+    fn rpc(&self, op: u64, a: u64, b: u64) -> VResult<(u64, u64)> {
+        let (st, r) = call(self.ep, [op, a, b]);
+        if st != 0 {
+            return Err(st);
+        }
+        if r[0] != 0 {
+            return Err(r[0] as i64);
+        }
+        Ok((r[1], r[2]))
+    }
+
+    fn with_path(&self, p: &str, op: u64, a: u64) -> VResult<(u64, u64)> {
+        if p.len() >= DATA {
+            return Err(EINVAL as i64);
+        }
+        let pg = self.pg();
+        pg[..p.len()].copy_from_slice(p.as_bytes());
+        pg[p.len()] = 0;
+        self.rpc(op, a, 0)
+    }
+
+    pub fn open(&self, path: &str, flags: u64) -> VResult<u64> {
+        self.with_path(path, V_OPEN, flags).map(|r| r.0)
+    }
+    pub fn close(&self, fd: u64) -> VResult<()> {
+        self.rpc(V_CLOSE, fd, 0).map(|_| ())
+    }
+    pub fn seek(&self, fd: u64, off: u64) -> VResult<()> {
+        self.rpc(V_SEEK, fd, off).map(|_| ())
+    }
+    pub fn read(&self, fd: u64, buf: &mut [u8]) -> VResult<usize> {
+        let mut done = 0;
+        while done < buf.len() {
+            let want = (buf.len() - done).min(MAXIO);
+            let (n, _) = self.rpc(V_READ, fd, want as u64)?;
+            if n == 0 {
+                break;
+            }
+            buf[done..done + n as usize].copy_from_slice(&self.pg()[DATA..DATA + n as usize]);
+            done += n as usize;
+        }
+        Ok(done)
+    }
+    pub fn write(&self, fd: u64, data: &[u8]) -> VResult<usize> {
+        let mut done = 0;
+        while done < data.len() {
+            let n = (data.len() - done).min(MAXIO);
+            self.pg()[DATA..DATA + n].copy_from_slice(&data[done..done + n]);
+            let (wrote, _) = self.rpc(V_WRITE, fd, n as u64)?;
+            done += wrote as usize;
+        }
+        Ok(done)
+    }
+    pub fn stat(&self, path: &str) -> VResult<(u64, u64)> {
+        self.with_path(path, V_STAT, 0).map(|(size, kind)| (kind, size))
+    }
+    pub fn list(&self, path: &str) -> VResult<String> {
+        let (n, _) = self.with_path(path, V_LIST, 0)?;
+        Ok(String::from_utf8_lossy(&self.pg()[DATA..DATA + n as usize]).into_owned())
+    }
+    pub fn unlink(&self, path: &str) -> VResult<()> {
+        self.with_path(path, V_UNLINK, 0).map(|_| ())
+    }
+    pub fn mkdir(&self, path: &str) -> VResult<()> {
+        self.with_path(path, V_MKDIR, 0).map(|_| ())
+    }
+    pub fn crash(&self) -> i64 {
+        call(self.ep, [V_CRASH, 0, 0]).0
+    }
+    /// Test hook (conductor only): the next checkpoint the VFS asks the store for fails.
+    pub fn fail_next_sync(&self) -> i64 {
+        call(self.ep, [V_FAIL_SYNC, 0, 0]).0
+    }
+
+    /// Whole-file convenience helpers.
+    pub fn read_file(&self, path: &str) -> VResult<Vec<u8>> {
+        let (_, size) = self.stat(path)?;
+        let fd = self.open(path, O_READ)?;
+        let mut v = vec![0u8; size as usize];
+        let n = self.read(fd, &mut v);
+        self.close(fd)?;
+        v.truncate(n?);
+        Ok(v)
+    }
+    pub fn write_file(&self, path: &str, data: &[u8]) -> VResult<()> {
+        let fd = self.open(path, O_WRITE | O_CREATE | O_TRUNC)?;
+        let r = self.write(fd, data);
+        self.close(fd)?; // close commits
+        r.map(|_| ())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// role 8: an ordinary application. Holds exactly one VFS capability.
+// ---------------------------------------------------------------------------
+const PROGRAM_SHM: usize = 0x8034_0000;
+
+pub fn program() -> ! {
+    if sysinfo(2)[3] == 2 {
+        crate::sched::interactive_hog(); // scheduler tests: the program is a CPU hog of the Interactive class
+    }
+    if mem_map(1, PROGRAM_SHM, true) != 0 {
+        println!("[program] cannot map its VFS page");
+        exit(1);
+    }
+    let v = Vfs::new(0, PROGRAM_SHM);
+    println!("[program] online (capabilities: one VFS endpoint)");
+
+    let os = v.read_file("/system/etc/os-release");
+    println!("[program] TEST read /system/etc/os-release ({}): {}",
+        os.as_ref().map_or(0, |b| b.len()), verdict(os.map_or(false, |b| b.starts_with(b"NAME=MetalOS"))));
+
+    let mut log = Vec::new();
+    for i in 0..3 {
+        log.extend_from_slice(alloc::format!("line {i}\n").as_bytes());
+    }
+    let ok = v.write_file("/data/program.log", &log).is_ok();
+    // append through seek-to-end
+    let (_, size) = v.stat("/data/program.log").unwrap_or((0, 0));
+    let fd = v.open("/data/program.log", O_WRITE);
+    let ok2 = fd.and_then(|fd| {
+        v.seek(fd, size)?;
+        v.write(fd, b"line 3\n")?;
+        v.close(fd)
+    });
+    let back = v.read_file("/data/program.log");
+    println!("[program] TEST write + append + read back /data/program.log: {}",
+        verdict(ok && ok2.is_ok() && back.map_or(false, |b| b == b"line 0\nline 1\nline 2\nline 3\n")));
+
+    let names = v.list("/data").unwrap_or_default();
+    println!("[program] TEST list /data ({:?}): {}", names.replace('\n', " ").trim_end(), verdict(names.contains("program.log")));
+
+    // offsets are bounded: a huge seek must not alias another file's blocks or make truncate loop for ever
+    let big = v.open("/data/program.log", O_WRITE).and_then(|fd| {
+        let seek = v.seek(fd, 1 << 40);
+        let _ = v.close(fd);
+        seek
+    });
+    let fd = v.open("/data/program.log", O_WRITE);
+    let wr = fd.and_then(|fd| {
+        v.seek(fd, MAX_FILE - 2)?;
+        let r = v.write(fd, b"toolong");
+        let _ = v.close(fd);
+        r
+    });
+    println!("[program] TEST file size is bounded (seek past the limit {big:?}, write past it {wr:?}): {}", verdict(big == Err(EINVAL as i64) && wr == Err(ENOSPC as i64)));
+
+    let r = v.write_file("/system/hack.txt", b"x");
+    println!("[program] TEST /system rejects writes ({r:?}): {}", verdict(r == Err(EROFS as i64)));
+
+    // least privilege: no block driver, no filesystem servers, no device memory
+    let (st, _) = call(3, [BLK_READ, 0, 1]);
+    let (st2, _) = call(5, [30, 0, 0]);
+    println!("[program] TEST no direct device or filesystem access (status {st}, {st2}): {}",
+        verdict(st == E_BADCAP && st2 == E_BADCAP));
+
+    // the test-only crash hook belongs to the conductor: an ordinary client cannot kill the VFS with it
+    let (st, r) = call(0, [V_CRASH, 0, 0]);
+    println!("[program] TEST an ordinary client cannot use the VFS fault-injection hook (status {st}, reply {}): {}", r[0], verdict(st == 0 && r[0] == EINVAL));
+
+    let _ = v.write_file("/data/program.done", b"done");
+    exit(0)
+}
+
+// ---------------------------------------------------------------------------
+// conductor-side VFS tests (role 0)
+// ---------------------------------------------------------------------------
+const C_VFS_SHM: usize = 0x8034_0000;
+
+fn pat(i: usize) -> u8 {
+    (i * 13 + 5) as u8
+}
+
+/// The program task shares the data store with the conductor's direct LFS tests, and a sync by
+/// either commits everything staged by both. Let the program finish first so those tests are isolated.
+/// (It is done when its task has exited. Not when `/data/program.done` exists: on a disk that has been
+/// booted before, that file is left over from the last boot.)
+pub fn wait_for_program() {
+    for _ in 0..400 {
+        let mut alive = false;
+        for t in 0..32u64 {
+            let r = sysinfo_at(3, t);
+            if r[0] as i64 == E_INVAL {
+                break;
+            }
+            // role 8 is the program; state code 0 = free, 7 = dead
+            alive |= r[5] == 8 && r[3] != 0 && r[3] != 7;
+        }
+        if !alive {
+            return;
+        }
+        sleep(5);
+    }
+}
+
+pub fn vfs_tests() {
+    let m = mem_map(10, C_VFS_SHM, true);
+    if m != 0 && m != E_INVAL {
+        println!("[client] TEST VFS: cannot map page: FAIL");
+        return;
+    }
+    let v = Vfs::new(9, C_VFS_SHM);
+
+    let h = v.read_file("/system/hello.txt");
+    println!("[client] TEST VFS read /system/hello.txt: {}",
+        verdict(h.map_or(false, |b| b == b"Hello from the Metal OS system image!\n")));
+
+    let blob = v.read_file("/system/bin/blob.bin");
+    println!("[client] TEST VFS read 9000-byte file via fd: {}",
+        verdict(blob.map_or(false, |b| b.len() == 9000 && b.iter().enumerate().all(|(i, &x)| x == ((i * 7) % 251) as u8))));
+
+    // a 224 KB text file: stored LZ4-compressed on the system partition
+    let lorem: Vec<u8> = (0..4000).flat_map(|i| alloc::format!("Metal OS system image, line {i:05}: the quick brown fox\n").into_bytes()).collect();
+    let got = v.read_file("/system/usr/share/lorem.txt");
+    println!("[client] TEST VFS read {} KB file from the compressed system image ({} bytes read): {}", lorem.len() / 1000,
+        got.as_ref().map_or(0, |b| b.len()), verdict(got.map_or(false, |b| b == lorem)));
+
+    let (root, sys) = (v.list("/").unwrap_or_default(), v.list("/system").unwrap_or_default());
+    println!("[client] TEST VFS list / and /system ({:?} | {:?}): {}", root.replace('\n', " ").trim_end(),
+        sys.replace('\n', " ").trim_end(), verdict(root == "system/\ndata/\n" && sys == "bin/\netc/\nhello.txt\nusr/\n"));
+
+    let r1 = v.write_file("/system/x", b"1");
+    let r2 = v.mkdir("/system/d");
+    let r3 = v.unlink("/system/hello.txt");
+    println!("[client] TEST VFS /system is read-only ({r1:?} {r2:?} {r3:?}): {}",
+        verdict(r1 == Err(EROFS as i64) && r2 == Err(EROFS as i64) && r3 == Err(EROFS as i64)));
+
+    // /data: nested directory, multi-block file
+    let big: Vec<u8> = (0..10000).map(pat).collect();
+    let ok = v.mkdir("/data/docs").is_ok() && v.write_file("/data/docs/note.txt", &big).is_ok();
+    let st = v.stat("/data/docs/note.txt");
+    let back = v.read_file("/data/docs/note.txt");
+    println!("[client] TEST VFS create+write+read /data/docs/note.txt (10000 bytes): {}",
+        verdict(ok && st == Ok((1, 10000)) && back.map_or(false, |b| b == big)));
+
+    // overwrite 100 bytes straddling a block boundary
+    let fd = v.open("/data/docs/note.txt", O_READ | O_WRITE).unwrap_or(99);
+    let ow = v.seek(fd, 4050).and_then(|_| v.write(fd, &[0xEE; 100])).and_then(|_| v.close(fd));
+    let mut expect = big.clone();
+    expect[4050..4150].fill(0xEE);
+    let back = v.read_file("/data/docs/note.txt");
+    println!("[client] TEST VFS overwrite across a block boundary: {}",
+        verdict(ow.is_ok() && back.map_or(false, |b| b == expect)));
+
+    let names = v.list("/data/docs").unwrap_or_default();
+    let nonempty = v.unlink("/data/docs");
+    let gone = v.unlink("/data/docs/note.txt").is_ok() && v.stat("/data/docs/note.txt") == Err(ENOENT as i64);
+    let rmdir = v.unlink("/data/docs").is_ok();
+    println!("[client] TEST VFS list, rmdir-nonempty refused, unlink, rmdir ({:?}): {}", names.trim_end(),
+        verdict(names == "note.txt\n" && nonempty == Err(ENOTEMPTY as i64) && gone && rmdir));
+
+    // --- crash consistency across the whole stack ---
+    let keep = b"persist me across crashes";
+    let wrote = v.write_file("/data/keep.txt", keep).is_ok();
+    let stale = v.open("/data/keep.txt", O_READ).unwrap_or(99);
+    let st = v.crash();
+    let after = v.read_file("/data/keep.txt");
+    let mut probe = [0u8; 4];
+    let stale_read = v.read(stale, &mut probe);
+    println!("[client] TEST VFS data survives vfs-server crash; old fd rejected (status={st}, stale={stale_read:?}): {}",
+        verdict(wrote && st == E_DEAD && after.map_or(false, |b| b == keep) && stale_read == Err(EBADF as i64)));
+
+    let _ = call(7, [43, 0, 0]); // crash lfs-server
+    let _ = call(3, [BLK_CRASH, 0, 0]); // and the block driver under it
+    let after = v.read_file("/data/keep.txt");
+    let grown = v.write_file("/data/after.txt", b"written after the crashes").is_ok();
+    println!("[client] TEST VFS data survives lfs-server + blk-driver crashes, writes still work: {}",
+        verdict(after.map_or(false, |b| b == keep) && grown && v.read_file("/data/after.txt").map_or(false, |b| b == b"written after the crashes")));
+
+    // --- replacing a file is atomic: a writer killed midway leaves the previous version, never a mixture ---
+    let ver_a: Vec<u8> = (0..9000).map(|i| (i * 7 + 1) as u8).collect();
+    let ver_b: Vec<u8> = (0..9000).map(|i| (i * 13 + 5) as u8).collect();
+    let wrote_a = v.write_file("/data/cow.bin", &ver_a).is_ok();
+    let began = v.open("/data/cow.bin", O_WRITE | O_TRUNC).and_then(|fd| v.write(fd, &ver_b[..5000]));
+    let st = v.crash(); // the VFS dies with the rewrite half done; the LFS keeps what was staged
+    let read_back = |path: &str| -> VResult<Vec<u8>> {
+        let mut r = v.read_file(path);
+        for _ in 0..100 {
+            if !matches!(r, Err(e) if e == E_DEAD) {
+                break; // anything but "the service is restarting" is an answer
+            }
+            sleep(3);
+            r = v.read_file(path);
+        }
+        r
+    };
+    let after = read_back("/data/cow.bin");
+    println!("[client] TEST an interrupted rewrite leaves the previous version of the file intact (crash status={st}, began={began:?}, {} bytes back): {}",
+        after.as_ref().map_or(0, |b| b.len()), verdict(wrote_a && began.is_ok() && st == E_DEAD && after.map_or(false, |b| b == ver_a)));
+    let redo = v.write_file("/data/cow.bin", &ver_b).is_ok();
+    println!("[client] TEST a completed rewrite replaces the file, whatever the dead attempt left behind: {}",
+        verdict(redo && read_back("/data/cow.bin").map_or(false, |b| b == ver_b)));
+
+    // --- files are dense: blocks left by a dead writer never show through a sparse write ---
+    let first = v.write_file("/data/sparse.bin", &[0xAA; 12288]).is_ok();
+    let _ = v.open("/data/sparse.bin", O_WRITE | O_TRUNC).and_then(|fd| v.write(fd, &[0xBB; 12288]));
+    let _ = v.crash(); // leaves 12 KiB of 0xBB staged in the shadow inode
+    let sparse = (|| -> VResult<()> {
+        let fd = {
+            let mut r = v.open("/data/sparse.bin", O_WRITE | O_TRUNC);
+            for _ in 0..100 {
+                if !matches!(r, Err(e) if e == E_DEAD) {
+                    break;
+                }
+                sleep(3);
+                r = v.open("/data/sparse.bin", O_WRITE | O_TRUNC);
+            }
+            r?
+        };
+        v.write(fd, &[0x11])?;
+        v.seek(fd, 10000)?;
+        v.write(fd, &[0x22])?;
+        v.close(fd)
+    })();
+    let mut want = vec![0u8; 10001];
+    want[0] = 0x11;
+    want[10000] = 0x22;
+    println!("[client] TEST a sparse write reads back zeros in the gap, never data a dead writer left behind ({sparse:?}): {}",
+        verdict(first && sparse.is_ok() && read_back("/data/sparse.bin").map_or(false, |b| b == want)));
+
+    // --- a checkpoint that fails must not leave the table pointing at blocks the disk does not have ---
+    // (found by the chaos test once swapping slowed the services down: a close whose checkpoint failed while the
+    // store was being killed left the VFS serving the new size with the old version's blocks)
+    let ck1: Vec<u8> = (0..3000).map(|i| (i * 3 + 1) as u8).collect();
+    let ck2: Vec<u8> = (0..3300).map(|i| (i * 5 + 2) as u8).collect();
+    let c1 = v.write_file("/data/ckpt.bin", &ck1).is_ok();
+    let armed = v.fail_next_sync();
+    let c2 = v.write_file("/data/ckpt.bin", &ck2); // the checkpoint at close fails
+    let _ = call(7, [43, 0, 0]); // the store dies and restarts from its last checkpoint: the new blocks are gone
+    let mut got = v.read_file("/data/ckpt.bin");
+    for _ in 0..100 {
+        if got.is_ok() {
+            break;
+        }
+        sleep(3);
+        got = v.read_file("/data/ckpt.bin");
+    }
+    println!("[client] TEST a failed checkpoint at close leaves the file at its old version, even after the store loses the new blocks (armed={armed}, write {c2:?}): {}",
+        verdict(c1 && armed == 0 && c2.is_err() && got.map_or(false, |b| b == ck1)));
+    let again = v.write_file("/data/ckpt.bin", &ck2).is_ok() && v.read_file("/data/ckpt.bin").map_or(false, |b| b == ck2);
+    println!("[client] TEST the file takes a new version normally afterwards: {}", verdict(again));
+
+    // --- the store restarting between a writer's writes and its close must fail the close ---
+    // (found by the chaos test: the VFS retried the checkpoint against the restarted store, which had nothing staged
+    // and so reported success, and the table then pointed at blocks that no longer existed)
+    let ep1: Vec<u8> = (0..9000).map(|i| (i * 7 + 3) as u8).collect();
+    let ep2: Vec<u8> = (0..9000).map(|i| (i * 11 + 5) as u8).collect();
+    let e_ok = v.write_file("/data/epoch.bin", &ep1).is_ok();
+    let staged = v.open("/data/epoch.bin", O_WRITE | O_TRUNC).and_then(|fd| v.write(fd, &ep2).map(|_| fd));
+    let _ = call(7, [43, 0, 0]); // the store dies; its replacement has none of the staged blocks
+    sleep(30);
+    let closed = staged.and_then(|fd| v.close(fd));
+    let mut got = v.read_file("/data/epoch.bin");
+    for _ in 0..100 {
+        if got.is_ok() {
+            break;
+        }
+        sleep(3);
+        got = v.read_file("/data/epoch.bin");
+    }
+    println!("[client] TEST a close after the store restarted fails and the file keeps its old version (close {closed:?}): {}",
+        verdict(e_ok && closed.is_err() && got.map_or(false, |b| b == ep1)));
+    sleep(320); // (the store restarts count against the same budget as the VFS crashes below)
+
+    // --- a read the store cannot serve is an error, never a block of zeros ---
+    // (found by the chaos test: a read that raced with the block driver being killed came back as zeros)
+    let hole_file: Vec<u8> = (0..9000).map(|i| (i * 13 + 7) as u8).collect();
+    let hw = v.write_file("/data/hole.bin", &hole_file).is_ok();
+    let _ = call(7, [46, 0, 0]); // the store's next read fails with an I/O error
+    let failed = v.read_file("/data/hole.bin");
+    let fine = v.read_file("/data/hole.bin");
+    println!("[client] TEST a read that fails inside the store is reported as an error, not returned as zeros (first {:?}, then {} bytes): {}",
+        failed.as_ref().map(|b| b.len()), fine.as_ref().map_or(0, |b| b.len()),
+        verdict(hw && failed.is_err() && fine.map_or(false, |b| b == hole_file)));
+
+    // --- updating a file in place is atomic too: it happens completely, or not at all ---
+    let open_retry = |path: &str, flags: u64| -> VResult<u64> {
+        let mut r = v.open(path, flags);
+        for _ in 0..100 {
+            if !matches!(r, Err(e) if e == E_DEAD) {
+                break;
+            }
+            sleep(3);
+            r = v.open(path, flags);
+        }
+        r
+    };
+    // a service that crashes more than five times within 300 ticks is given up on: let this one run long enough
+    // for its crash count to start over before the next burst of fault injection
+    sleep(320);
+    let old: Vec<u8> = (0..9000).map(|i| (i * 5 + 3) as u8).collect();
+    let new: Vec<u8> = (0..9000).map(|i| (i * 11 + 9) as u8).collect();
+    let wrote_old = v.write_file("/data/inplace.bin", &old).is_ok();
+    // a writer overwrites all three blocks, then *another* client's checkpoint commits the half-done state
+    // (every checkpoint covers every file), then the VFS dies before the writer closes
+    let began = v.open("/data/inplace.bin", O_WRITE).and_then(|fd| v.write(fd, &new));
+    let foreign = v.write_file("/data/other.bin", b"someone else's file, committed meanwhile").is_ok();
+    let st = v.crash();
+    let after = read_back("/data/inplace.bin");
+    println!("[client] TEST an in-place update killed midway, even across another file's checkpoint, rolls back to the old content (crash status={st}, began={began:?}): {}",
+        verdict(wrote_old && began.is_ok() && foreign && st == E_DEAD && after.map_or(false, |b| b == old)));
+    println!("[client] TEST the other file's own commit survived the rollback: {}",
+        verdict(read_back("/data/other.bin").map_or(false, |b| b == b"someone else's file, committed meanwhile")));
+
+    // the same update, run to the end and closed, is durable
+    let done = open_retry("/data/inplace.bin", O_WRITE).and_then(|fd| {
+        v.write(fd, &new)?;
+        v.close(fd)
+    });
+    let _ = v.crash();
+    println!("[client] TEST a completed in-place update survives a VFS crash ({done:?}): {}",
+        verdict(done.is_ok() && read_back("/data/inplace.bin").map_or(false, |b| b == new)));
+
+    // growing a file in place and dying leaves it at its old size with its old last block
+    let grown_ok = open_retry("/data/inplace.bin", O_WRITE).and_then(|fd| {
+        v.seek(fd, 8990)?;
+        v.write(fd, &[0xCD; 6000])?; // overwrites the end of the last block and adds two blocks
+        Ok(fd)
+    });
+    let _ = v.write_file("/data/other.bin", b"another checkpoint");
+    let _ = v.crash();
+    let after = read_back("/data/inplace.bin");
+    println!("[client] TEST growing a file in place and dying leaves its old size and content ({} bytes back): {}",
+        after.as_ref().map_or(0, |b| b.len()), verdict(grown_ok.is_ok() && after.map_or(false, |b| b == new)));
+
+    sleep(320);
+    // a writer that never closes is rolled back by the next writer; the next writer's own update commits
+    let a = v.open("/data/inplace.bin", O_WRITE).and_then(|fd| {
+        v.write(fd, &[0x77; 5000])?;
+        Ok(fd)
+    });
+    let b = v.open("/data/inplace.bin", O_WRITE).and_then(|fd| {
+        v.write(fd, b"patched")?;
+        v.close(fd)
+    });
+    let late = a.and_then(|fd| v.write(fd, b"zombie")); // the superseded writer is told off
+    let mut want = new.clone();
+    want[..7].copy_from_slice(b"patched");
+    println!("[client] TEST the next writer rolls back an abandoned update and commits only its own ({b:?}, late write {late:?}): {}",
+        verdict(b.is_ok() && late.is_err() && v.read_file("/data/inplace.bin").map_or(false, |x| x == want)));
+
+    // an old session's leftovers never leak into a new one: die, recover, update one block, die again
+    let first = v.open("/data/inplace.bin", O_WRITE).and_then(|fd| v.write(fd, &[0x11; 9000]));
+    let _ = v.write_file("/data/other.bin", b"checkpoint 3");
+    let _ = v.crash();
+    let second = open_retry("/data/inplace.bin", O_WRITE).and_then(|fd| {
+        v.seek(fd, 4096)?;
+        v.write(fd, &[0x22; 4096])
+    });
+    let _ = v.write_file("/data/other.bin", b"checkpoint 4");
+    let _ = v.crash();
+    println!("[client] TEST sessions after a recovery start clean (first={first:?}, second={second:?}): {}",
+        verdict(first.is_ok() && second.is_ok() && read_back("/data/inplace.bin").map_or(false, |x| x == want)));
+
+    // unlinking a file with an update in progress leaves no trace and no confusion for a new file of that name
+    let u = v.open("/data/inplace.bin", O_WRITE).and_then(|fd| v.write(fd, &[0x33; 100]));
+    let gone = v.unlink("/data/inplace.bin").is_ok();
+    let fresh = v.write_file("/data/inplace.bin", b"fresh").is_ok();
+    let _ = v.crash();
+    println!("[client] TEST unlink during an update, then a new file of the same name, then a crash: {}",
+        verdict(u.is_ok() && gone && fresh && read_back("/data/inplace.bin").map_or(false, |x| x == b"fresh")));
+
+    // --- sustained writing far beyond the partition's capacity needs the cleaner ---
+    // A database-style workload: a 100-block file gets random single-block overwrites while a
+    // second file is rewritten wholesale. Live blocks end up scattered across the log, so
+    // free segments run out and the cleaner has to move data.
+    let blockpat = |blk: usize, gen: u32| -> Vec<u8> { (0..4096).map(|i| (blk as u32 * 7 + gen * 13 + i as u32) as u8).collect() };
+    let mut gens = vec![0u32; 100];
+    let mut db = Vec::new();
+    for b in 0..100 {
+        db.extend_from_slice(&blockpat(b, 0));
+    }
+    let mut ok = v.write_file("/data/db.bin", &db).is_ok();
+    let (_, s0) = call(7, [45, 0, 0]);
+    let mut total = db.len();
+    let mut rng = 12345u32;
+    for round in 0..130u32 {
+        let content: Vec<u8> = (0..49152).map(|i| (i as u32).wrapping_mul(31).wrapping_add(round) as u8).collect();
+        ok &= v.write_file("/data/hot.bin", &content).is_ok();
+        total += content.len();
+        for _ in 0..2 {
+            rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+            let b = (rng >> 16) as usize % 100;
+            gens[b] += 1;
+            let r = v.open("/data/db.bin", O_WRITE).and_then(|fd| {
+                v.seek(fd, b as u64 * 4096)?;
+                v.write(fd, &blockpat(b, gens[b]))?;
+                v.close(fd)
+            });
+            ok &= r.is_ok();
+            total += 4096;
+        }
+    }
+    let (_, s1) = call(7, [45, 0, 0]);
+    let hot_ok = v.read_file("/data/hot.bin").map_or(false, |b| {
+        b.len() == 49152 && b.iter().enumerate().all(|(i, &x)| x == (i as u32).wrapping_mul(31).wrapping_add(129) as u8)
+    });
+    let db_ok = v.read_file("/data/db.bin").map_or(false, |b| {
+        b.len() == 100 * 4096 && (0..100).all(|k| b[k * 4096..(k + 1) * 4096] == blockpat(k, gens[k])[..])
+    });
+    println!("[client] TEST VFS sustained writes ({} KiB into a 6 MiB partition): all ok={ok}, hot file intact={hot_ok}, db file intact={db_ok}, cleaner passes={}, blocks moved={}: {}",
+        total / 1024, s1[0] - s0[0], s1[1] - s0[1], verdict(ok && hot_ok && db_ok && s1[0] > s0[0] && s1[1] > s0[1]));
+
+    // --- the program task ran concurrently through the same VFS ---
+    let mut seen = false;
+    for _ in 0..200 {
+        if v.stat("/data/program.done").is_ok() {
+            seen = true;
+            break;
+        }
+        sleep(5);
+    }
+    let log = v.read_file("/data/program.log").unwrap_or_default();
+    println!("[client] TEST VFS program task's files are visible to other tasks ({} bytes): {}", log.len(),
+        verdict(seen && log == b"line 0\nline 1\nline 2\nline 3\n"));
+}

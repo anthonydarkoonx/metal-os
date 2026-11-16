@@ -1,0 +1,6 @@
+id = crasher
+name = Crasher
+version = 1.0.0
+heap_pages = 64
+class = background
+ability = main service bin/crasher

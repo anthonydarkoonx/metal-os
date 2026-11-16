@@ -1,0 +1,6 @@
+id = probefs
+name = Probe (files)
+version = 1.0.0
+heap_pages = 48
+permission = files
+ability = main service bin/probe

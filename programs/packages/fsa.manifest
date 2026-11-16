@@ -1,0 +1,6 @@
+id = fsa
+name = Files probe A
+version = 1.0.0
+heap_pages = 64
+permission = files
+ability = main service bin/fsprog

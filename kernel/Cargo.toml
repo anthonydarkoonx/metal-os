@@ -1,0 +1,32 @@
+[package]
+name = "metal-kernel"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[workspace]
+
+[dependencies]
+metal-lz4 = { path = "../libs/metal-lz4" }
+metal-zram = { path = "../libs/metal-zram" }
+metal-sched = { path = "../libs/metal-sched" }
+metal-compact = { path = "../libs/metal-compact" }
+metal-rand = { path = "../libs/metal-rand" }
+metal-loader = { path = "../libs/metal-loader" }
+
+[features]
+# The machine to build for (kernel/src/platform.rs). Exactly one.
+default = ["qemu-virt"]
+qemu-virt = []
+# Disable priority inheritance (to demonstrate the starvation it prevents).
+no-inherit = []
+# Idle forever instead of powering QEMU off, so a GUI window stays open.
+park-on-exit = []
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+debug = true
+
+[profile.dev]
+panic = "abort"

@@ -1,0 +1,1399 @@
+//! System calls. ABI: `svc #0`, x0 = id, x1..x5 = arguments, x0 = result
+//! (negative = error). Extra results come back in x1..x5.
+//!
+//! Each handler takes only the locks it needs, in rank order (see `sync.rs`); none runs
+//! under a global lock. Handlers for the calling task `cur` may rely on `cur` being owned by
+//! this core for the whole call (see sched.rs), so its register frame can be written freely.
+#![forbid(unsafe_code)]
+use crate::cap::*;
+use crate::ipc::{self, Msg};
+use crate::mmu::{self, Perm};
+use crate::obj::{self, ObjKind};
+use crate::sched;
+use crate::task::{self, frame, info, State, World, MAX_TASKS, SHM_HI, SHM_LO};
+use crate::{compact, irq, mem, ring, timer, uart};
+
+pub const IPC_SEND: u64 = 1;
+pub const IPC_RECV: u64 = 2;
+pub const IPC_CALL: u64 = 3;
+pub const MEM_MAP: u64 = 4;
+pub const CAP_GRANT: u64 = 5;
+pub const CAP_REVOKE: u64 = 6;
+pub const YIELD: u64 = 7;
+pub const IPC_REPLY: u64 = 8;
+pub const LOG: u64 = 9;
+pub const SLEEP: u64 = 10;
+pub const EXIT: u64 = 11;
+pub const TICKS: u64 = 12;
+pub const IRQ_WAIT: u64 = 13;
+pub const CAP_INFO: u64 = 14;
+pub const HEAP_GROW: u64 = 15;
+pub const RING_SETUP: u64 = 16;
+pub const RING_ENTER: u64 = 17;
+pub const MEMCTL: u64 = 18;
+pub const HEAP_RELEASE: u64 = 19;
+pub const NCPUS: u64 = 20;
+pub const SYSINFO: u64 = 21;
+pub const KILL_ROLE: u64 = 22;
+/// Scheduler control and statistics; see `sched_call`.
+pub const SCHED: u64 = 23;
+/// Programs (spawn.rs): SPAWN(slot, image va, image length, params, delegation) -> task id; WAIT(task, nohang) -> exit
+/// code; KILL(task).
+pub const SPAWN: u64 = 24;
+pub const WAIT: u64 = 25;
+pub const KILL: u64 = 26;
+/// EP_CREATE(factory slot) -> slot of a new endpoint capability (send+receive+grant); it exists as long as that
+/// capability (or until it is revoked).
+pub const EP_CREATE: u64 = 27;
+/// TASK_LOAD(child, request va) puts pages into an embryo made by SPAWN; TASK_START(child, entry) starts it.
+pub const TASK_LOAD: u64 = 28;
+pub const TASK_START: u64 = 29;
+/// Threads (spawn.rs, thread.rs): THREAD_CREATE(entry, stack top, arg, capability mask) -> thread id; THREAD_EXIT(word, value);
+/// WAIT_WORD(address, expected, timeout ticks); WAKE_WORD(address, count) -> woken.
+pub const THREAD_CREATE: u64 = 30;
+pub const THREAD_EXIT: u64 = 31;
+pub const WAIT_WORD: u64 = 32;
+pub const WAKE_WORD: u64 = 33;
+/// CLOCK(op): 0 = monotonic nanoseconds since the machine started; 1 = wall-clock nanoseconds since 1970 (`E_NOSYS` if
+/// the platform has no real-time clock).
+pub const CLOCK: u64 = 34;
+/// IRQ_RAISE(slot): wake whoever waits on the interrupt line (needs the send right on its capability).
+pub const IRQ_RAISE: u64 = 35;
+/// QUOTA(op, child, heap, budget): memory limits of the caller's program (op 0) or of one of its children (op 1); see
+/// `spawn::quota`.
+pub const QUOTA: u64 = 36;
+/// SHM_CREATE(pages) -> slot of a new memory capability (map, write, grant) for fresh zeroed memory that can be shared
+/// with other programs; see `shm_create`.
+pub const SHM_CREATE: u64 = 37;
+/// SHM_INFO(slot) -> size in pages of the shared memory object the capability in `slot` names (it needs the map right),
+/// plus 1 << 32 if the object's creator has gone (it lives on while someone holds it) and 1 << 33 if `slot` is the creator's
+/// capability and no copy of it is held any more (the creator can tell that its partners are gone).
+pub const SHM_INFO: u64 = 38;
+/// TASK_BASE(child) -> the address an embryo's image area starts at (random if it was spawned with `FLAG_PIE`).
+pub const TASK_BASE: u64 = 39;
+/// REVOKE_OF(admin slot, task, slot) -> how many capabilities went: revokes the capability in `slot` of `task` (and what was derived from it).
+/// Needs an `Admin` capability with `R_REVOKE`; only programs started at run time can be named, never the caller, and never the root capability
+/// of an endpoint or of shared memory (that would end the object for everyone).
+pub const REVOKE_OF: u64 = 40;
+/// RESTORE_OF(admin slot, task, log id) -> the slot: gives back a capability that `REVOKE_OF` took from `task` (`SYSINFO` page 14 lists them), in the
+/// slot it had, as a new child of the node it hung under. Needs the same `Admin` capability with `R_REVOKE`. Only what the log holds can come
+/// back; a mapping that the revoke removed is not remapped, and copies that were derived from it are gone for good.
+pub const RESTORE_OF: u64 = 41;
+/// POWER(admin, op): 0 switches the machine off, 1 restarts it. Needs an `Admin` capability with `R_POWER`; does not return when it works.
+pub const POWER: u64 = 42;
+/// GETRANDOM() -> 0 and 40 random bytes in x1..x5 (little endian), drawn from the kernel's generator, for cryptography. `E_NOSYS` when that generator has no
+/// real entropy behind it: no RNDR (FEAT_RNG), no full `opt/metal/seed`, no virtio-rng device, or one of the layout debugging modes. A caller must treat that
+/// as "no secure random numbers" and refuse to do cryptography rather than fall back to something weaker.
+pub const GETRANDOM: u64 = 43;
+/// Sleep for `a1` microseconds (not rounded up to the 10 ms scheduler tick): the wake-up is an exact counter deadline.
+pub const SLEEP_US: u64 = 44;
+/// SETTIME(unix_ns): set the wall clock (a machine without a battery-backed clock: the network service sets it from NTP). Only the network service
+/// (role 19) may; the value must lie between 2024 and 2100.
+pub const SETTIME: u64 = 45;
+pub const SC_RT_SET: u64 = 1;
+pub const SC_RT_WAIT: u64 = 2;
+pub const SC_RT_CLEAR: u64 = 3;
+pub const SC_STATS: u64 = 4;
+
+pub const E_PERM: i64 = -1;
+pub const E_BADCAP: i64 = -2;
+pub const E_FULL: i64 = -3;
+pub const E_DEAD: i64 = -4;
+pub const E_INVAL: i64 = -5;
+pub const E_NOREPLY: i64 = -6;
+pub const E_NOSYS: i64 = -7;
+pub const E_NOMEM: i64 = -8;
+/// A timed wait (IRQ_WAIT with a timeout) expired.
+pub const E_TIMEDOUT: i64 = -9;
+
+pub const CONSOLE_SLOT: usize = 15;
+const MAX_LOG: usize = 256;
+
+pub enum Out {
+    Ret(i64),
+    /// Task blocked; its result is written into its frame when it wakes.
+    Block,
+}
+
+/// Look up a capability of the given kind with at least the rights `need`.
+/// (The task lock is released before the node table is consulted; a concurrent revoke can
+/// still win the race, like any revoke that lands just after a successful check.)
+pub fn lookup(tid: usize, slot: u64, kind: Kind, need: Rights) -> Result<Cap, i64> {
+    let c = *task::lock(tid).caps.get(slot as usize).ok_or(E_BADCAP)?;
+    if c.kind != kind || !node_alive(c.node) {
+        return Err(E_BADCAP);
+    }
+    if c.rights & need != need {
+        return Err(E_PERM);
+    }
+    Ok(c)
+}
+
+fn lookup_any(tid: usize, slot: u64) -> Result<Cap, i64> {
+    let c = *task::lock(tid).caps.get(slot as usize).ok_or(E_BADCAP)?;
+    if c.kind == Kind::None || !node_alive(c.node) {
+        return Err(E_BADCAP);
+    }
+    Ok(c)
+}
+
+fn run(cur: usize) -> (u64, Out) {
+    let f = *frame(cur);
+    let (id, a1, a2, a3, a4) = (f.x[0], f.x[1], f.x[2], f.x[3], f.x[4]);
+    let out = match id {
+        YIELD => Out::Ret(0),
+        IPC_SEND | IPC_CALL => ipc_send(cur, a1, [a2, a3, a4], id == IPC_CALL),
+        IPC_RECV => ipc_recv(cur, a1, a2 != 0), // a2 != 0: do not wait (E_AGAIN, -10, if nothing is queued)
+        IPC_REPLY => Out::Ret(if ipc::reply(cur, [a1, a2, a3]) { 0 } else { E_NOREPLY }),
+        MEM_MAP => mem_map(cur, a1, a2 as usize, a3 != 0),
+        CAP_GRANT => cap_grant(cur, a1, a2, a3 as Rights, a4),
+        CAP_REVOKE => cap_revoke(cur, a1, a2 & 1 != 0),
+        LOG => log(cur, a1, a2 as usize, a3 as usize),
+        SLEEP => {
+            frame(cur).x[0] = 0; // the result, written before the task can be woken
+            let wake_at = timer::counter().saturating_add(a1.saturating_mul(timer::interval())).min(1 << 55);
+            sched::set_state(cur, State::Sleep(wake_at));
+            Out::Block
+        }
+        TICKS => Out::Ret(timer::ticks() as i64),
+        NCPUS => Out::Ret(crate::smp::online_mask().count_ones() as i64),
+        SYSINFO => sysinfo(cur, a1, a2),
+        KILL_ROLE => kill_role(cur, a1, a2),
+        REVOKE_OF => revoke_of(cur, a1, a2, a3),
+        RESTORE_OF => restore_of(cur, a1, a2, a3),
+        POWER => power(cur, a1, a2),
+        SCHED => sched_call(cur, [a1, a2, a3, a4, f.x[5]]),
+        SPAWN => match lookup(cur, a1, Kind::Spawn, R_SPAWN) {
+            Err(e) => Out::Ret(e),
+            Ok(c) => Out::Ret(crate::spawn::spawn(cur, c.rights, a2 as usize).map_or_else(|e| e, |tid| tid as i64)),
+        },
+        WAIT => match crate::spawn::wait(cur, a1 as usize, a2 != 0) {
+            crate::spawn::Waited::Code(c) => Out::Ret(c as i64),
+            crate::spawn::Waited::Err(e) => Out::Ret(e),
+            crate::spawn::Waited::Blocked => Out::Block,
+        },
+        KILL => Out::Ret(crate::spawn::kill(cur, a1 as usize)),
+        TASK_LOAD => Out::Ret(crate::spawn::task_load(cur, a1 as usize, a2 as usize).map_or_else(|e| e, |()| 0)),
+        TASK_START => Out::Ret(crate::spawn::task_start(cur, a1 as usize, a2 as usize).map_or_else(|e| e, |()| 0)),
+        THREAD_CREATE => Out::Ret(crate::spawn::thread_create(cur, a1 as usize, a2 as usize, a3, a4 as u32, f.x[5] as usize).map_or_else(|e| e, |tid| tid as i64)),
+        THREAD_EXIT if task::aspace(cur) == cur => Out::Ret(E_PERM), // (the program's first task ends with EXIT)
+        THREAD_EXIT => {
+            task::die_thread(cur, (a1 as usize, a2 as u32));
+            Out::Block
+        }
+        WAIT_WORD => match crate::thread::wait(cur, a1 as usize, a2 as u32, a3) {
+            crate::thread::Wait::Ret(r) => Out::Ret(r),
+            crate::thread::Wait::Blocked => Out::Block,
+        },
+        WAKE_WORD => Out::Ret(crate::thread::wake(cur, a1 as usize, a2 as usize)),
+        CLOCK => match a1 {
+            0 => Out::Ret(timer::now_ns() as i64),
+            1 => timer::wall_ns().map_or(Out::Ret(E_NOSYS), |ns| Out::Ret(ns as i64)),
+            _ => Out::Ret(E_INVAL),
+        },
+        SLEEP_US => {
+            frame(cur).x[0] = 0;
+            let wake_at = timer::counter().saturating_add(timer::us_to_counter(a1.min(1_000_000))).min(1 << 55);
+            sched::set_state(cur, State::Sleep(wake_at));
+            Out::Block
+        }
+        SETTIME => {
+            const NETD_ROLE: u8 = 19;
+            const Y2024: u64 = 1_704_067_200;
+            const Y2100: u64 = 4_102_444_800;
+            if task::info(cur).role != NETD_ROLE {
+                Out::Ret(E_PERM)
+            } else if !(Y2024 * 1_000_000_000..Y2100 * 1_000_000_000).contains(&a1) {
+                Out::Ret(E_INVAL)
+            } else {
+                timer::set_wall(a1);
+                Out::Ret(0)
+            }
+        }
+        GETRANDOM => {
+            let mut b = [0u8; 40];
+            if crate::rand::secure_fill(&mut b) {
+                let f = frame(cur);
+                for i in 0..5 {
+                    f.x[i + 1] = u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+                }
+                b.fill(0);
+                Out::Ret(0)
+            } else {
+                Out::Ret(E_NOSYS)
+            }
+        }
+        IRQ_RAISE => match lookup(cur, a1, Kind::Irq, R_SEND) {
+            Ok(c) => {
+                irq::raise(c.obj);
+                Out::Ret(0)
+            }
+            Err(e) => Out::Ret(e),
+        },
+        EP_CREATE => ep_create(cur, a1),
+        IRQ_WAIT => irq_wait(cur, a1, a2),
+        CAP_INFO => cap_info(cur, a1),
+        QUOTA => Out::Ret(crate::spawn::quota(cur, a1, a2, a3, a4)),
+        SHM_CREATE => shm_create(cur, a1 as usize),
+        SHM_INFO => shm_info(cur, a1),
+        TASK_BASE => Out::Ret(crate::spawn::task_base(cur, a1 as usize).map_or_else(|e| e, |b| b as i64)),
+        HEAP_GROW => heap_grow(cur, a1 as usize),
+        HEAP_RELEASE => heap_release(cur, a1 as usize, a2 as usize),
+        MEMCTL => memctl(cur, a1, a2, a3, a4),
+        RING_SETUP => Out::Ret(ring_setup(cur)),
+        RING_ENTER => match ring::enter(cur, a1 as u32, a2 as u32) {
+            Err(e) => Out::Ret(e),
+            Ok((n, false)) => Out::Ret(n as i64),
+            Ok((_, true)) => Out::Block, // result register already written by `enter`
+        },
+        EXIT => {
+            crate::spawn::set_exit_code(cur, a1);
+            if cur == 0 {
+                if cfg!(feature = "park-on-exit") {
+                    // window mode: the system stays up so the information screen keeps updating;
+                    // only the CPU-hog demo is stopped
+                    task::condemn_role(3, sched::Doom::Killed);
+                } else {
+                    sched::finish(a1 as u32);
+                }
+            }
+            task::die(cur, "exited");
+            Out::Block
+        }
+        _ => Out::Ret(E_NOSYS),
+    };
+    (id, out)
+}
+
+/// Handle a syscall for `cur`; returns whether the scheduler should preempt.
+pub fn handle(cur: usize) -> bool {
+    crate::swap::clear_retry();
+    let (id, out) = run(cur);
+    crate::pager::kick_if_pending();
+    if matches!(id, LOG | WAIT_WORD | WAKE_WORD) && matches!(out, Out::Ret(_)) && crate::swap::take_retry() {
+        // the memory it reads is on disk and the pager has been asked for it: sleep a tick and run the call again
+        frame(cur).elr -= 4;
+        sched::set_state(cur, State::Sleep(timer::counter().saturating_add(timer::interval())));
+        return false;
+    }
+    if let Out::Ret(r) = out {
+        frame(cur).x[0] = r as u64;
+    }
+    if id == YIELD {
+        sched::expire_slice(cur); // give the core to an equal competitor, if there is one
+    }
+    id == YIELD || id == SCHED
+}
+
+/// Switch off or restart the machine on behalf of a task that holds the right to.
+fn power(cur: usize, slot: u64, op: u64) -> Out {
+    if let Err(e) = lookup(cur, slot, Kind::Admin, R_POWER) {
+        return Out::Ret(e);
+    }
+    if op > 1 {
+        return Out::Ret(E_INVAL);
+    }
+    crate::kprintln!("[kernel] {} requested by task {cur}", if op == 1 { "restart" } else { "power off" });
+    crate::frame::cpu::psci_power(op == 1);
+    // the firmware did not do it: a switch-off can still end the emulator
+    if op == 0 {
+        sched::semihost_exit(0);
+    }
+    Out::Ret(E_NOSYS)
+}
+
+fn ep_create(cur: usize, slot: u64) -> Out {
+    if let Err(e) = lookup(cur, slot, Kind::Factory, R_EP_CREATE) {
+        return Out::Ret(e);
+    }
+    let mut t = task::lock(cur);
+    let Some(free) = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None) else { return Out::Ret(E_NOMEM) };
+    let Some(node) = mint_node(None) else { return Out::Ret(E_NOMEM) };
+    match ipc::claim_dynamic(cur, node) {
+        Some(e) => {
+            t.caps[free] = Cap { kind: Kind::Endpoint, obj: e, rights: R_SEND | R_RECV | R_GRANT, node };
+            sched::note_recv_endpoint(cur, e);
+            Out::Ret(free as i64)
+        }
+        None => {
+            free_node(node);
+            Out::Ret(E_FULL)
+        }
+    }
+}
+
+fn ring_setup(cur: usize) -> i64 {
+    if task::aspace(cur) != cur {
+        return E_PERM; // one ring per address space: the program's first task has it
+    }
+    let mut t = task::lock(cur);
+    ring::setup(&mut t, cur).map_or_else(|e| e, |va| va as i64)
+}
+
+fn ipc_send(cur: usize, slot: u64, w: [u64; 3], call: bool) -> Out {
+    let c = match lookup(cur, slot, Kind::Endpoint, R_SEND) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    match ipc::send(cur, c.obj, Msg { sender: cur as u8, call, tag: 0, w }) {
+        Err(ipc::SendErr::Full) => Out::Ret(E_FULL),
+        Ok(()) if call => Out::Block, // `send` left the caller blocked in CallWait
+        Ok(()) => Out::Ret(0),
+    }
+}
+
+fn ipc_recv(cur: usize, slot: u64, nonblock: bool) -> Out {
+    let c = match lookup(cur, slot, Kind::Endpoint, R_RECV) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    match ipc::recv(cur, c.obj, !nonblock) {
+        ipc::Recv::Got => Out::Ret(0), // payload already in x1..x5
+        ipc::Recv::Blocked => Out::Block,
+        ipc::Recv::Busy => Out::Ret(E_FULL),
+        ipc::Recv::Empty => Out::Ret(crate::spawn::E_AGAIN),
+    }
+}
+
+/// Where `pages` pages can go in the mapping windows when the program does not say: a random page-aligned place with
+/// one unmapped page between it and every other mapping (and the window's edge). The usual window is tried first for
+/// objects up to `AUTO_SMALL_MAX` pages, then the large one.
+const AUTO_SMALL_MAX: usize = 128;
+
+fn pick_map_address(t: &task::Task, pages: usize) -> Option<usize> {
+    let windows: &[(usize, usize)] = if pages <= AUTO_SMALL_MAX { &[(SHM_LO, SHM_HI), (task::BIG_SHM_LO, task::BIG_SHM_HI)] } else { &[(task::BIG_SHM_LO, task::BIG_SHM_HI)] };
+    for &(lo, hi) in windows {
+        // the object and a guard page after it must fit (the page before the window is unmapped anyway)
+        let Some(room) = ((hi - lo) / mem::PAGE).checked_sub(pages + 1) else { continue };
+        for _ in 0..32 {
+            let va = lo + crate::rand::below(room + 1) * mem::PAGE;
+            let (a, b) = (va - mem::PAGE, va + (pages + 1) * mem::PAGE); // guards included
+            if t.maps.iter().all(|m| !m.used || b <= m.va || m.va + m.pages * mem::PAGE <= a) {
+                return Some(va);
+            }
+        }
+        // Chance found nothing (the window is nearly full): the first gap that fits, scanning the mappings in address order.
+        let mut at = lo; // lowest address the object may start at
+        loop {
+            let end = at + (pages + 1) * mem::PAGE;
+            if end > hi + mem::PAGE {
+                break;
+            }
+            // the lowest mapping that gets in the way (a mapping within a page of either end counts)
+            let clash = t.maps.iter().filter(|m| m.used && at < m.va + m.pages * mem::PAGE + mem::PAGE && m.va < end).map(|m| m.va + m.pages * mem::PAGE + mem::PAGE).max();
+            match clash {
+                None if at + pages * mem::PAGE <= hi => return Some(at),
+                None => break,
+                Some(next) => at = next,
+            }
+        }
+    }
+    None
+}
+
+/// `MEM_MAP(slot, va, writable)`. With `va` = 0 the kernel chooses the address (see `pick_map_address`) and returns it.
+fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
+    let c = match lookup(cur, slot, Kind::Memory, R_MAP) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    if writable && c.rights & R_WRITE == 0 {
+        return Out::Ret(E_PERM);
+    }
+    let Some(o) = obj::get(c.obj) else { return Out::Ret(E_BADCAP) };
+    // (`va` comes from userspace: a sum that wraps must not pass the window check)
+    let auto = va == 0;
+    if !auto && !crate::spawn::fixed_maps_allowed(task::aspace(cur)) {
+        return Out::Ret(E_PERM); // this program asked to have its mappings placed by the kernel
+    }
+    let end = va.checked_add(o.pages * mem::PAGE);
+    let in_window = |lo: usize, hi: usize| va >= lo && end.map_or(false, |e| e <= hi);
+    if !auto && (!(in_window(SHM_LO, SHM_HI) || in_window(task::BIG_SHM_LO, task::BIG_SHM_HI)) || va % mem::PAGE != 0) {
+        return Out::Ret(E_INVAL);
+    }
+    let space = task::aspace(cur); // (a thread maps into its program's address space)
+    let mut t = task::lock(space);
+    let va = if auto {
+        match pick_map_address(&t, o.pages) {
+            Some(v) => v,
+            None => return Out::Ret(E_NOMEM),
+        }
+    } else {
+        va
+    };
+    if (0..o.pages).any(|p| mmu::is_present(t.l1, va + p * mem::PAGE)) {
+        return Out::Ret(E_INVAL);
+    }
+    let Some(rec) = t.maps.iter().position(|m| !m.used) else { return Out::Ret(E_NOMEM) };
+    let perm = match (o.kind, writable) {
+        (ObjKind::Mmio, _) => Perm::Device, // MMIO is never read-only: reads have side effects too
+        (_, true) => Perm::Rw,
+        (_, false) => Perm::Ro,
+    };
+    for p in 0..o.pages {
+        let pa = if o.kind == ObjKind::Shared { obj::shm_frame(&o, p) } else { o.pa + p * mem::PAGE };
+        let r = mmu::map_user(t.l1, va + p * mem::PAGE, pa, perm, mem::OWNER_TASK0 + space as u8);
+        if r.is_err() {
+            for q in 0..p {
+                mmu::unmap_user(t.l1, va + q * mem::PAGE);
+            }
+            return Out::Ret(E_NOMEM);
+        }
+    }
+    t.maps[rec] = task::MapRec { used: true, va, pages: o.pages, node: c.node };
+    drop(t);
+    if auto && crate::platform::map_log() {
+        crate::kprintln!("[map] task {space} role {} object {} ({} pages) at {va:#x}", task::info(space).role, c.obj, o.pages);
+    }
+    Out::Ret(if auto { va as i64 } else { 0 })
+}
+
+/// System facts for the information screen. Unprivileged: it reveals nothing a task could not
+/// observe anyway. Page 0: (CPU id register, RAM frames, free frames, online CPUs, timer Hz).
+/// Page 1: (IOMMU enabled, devices it confines, live tasks, driver restarts so far).
+/// Page 2: (the harness asked for an interactive run, chaos-test seed or 0).
+/// Page 9: the caller's layout (heap start, stack top, ASLR on, FEAT_RNG present).
+/// Page 3, `arg` = task id: that task's (name 0..8, name 8..16, state code, restarts, role).
+/// A boot endpoint's name, at most 16 bytes (the task manager shows it).
+fn ep_name(e: u8) -> &'static str {
+    match e {
+        ipc::EP_SERVICE => "service",
+        ipc::EP_DRIVER => "driver",
+        ipc::EP_BLK => "block driver",
+        ipc::EP_ROFS => "system files",
+        ipc::EP_LFS => "data files",
+        ipc::EP_VFS => "file system",
+        6..=9 => "benchmark",
+        ipc::EP_BENCH_GO..=15 => "benchmark go",
+        ipc::EP_AUDIO => "audio service",
+        ipc::EP_GPU => "display driver",
+        ipc::EP_INFO => "info",
+        ipc::EP_KBD => "input driver",
+        ipc::EP_MONKEY => "fault injector",
+        ipc::EP_NET => "network driver",
+        _ => "endpoint",
+    }
+}
+
+/// A memory object's name, at most 16 bytes.
+fn obj_name(o: u8) -> &'static str {
+    match o {
+        obj::OBJ_SHARED => "shared",
+        obj::OBJ_BLK_MMIO => "blk registers",
+        obj::OBJ_BLK_RING => "blk ring",
+        obj::OBJ_BLK_BUF_ROFS => "blk buf rofs",
+        obj::OBJ_BLK_BUF_LFS => "blk buf lfs",
+        obj::OBJ_BLK_BUF_CLIENT => "blk buf client",
+        obj::OBJ_SHM_ROFS => "rofs shm",
+        obj::OBJ_SHM_LFS => "lfs shm",
+        obj::OBJ_SHM_ROFS_VFS => "rofs-vfs shm",
+        obj::OBJ_SHM_LFS_VFS => "lfs-vfs shm",
+        obj::OBJ_SHM_VFS_CLIENT => "vfs client shm",
+        obj::OBJ_SHM_VFS_PROGRAM => "vfs program shm",
+        obj::OBJ_SHM_BENCH => "bench results",
+        obj::OBJ_BLK_PCICFG => "blk pci config",
+        obj::OBJ_GPU_MMIO => "gpu registers",
+        obj::OBJ_GPU_PCICFG => "gpu pci config",
+        obj::OBJ_GPU_QUEUE => "gpu queue",
+        obj::OBJ_GPU_CMD => "gpu commands",
+        obj::OBJ_GPU_FB => "framebuffer",
+        obj::OBJ_KBD_MMIO => "input registers",
+        obj::OBJ_KBD_PCICFG => "input pci conf",
+        obj::OBJ_KBD_QUEUE => "input queue",
+        obj::OBJ_SHM_VFS_SHELL => "vfs shell shm",
+        obj::OBJ_SHM_SPIN => "spin flag",
+        obj::OBJ_SHM_VFS_PROG0 => "vfs program shm",
+        obj::OBJ_NET_MMIO => "net registers",
+        obj::OBJ_NET_PCICFG => "net pci config",
+        obj::OBJ_NET_QUEUES => "net queues",
+        obj::OBJ_NET_BUFS => "net buffers",
+        obj::OBJ_NET_RING => "net ring",
+        obj::OBJ_SHM_NET_PROG0 => "net program shm",
+        obj::OBJ_PTR_MMIO => "pointer regs",
+        obj::OBJ_PTR_PCICFG => "pointer pci cfg",
+        obj::OBJ_PTR_QUEUE => "pointer queue",
+        obj::OBJ_RNG_DMA => "rng buffer",
+        _ if obj::is_dynamic(o) => "shared memory",
+        _ => "memory",
+    }
+}
+
+fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
+    let f = frame(cur);
+    match page {
+        0 => {
+            f.x[1] = crate::frame::cpu::midr();
+            f.x[2] = mem::total_frames() as u64;
+            f.x[3] = mem::free_frames() as u64;
+            f.x[4] = crate::smp::online_mask().count_ones() as u64;
+            f.x[5] = timer::HZ;
+            Out::Ret(0)
+        }
+        1 => {
+            let (enabled, devices) = crate::smmu::summary();
+            f.x[1] = enabled as u64;
+            f.x[2] = devices as u64;
+            f.x[3] = (0..MAX_TASKS).filter(|&t| !matches!(sched::state(t), State::Free | State::Dead)).count() as u64;
+            f.x[4] = (0..MAX_TASKS).map(|t| task::RESTARTS[t].load(core::sync::atomic::Ordering::Relaxed) as u64).sum();
+            f.x[5] = crate::cap::nodes_in_use() as u64;
+            Out::Ret(0)
+        }
+        3 => {
+            // one row of the task table: (name bytes 0..8, name bytes 8..16, state code, restarts, role)
+            let t = arg as usize;
+            if t >= MAX_TASKS {
+                return Out::Ret(E_INVAL);
+            }
+            let code = match sched::state(t) {
+                State::Free => 0,
+                State::Ready => 1,
+                State::RecvWait(_) => 2,
+                State::CallWait => 3,
+                State::Sleep(_) => 4,
+                State::IrqWait(_) => 5,
+                State::RingWait(_) => 6,
+                State::Dead => 7,
+                State::ChildWait(_) => 8,
+                State::Embryo => 9,
+                State::WordWait(_) => 10,
+            };
+            let name = info(t).name.as_bytes();
+            let pack = |off: usize| (0..8).fold(0u64, |v, i| v | (name.get(off + i).copied().unwrap_or(0) as u64) << (8 * i));
+            f.x[1] = pack(0);
+            f.x[2] = pack(8);
+            f.x[3] = code;
+            f.x[4] = task::RESTARTS[t].load(core::sync::atomic::Ordering::Relaxed) as u64;
+            f.x[5] = info(t).role as u64;
+            Out::Ret(0)
+        }
+        7 => {
+            // pages task `arg` holds (a program's heap, stack, code, page tables, buffers; a thread counts for its program)
+            let t = arg as usize;
+            if t >= MAX_TASKS {
+                return Out::Ret(E_INVAL);
+            }
+            f.x[1] = mem::count_owned(mem::OWNER_TASK0 + task::aspace(t) as u8) as u64;
+            Out::Ret(0)
+        }
+        8 => {
+            // the caller's own task id (a thread's program: the id other programs know it by)
+            f.x[1] = task::aspace(cur) as u64;
+            Out::Ret(0)
+        }
+        2 => {
+            f.x[1] = crate::platform::interactive() as u64;
+            f.x[2] = crate::platform::chaos_seed();
+            f.x[3] = crate::platform::only();
+            Out::Ret(0)
+        }
+        5 => {
+            // a program's file-system session: (page index or 255, generation, program, parent program or 255); see spawn.rs
+            let t = arg as usize;
+            if t >= MAX_TASKS {
+                return Out::Ret(E_INVAL);
+            }
+            let (page, gen, owner) = crate::spawn::fs_session(t);
+            f.x[1] = page as u64;
+            f.x[2] = gen;
+            f.x[3] = owner as u64; // (the program a thread belongs to)
+            f.x[4] = crate::spawn::parent_of(owner) as u64; // (the program that started it, 255 if none)
+            Out::Ret(0)
+        }
+        6 => {
+            // a program's network session: (page index or 255, generation, program); see spawn.rs
+            let t = arg as usize;
+            if t >= MAX_TASKS {
+                return Out::Ret(E_INVAL);
+            }
+            let (page, gen, owner) = crate::spawn::net_session(t);
+            f.x[1] = page as u64;
+            f.x[2] = gen;
+            f.x[3] = owner as u64;
+            Out::Ret(0)
+        }
+        9 => {
+            // the layout of the caller's program: (heap window start, stack top, randomisation on, hardware random numbers)
+            let t = task::lock(task::aspace(cur));
+            f.x[1] = t.heap_base as u64;
+            f.x[2] = t.stack_top as u64;
+            f.x[3] = crate::rand::enabled() as u64;
+            f.x[4] = crate::rand::has_hardware() as u64;
+            Out::Ret(0)
+        }
+        15 => {
+            // how many capability nodes there are (the Capabilities program draws its meter against it)
+            f.x[1] = crate::cap::NODES as u64;
+            Out::Ret(0)
+        }
+        17 => {
+            // the capacity of the second memory tier (read-only): bytes of the compressed store (the result), its slots (x1), the pages the pager may
+            // write to disk in an hour (x2). The memory daemon scales its policy to them.
+            f.x[1] = crate::swap::NSLOTS as u64;
+            f.x[2] = crate::pager::WRITE_CAP_PER_HOUR;
+            Out::Ret(crate::swap::pool_bytes() as i64)
+        }
+        16 => {
+            // the second memory tier, for the task manager (read-only): pages written back so far (the result), pages read back (x1), pages now on disk
+            // | pager running << 16 (x2), bytes in the compressed store (x3), pages written this hour | the hourly cap << 32 (x4), writes held back (x5)
+            let (s, z) = (crate::pager::stats(), crate::swap::stats());
+            f.x[1] = s.read;
+            f.x[2] = s.slots_used | (s.registered as u64) << 16;
+            f.x[3] = z.bytes;
+            f.x[4] = s.hour_writes | crate::pager::WRITE_CAP_PER_HOUR << 32;
+            f.x[5] = s.deferred;
+            Out::Ret(s.written as i64)
+        }
+        10 => {
+            // one capability slot of a task, for the task manager: `arg` = task | slot << 8; answers (kind, object, rights, node), kind 0 for an
+            // empty slot (Endpoint 1, Memory 2, Console 3, Irq 4, MemCtl 5, Admin 6, Sched 7, Spawn 8, Factory 9). Read-only, like the other pages.
+            let (t, slot) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
+            if t >= MAX_TASKS || slot >= NCAPS {
+                return Out::Ret(E_INVAL);
+            }
+            let mut c = task::lock(t).caps[slot];
+            if !node_alive(c.node) {
+                c = Cap::NONE; // (revoked: as good as empty)
+            }
+            f.x[1] = c.kind as u8 as u64;
+            f.x[2] = c.obj as u64;
+            f.x[3] = c.rights as u64;
+            f.x[4] = c.node as u64;
+            Out::Ret(0)
+        }
+        14 => {
+            // what has been revoked from a task and can be given back, for the capabilities manager: `arg` = task | n << 8, the nth (oldest first).
+            // Answers (id, slot, kind, object, rights | 1 << 16 if what it hung under is still there); `x0` is E_INVAL past the end. Read-only.
+            let (t, n) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
+            if t >= MAX_TASKS {
+                return Out::Ret(E_INVAL);
+            }
+            match crate::cap::revoked_nth(t, n) {
+                (Some(r), _) => {
+                    (f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]) = (r.id as u64, r.slot as u64, r.kind as u8 as u64, r.obj as u64, r.rights as u64 | ((if r.parent == crate::cap::NO_PARENT { crate::spawn::session_cap_ok(t, r.slot as usize, r.kind, r.obj, r.rights) } else { node_alive(r.parent) }) as u64) << 16);
+                    Out::Ret(0)
+                }
+                _ => Out::Ret(E_INVAL),
+            }
+        }
+        13 => {
+            // what revoking a capability would take with it, for the task manager: `arg` = task | slot << 8. Answers (how many other capabilities are
+            // derived from it, a bit mask of the tasks holding them, how many capability nodes hang under it (it included), 1 if it is the root capability
+            // of its object, which `REVOKE_OF` refuses). Read-only.
+            let (t, slot) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
+            if t >= MAX_TASKS || slot >= NCAPS {
+                return Out::Ret(E_INVAL);
+            }
+            let c = task::lock(t).caps[slot];
+            if c.kind == Kind::None || !node_alive(c.node) {
+                return Out::Ret(E_BADCAP);
+            }
+            let mut marked = [false; crate::cap::NODES];
+            let nodes = crate::cap::mark_subtree(c.node, true, &mut marked);
+            let (mut copies, mut holders) = (0u64, 0u64);
+            for tt in 0..MAX_TASKS {
+                let caps = task::lock(tt).caps;
+                for (i, cc) in caps.iter().enumerate() {
+                    if cc.kind != Kind::None && marked[cc.node as usize] && !(tt == t && i == slot) {
+                        copies += 1;
+                        holders |= 1 << tt;
+                    }
+                }
+            }
+            let root = is_creator_root(t, slot, &c);
+            (f.x[1], f.x[2], f.x[3], f.x[4]) = (copies, holders, nodes as u64, root as u64);
+            Out::Ret(0)
+        }
+        11 => {
+            // who holds a capability to an object, for the task manager: `arg` = kind | object << 8 (kinds as in page 10). Answers bit masks of
+            // tasks (bit t is task t): (all holders, holders that may send / write, holders that may receive / map, the creator or 255, how many
+            // capabilities name it). Read-only.
+            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFF) as u8);
+            let (mut any, mut user, mut serve, mut total) = (0u64, 0u64, 0u64, 0u64);
+            for t in 0..MAX_TASKS {
+                let caps = task::lock(t).caps;
+                for c in caps.iter() {
+                    if c.kind as u8 != kind || c.kind == Kind::None || (c.obj != obj && matches!(c.kind, Kind::Endpoint | Kind::Memory | Kind::Irq)) {
+                        continue;
+                    }
+                    any |= 1 << t;
+                    total += 1;
+                    match c.kind {
+                        Kind::Endpoint => {
+                            if c.rights & R_SEND != 0 {
+                                user |= 1 << t;
+                            }
+                            if c.rights & R_RECV != 0 {
+                                serve |= 1 << t;
+                            }
+                        }
+                        Kind::Memory => {
+                            if c.rights & R_WRITE != 0 {
+                                user |= 1 << t;
+                            }
+                            if c.rights & R_MAP != 0 {
+                                serve |= 1 << t;
+                            }
+                        }
+                        _ => {
+                            user |= 1 << t;
+                            serve |= 1 << t;
+                        }
+                    }
+                }
+            }
+            let owner = match kind {
+                k if k == Kind::Endpoint as u8 => ipc::dynamic_owner(obj).map_or(255, |t| t as u64),
+                k if k == Kind::Memory as u8 => obj::get(obj).filter(|o| o.kind == ObjKind::Shared).map_or(255, |o| o.aux as u64),
+                _ => 255,
+            };
+            f.x[1] = any;
+            f.x[2] = user;
+            f.x[3] = serve;
+            f.x[4] = owner;
+            f.x[5] = total;
+            Out::Ret(0)
+        }
+        12 => {
+            // what a capability's object is, for the task manager: `arg` = kind | object << 8. Answers (name bytes 0..8, name bytes 8..16, size in pages
+            // or the interrupt number, class, creator or 255). Classes: 1 boot endpoint, 2 run-time endpoint, 3 RAM, 4 DMA buffer, 5 device registers,
+            // 6 shared memory made by a program, 7 interrupt, 8 other.
+            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFF) as u8);
+            let (name, size, class, owner): (&str, u64, u64, u64) = match kind {
+                k if k == Kind::Endpoint as u8 => match ipc::dynamic_owner(obj) {
+                    Some(t) => ("dynamic endpoint", 0, 2, t as u64),
+                    None => (ep_name(obj), 0, if obj >= ipc::EP_FIRST_DYNAMIC { 2 } else { 1 }, 255),
+                },
+                k if k == Kind::Memory as u8 => match obj::get(obj) {
+                    Some(o) => (
+                        obj_name(obj),
+                        o.pages as u64,
+                        match o.kind {
+                            ObjKind::Ram => 3,
+                            ObjKind::Dma => 4,
+                            ObjKind::Mmio => 5,
+                            ObjKind::Shared => 6,
+                            ObjKind::Unused => 8,
+                        },
+                        if o.kind == ObjKind::Shared { o.aux as u64 } else { 255 },
+                    ),
+                    None => ("(gone)", 0, 8, 255),
+                },
+                k if k == Kind::Irq as u8 => (match obj { obj::IRQ_BLK => "block irq", obj::IRQ_GPU => "display irq", obj::IRQ_NET => "network irq", _ => "interrupt" }, obj as u64, 7, 255),
+                k if k == Kind::Console as u8 => ("console", 0, 8, 255),
+                k if k == Kind::MemCtl as u8 => ("memory control", 0, 8, 255),
+                k if k == Kind::Admin as u8 => ("admin", 0, 8, 255),
+                k if k == Kind::Sched as u8 => ("scheduler", 0, 8, 255),
+                k if k == Kind::Spawn as u8 => ("spawn", 0, 8, 255),
+                k if k == Kind::Factory as u8 => ("endpoint factory", 0, 8, 255),
+                _ => ("?", 0, 8, 255),
+            };
+            let b = name.as_bytes();
+            let pack = |off: usize| (0..8).fold(0u64, |v, i| v | (b.get(off + i).copied().unwrap_or(0) as u64) << (8 * i));
+            f.x[1] = pack(0);
+            f.x[2] = pack(8);
+            f.x[3] = size;
+            f.x[4] = class;
+            f.x[5] = owner;
+            Out::Ret(0)
+        }
+        4 => {
+            f.x[1] = crate::platform::fuzz_seed();
+            f.x[2] = obj::dynamic_in_use() as u64;
+            Out::Ret(0)
+        }
+        _ => Out::Ret(E_INVAL),
+    }
+}
+
+/// `SCHED(op, slot, p1, p2, p3)`.
+///  * `SC_RT_SET`: reserve `p1` microseconds of CPU in every `p2` microseconds, on core `p3` (`u64::MAX`:
+///    the cheapest core with room). Needs a `Sched` capability with `R_RT` in `slot`. The task is confined to
+///    that core and runs ahead of everything else, earliest deadline first, until it has used its
+///    budget for the period. Returns the core.
+///  * `SC_RT_WAIT`: the job is done; sleep until the next period. Returns the instant (raw counter value,
+///    what `cntvct_el0` reads) at which that period starts.
+///  * `SC_RT_CLEAR`: give the reservation back.
+///  * `SC_STATS`: read-only measurements, selected by `p1` (see the match below).
+fn sched_call(cur: usize, a: [u64; 5]) -> Out {
+    let f = frame(cur);
+    match a[0] {
+        SC_RT_SET => {
+            if let Err(e) = lookup(cur, a[1], Kind::Sched, R_RT) {
+                return Out::Ret(e);
+            }
+            let hint = (a[4] != u64::MAX).then_some(a[4] as usize);
+            match sched::rt_set(cur, a[2], a[3], hint) {
+                Ok(core) => Out::Ret(core as i64),
+                Err(sched::RtError::Invalid) => Out::Ret(E_INVAL),
+                Err(sched::RtError::NoCapacity) => Out::Ret(E_FULL),
+            }
+        }
+        SC_RT_WAIT => match sched::rt_wait(cur) {
+            None => Out::Ret(E_INVAL),
+            Some((release, true)) => {
+                f.x[0] = release as u64; // written before the task can be woken
+                Out::Block
+            }
+            Some((release, false)) => Out::Ret(release as i64),
+        },
+        SC_RT_CLEAR => {
+            sched::rt_clear(cur);
+            Out::Ret(0)
+        }
+        SC_STATS => {
+            match a[1] {
+                // (switches, slice preemptions, wakeup preemptions, migrations, steals)
+                0 => {
+                    let k = sched::totals();
+                    (f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]) = (k.switches, k.slice_preempts, k.prio_preempts, k.migrations, k.steals);
+                }
+                // task `p2`: (counter ticks on efficiency cores, on performance cores, utilisation 0..1024, priority level, home core)
+                1 => {
+                    if a[2] as usize >= MAX_TASKS {
+                        return Out::Ret(E_INVAL);
+                    }
+                    let (l, b, u, p, h) = sched::task_stats(a[2] as usize);
+                    (f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]) = (l, b, u as u64, p as u64, h as u64);
+                }
+                // latency of priority level `p2` (0 real-time ... 3 heavy): (max, sum, count) in counter ticks
+                2 => {
+                    if a[2] >= 4 {
+                        return Out::Ret(E_INVAL);
+                    }
+                    let (m, s, n) = sched::latency(a[2] as usize);
+                    (f.x[1], f.x[2], f.x[3]) = (m, s, n);
+                }
+                // core `p2`: (utilisation 0..1024, busy counter ticks, kind 0 efficiency / 1 performance, requested frequency level)
+                3 => {
+                    if a[2] as usize >= crate::smp::MAX_CPUS {
+                        return Out::Ret(E_INVAL);
+                    }
+                    let (u, busy) = sched::core_stats(a[2] as usize);
+                    (f.x[1], f.x[2], f.x[3], f.x[4]) = (u as u64, busy, sched::core_kind(a[2] as usize) as u64, metal_sched::energy::target_util(u) as u64);
+                }
+                // the calling task's real-time reservation: (jobs, missed deadlines, budget left, runtime, period) in counter ticks
+                4 => match sched::rt_stats(cur) {
+                    Some((j, m, b, r, p)) => (f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]) = (j as u64, m as u64, b, r, p),
+                    None => return Out::Ret(E_INVAL),
+                },
+                // clock: (counter frequency, counter now, jiffy length in counter ticks)
+                5 => (f.x[1], f.x[2], f.x[3]) = (timer::freq(), timer::counter(), timer::interval()),
+                6 => sched::reset_latency(),
+                // timer interrupts taken by cores 0..3 so far
+                7 => {
+                    let t = sched::timer_irqs();
+                    (f.x[1], f.x[2], f.x[3], f.x[4]) = (t[0], t[1], t[2], t[3]);
+                }
+                _ => return Out::Ret(E_INVAL),
+            }
+            Out::Ret(0)
+        }
+        _ => Out::Ret(E_INVAL),
+    }
+}
+
+/// Kill every task running `role` (they are restarted if policy allows). Needs an `Admin`
+/// capability with `R_KILL`, and only the restartable service roles can be named: the block
+/// driver, the filesystem servers, the VFS, the display and keyboard drivers.
+fn kill_role(cur: usize, slot: u64, role: u64) -> Out {
+    if let Err(e) = lookup(cur, slot, Kind::Admin, R_KILL) {
+        return Out::Ret(e);
+    }
+    if !matches!(role, 4 | 5 | 6 | 7 | 12 | 14 | 18 | 19) {
+        return Out::Ret(E_INVAL);
+    }
+    Out::Ret(task::condemn_role(role as u8, sched::Doom::Killed) as i64)
+}
+
+/// Whether the capability `c` in `slot` of program `t` is one that revoking would destroy something with: the creator's capability of an endpoint or of
+/// shared memory, or of any other object a program made itself (a memory allocation): a capability with no parent that is not one the kernel
+/// gives every program (its console, its file and network session). Those are refused.
+fn is_creator_root(t: usize, slot: usize, c: &Cap) -> bool {
+    let object_root = match c.kind {
+        Kind::Endpoint => ipc::root_node(c.obj) == Some(c.node),
+        Kind::Memory => obj::get(c.obj).is_some_and(|o| o.kind == ObjKind::Shared && o.root == c.node),
+        _ => false,
+    };
+    object_root || (crate::cap::parent_of(c.node).is_none() && !crate::spawn::session_cap_ok(t, slot, c.kind, c.obj, c.rights))
+}
+
+/// Revoke one capability of another program (see `REVOKE_OF`).
+fn revoke_of(cur: usize, admin: u64, target: u64, slot: u64) -> Out {
+    if let Err(e) = lookup(cur, admin, Kind::Admin, R_REVOKE) {
+        return Out::Ret(e);
+    }
+    let t = target as usize;
+    if t >= MAX_TASKS || t < task::FIRST_DYNAMIC_TASK || task::aspace(t) == task::aspace(cur) || slot as usize >= NCAPS {
+        return Out::Ret(E_INVAL);
+    }
+    let c = task::lock(t).caps[slot as usize];
+    if c.kind == Kind::None || !node_alive(c.node) {
+        return Out::Ret(E_BADCAP);
+    }
+    let root = is_creator_root(t, slot as usize, &c);
+    if root {
+        return Out::Ret(E_PERM);
+    }
+    // (kept in a log first, so that it can be given back: what it hung under, or, for the session capabilities the kernel made itself, that it is
+    // exactly what the session has; and where it was mapped, so that the mapping can come back too)
+    let parent = crate::cap::parent_of(c.node).or_else(|| crate::spawn::session_cap_ok(t, slot as usize, c.kind, c.obj, c.rights).then_some(crate::cap::NO_PARENT));
+    if let Some(parent) = parent {
+        let map = task::lock(task::aspace(t)).maps.iter().find(|m| m.used && m.node == c.node).map_or((0, 0), |m| (m.va, m.pages));
+        crate::cap::log_revoked(t, slot as usize, c, parent, map);
+    }
+    Out::Ret(World::lock().revoke_subtree(c.node, true) as i64)
+}
+
+/// Map a memory capability's object into program `space` at `va` again, after a revoke removed the mapping (writable if the capability may write).
+fn remap(space: usize, c: Cap, va: usize) -> bool {
+    let Some(o) = obj::get(c.obj) else { return false };
+    let mut t = task::lock(space);
+    if (0..o.pages).any(|p| mmu::is_present(t.l1, va + p * mem::PAGE)) {
+        return false;
+    }
+    let Some(rec) = t.maps.iter().position(|m| !m.used) else { return false };
+    let perm = match (o.kind, c.rights & R_WRITE != 0) {
+        (ObjKind::Mmio, _) => Perm::Device,
+        (_, true) => Perm::Rw,
+        (_, false) => Perm::Ro,
+    };
+    for p in 0..o.pages {
+        let pa = if o.kind == ObjKind::Shared { obj::shm_frame(&o, p) } else { o.pa + p * mem::PAGE };
+        if mmu::map_user(t.l1, va + p * mem::PAGE, pa, perm, mem::OWNER_TASK0 + space as u8).is_err() {
+            for q in 0..p {
+                mmu::unmap_user(t.l1, va + q * mem::PAGE);
+            }
+            return false;
+        }
+    }
+    t.maps[rec] = task::MapRec { used: true, va, pages: o.pages, node: c.node };
+    true
+}
+
+/// Give back a capability that `REVOKE_OF` took from a program (see `RESTORE_OF`).
+fn restore_of(cur: usize, admin: u64, target: u64, id: u64) -> Out {
+    if let Err(e) = lookup(cur, admin, Kind::Admin, R_REVOKE) {
+        return Out::Ret(e);
+    }
+    let t = target as usize;
+    if t >= MAX_TASKS || t < task::FIRST_DYNAMIC_TASK || task::aspace(t) == task::aspace(cur) || matches!(sched::state(t), State::Free | State::Dead) {
+        return Out::Ret(E_INVAL);
+    }
+    let Some(r) = crate::cap::revoked_by_id(t, id as u32) else { return Out::Ret(E_BADCAP) };
+    // what it hung under must still be there (a session capability the kernel made itself: the session must still be exactly this), and so must the object
+    let root = r.parent == crate::cap::NO_PARENT;
+    let gone = if root { !crate::spawn::session_cap_ok(t, r.slot as usize, r.kind, r.obj, r.rights) } else { !node_alive(r.parent) };
+    if gone {
+        return Out::Ret(E_DEAD);
+    }
+    let object_there = match r.kind {
+        Kind::Endpoint => r.obj < ipc::EP_FIRST_DYNAMIC || ipc::dynamic_owner(r.obj).is_some(),
+        Kind::Memory => obj::get(r.obj).is_some_and(|o| o.kind != ObjKind::Unused),
+        _ => true,
+    };
+    if !object_there {
+        return Out::Ret(E_DEAD);
+    }
+    let mut tl = task::lock(t);
+    let slot = r.slot as usize;
+    if slot >= NCAPS || (slot == CONSOLE_SLOT && r.kind != Kind::Console) || tl.caps[slot].kind != Kind::None {
+        return Out::Ret(E_FULL); // (the program may have put something else there)
+    }
+    let node = if root { crate::cap::mint_node(None) } else { crate::cap::mint_restored(r.parent) };
+    let Some(node) = node else { return Out::Ret(E_NOMEM) };
+    let cap = Cap { kind: r.kind, obj: r.obj, rights: r.rights, node };
+    tl.caps[slot] = cap;
+    drop(tl);
+    // a memory capability that was mapped is mapped again where it was
+    if r.kind == Kind::Memory && r.map_pages > 0 {
+        remap(task::aspace(t), cap, r.map_va);
+    }
+    if r.kind == Kind::Endpoint && r.rights & R_RECV != 0 {
+        sched::note_recv_endpoint(t, r.obj);
+    }
+    crate::cap::forget_revoked_id(r.id);
+    Out::Ret(slot as i64)
+}
+
+/// Physical address / size of a DMA or MMIO object, for drivers holding `R_INFO`.
+fn cap_info(cur: usize, slot: u64) -> Out {
+    let c = match lookup(cur, slot, Kind::Memory, R_INFO) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    match obj::get(c.obj) {
+        Some(o) if o.kind != ObjKind::Ram && o.kind != ObjKind::Shared => {
+            let f = frame(cur);
+            f.x[1] = o.pa as u64;
+            f.x[2] = o.pages as u64;
+            f.x[3] = o.aux as u64;
+            Out::Ret(0)
+        }
+        _ => Out::Ret(E_PERM),
+    }
+}
+
+/// Map `pages` fresh anonymous pages at the end of the task's heap window; returns their base VA.
+/// The frames are *movable* (the compactor may relocate them) and belong to the task, so a
+/// crash reclaims them like any other memory.
+fn heap_grow(cur: usize, pages: usize) -> Out {
+    let cur = task::aspace(cur); // (the heap, its quota and its frames belong to the program, not to a thread)
+    let mut t = task::lock(cur);
+    // `pages` comes from userspace: a wrapping sum would slip past the quota check
+    let held = t.held_pages().saturating_add(crate::spawn::contig_pages(cur)); // (contiguous allocations count against the same limit)
+    if pages == 0 || held.checked_add(pages).map_or(true, |total| total > info(cur).heap_quota) {
+        return Out::Ret(E_NOMEM);
+    }
+    let base = t.heap_base + t.heap_pages * mem::PAGE;
+    if base + pages * mem::PAGE > task::HEAP_END {
+        return Out::Ret(E_NOMEM); // (the page after the heap stays unmapped)
+    }
+    let owner = mem::OWNER_TASK0 + cur as u8;
+    for p in 0..pages {
+        let va = base + p * mem::PAGE;
+        let ok = mem::alloc_movable(owner, cur, va).map_or(false, |pa| {
+            let mapped = mmu::map_user(t.l1, va, pa, Perm::Rw, owner).is_ok();
+            if !mapped {
+                mem::free(pa);
+            }
+            mapped
+        });
+        if !ok {
+            return Out::Ret(E_NOMEM); // pages mapped so far stay owned; reclaimed when the task dies
+        }
+        t.heap_pages += 1;
+    }
+    Out::Ret(base as i64)
+}
+
+/// Give back `count` pages of the heap window starting at page `first` (like madvise(DONTNEED)):
+/// they are unmapped and their frames freed; the window keeps its size, with a hole.
+fn heap_release(cur: usize, first: usize, count: usize) -> Out {
+    let t = task::lock(task::aspace(cur));
+    if first.checked_add(count).map_or(true, |e| e > t.heap_pages) {
+        return Out::Ret(E_INVAL);
+    }
+    let mut freed = 0;
+    for p in first..first + count {
+        let va = t.heap_base + p * mem::PAGE;
+        if crate::swap::release_page(t.l1, va) {
+            freed += 1;
+        }
+    }
+    mmu::flush_tlb();
+    Out::Ret(freed)
+}
+
+const MC_STATS: u64 = 0;
+const MC_COMPACT: u64 = 1;
+const MC_ALLOC: u64 = 2;
+const MC_FREE: u64 = 3;
+const MC_SWAP_OUT: u64 = 4;
+const MC_SWAP_STATS: u64 = 5;
+const MC_PAGER_REGISTER: u64 = 6;
+const MC_PAGER_NEXT: u64 = 7;
+const MC_PAGER_DONE: u64 = 8;
+const MC_SWAP_WRITEBACK: u64 = 9;
+const MC_PAGER_STATS: u64 = 10;
+/// MC_SWAP_OUT flags: evict without waiting for pages to age; only the caller's own pages.
+const MCS_FORCE: u64 = 1;
+const MCS_SELF: u64 = 2;
+/// Flags bits 8.. : only pages of task (value - 1), 0 = any task.
+/// ... only pages of the heap window.
+const MCS_HEAP: u64 = 4;
+/// MC_ALLOC flag: compact synchronously if no contiguous run exists.
+const MCF_DIRECT: u64 = 1;
+
+/// Memory management through a `MemCtl` capability. `a2` = operation.
+fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
+    let need = match op {
+        MC_STATS | MC_SWAP_STATS => R_MEM_STATS,
+        MC_SWAP_OUT | MC_SWAP_WRITEBACK => R_MEM_SWAP,
+        MC_PAGER_STATS => R_MEM_STATS,
+        MC_PAGER_REGISTER | MC_PAGER_NEXT | MC_PAGER_DONE => R_MEM_PAGER,
+        MC_COMPACT => R_MEM_COMPACT,
+        MC_ALLOC | MC_FREE => R_MEM_ALLOC,
+        _ => return Out::Ret(E_INVAL),
+    };
+    if let Err(e) = lookup(cur, slot, Kind::MemCtl, need) {
+        return Out::Ret(e);
+    }
+    let f = frame(cur);
+    match op {
+        MC_STATS => {
+            let s = compact::stats();
+            f.x[1] = mem::free_frames() as u64;
+            f.x[2] = mem::largest_free_run() as u64;
+            f.x[3] = s.failures;
+            f.x[4] = s.migrated;
+            f.x[5] = mem::free_runs() as u64;
+            Out::Ret(s.spurious as i64) // faults that raced with a migration and were retried
+        }
+        MC_SWAP_OUT => {
+            let filter = crate::swap::Filter { force: a4 & MCS_FORCE != 0, only: if a4 & MCS_SELF != 0 { Some(task::aspace(cur)) } else { ((a4 >> 8) as usize).checked_sub(1) }, heap_only: a4 & MCS_HEAP != 0 };
+            let (evicted, looked) = crate::swap::evict((a3 as usize).clamp(1, 1024), filter);
+            f.x[1] = looked as u64;
+            Out::Ret(evicted as i64)
+        }
+        MC_PAGER_REGISTER => Out::Ret(crate::pager::register(cur, a3 as usize, a4 as usize)),
+        MC_PAGER_NEXT => match crate::pager::next(cur, a3 as usize) {
+            Ok((kind, slot)) => {
+                f.x[1] = slot;
+                Out::Ret(kind as i64)
+            }
+            Err(e) => Out::Ret(e),
+        },
+        MC_PAGER_DONE => Out::Ret(crate::pager::done(cur, a3, a4 as usize)),
+        MC_SWAP_WRITEBACK => Out::Ret(crate::pager::want((a3 as usize).clamp(1, 1024))),
+        MC_PAGER_STATS => {
+            let s = crate::pager::stats();
+            f.x[1] = s.read;
+            f.x[2] = s.cancelled;
+            f.x[3] = s.failed;
+            f.x[4] = s.slots_used;
+            f.x[5] = s.registered as u64;
+            Out::Ret(s.written as i64)
+        }
+        MC_SWAP_STATS => {
+            let s = crate::swap::stats();
+            f.x[1] = s.bytes;
+            f.x[2] = s.out;
+            f.x[3] = s.back;
+            f.x[4] = s.full;
+            f.x[5] = s.touched;
+            Out::Ret(s.stored as i64)
+        }
+        MC_COMPACT => {
+            let (moved, done) = compact::compact((a3 as usize).clamp(1, 1024));
+            f.x[1] = done as u64;
+            Out::Ret(moved as i64)
+        }
+        MC_ALLOC => {
+            let pages = a3 as usize;
+            if pages == 0 || pages > 1024 {
+                return Out::Ret(E_INVAL);
+            }
+            let asp = task::aspace(cur);
+            let owner = mem::OWNER_TASK0 + asp as u8; // (freed with the address space, not with the thread)
+            // counted against the program's limit before anything is taken, under the lock `heap_grow` uses
+            if !crate::spawn::reserve_contig(asp, task::lock(asp).held_pages(), pages) {
+                return Out::Ret(E_NOMEM);
+            }
+            let Some(pa) = compact::alloc_contig(pages, owner, a4 & MCF_DIRECT != 0) else {
+                crate::spawn::release_contig(asp, pages);
+                return Out::Ret(E_NOMEM);
+            };
+            let mut t = task::lock(cur);
+            let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
+            let node = mint_node(None);
+            let obj = obj::alloc_dynamic(pa, pages);
+            match (free_slot, node, obj) {
+                (Some(s), Some(n), Some(o)) => {
+                    t.caps[s] = Cap { kind: Kind::Memory, obj: o, rights: R_MAP | R_WRITE | R_INFO, node: n };
+                    Out::Ret(s as i64)
+                }
+                (_, n, o) => {
+                    // out of capability slots / nodes / objects: undo
+                    crate::spawn::release_contig(asp, pages);
+                    for i in 0..pages {
+                        mem::free(pa + i * mem::PAGE);
+                    }
+                    if let Some(n) = n {
+                        free_node(n);
+                    }
+                    if let Some(o) = o {
+                        obj::release(o);
+                    }
+                    Out::Ret(E_NOMEM)
+                }
+            }
+        }
+        _ => {
+            // MC_FREE: a3 = slot of a Memory capability previously returned by MC_ALLOC
+            let c = match lookup_any(cur, a3) {
+                Ok(c) if c.kind == Kind::Memory => c,
+                _ => return Out::Ret(E_BADCAP),
+            };
+            let Some(o) = obj::get(c.obj) else { return Out::Ret(E_BADCAP) };
+            if !obj::is_dynamic(c.obj) {
+                return Out::Ret(E_PERM);
+            }
+            World::lock().revoke_subtree(c.node, true); // clears the capability and unmaps it everywhere
+            let holder = mem::owner_of(o.pa);
+            if holder >= mem::OWNER_TASK0 {
+                crate::spawn::release_contig((holder - mem::OWNER_TASK0) as usize, o.pages);
+            }
+            for i in 0..o.pages {
+                mem::free(o.pa + i * mem::PAGE);
+            }
+            obj::release(c.obj);
+            Out::Ret(0)
+        }
+    }
+}
+
+/// `SHM_CREATE(pages)`: fresh zeroed memory (1..=4096 pages) that can be mapped here and shared with other programs by
+/// granting the capability. Counted against the creator program's holding limit (like `MC_ALLOC`). The memory lives as
+/// long as the returned capability: when the creator exits or revokes it (`CAP_REVOKE` flag 1), every holder's copy and
+/// mapping goes and the frames are freed. `E_NOMEM`: over the limit or out of memory; `E_FULL`: no free slot, capability
+/// node or object-table entry.
+fn shm_create(cur: usize, pages: usize) -> Out {
+    if pages == 0 || pages > obj::SHM_MAX_PAGES {
+        return Out::Ret(E_INVAL);
+    }
+    let asp = task::aspace(cur);
+    let held = task::lock(asp).held_pages();
+    if !crate::spawn::reserve_contig(asp, held, pages) {
+        return Out::Ret(E_NOMEM);
+    }
+    let Some(list) = obj::shm_alloc(pages, mem::OWNER_TASK0 + asp as u8) else {
+        crate::spawn::release_contig(asp, pages);
+        return Out::Ret(E_NOMEM);
+    };
+    let mut t = task::lock(cur);
+    let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
+    let node = mint_node(None);
+    let object = node.and_then(|n| obj::shm_register(pages, asp, n, list));
+    match (free_slot, node, object) {
+        (Some(s), Some(n), Some(o)) => {
+            t.caps[s] = Cap { kind: Kind::Memory, obj: o, rights: R_MAP | R_WRITE | R_GRANT, node: n };
+            Out::Ret(s as i64)
+        }
+        (_, n, o) => {
+            // (no free slot, no capability node or no object-table entry: undo whatever did succeed)
+            crate::spawn::release_contig(asp, pages);
+            obj::shm_release_frames(list, pages, pages);
+            if let Some(n) = n {
+                free_node(n);
+            }
+            if let Some(o) = o {
+                obj::release(o);
+            }
+            Out::Ret(E_FULL)
+        }
+    }
+}
+
+/// `SHM_INFO(slot)`: how many pages the shared object has (so that a program that was given one can map and check it
+/// without trusting what the giver says about its size). Memory from other sources is not described here.
+fn shm_info(cur: usize, slot: u64) -> Out {
+    match lookup(cur, slot, Kind::Memory, R_MAP) {
+        Ok(c) => match obj::get(c.obj) {
+            // bit 32: the creator is gone (the memory stays as long as someone holds it); bit 33: this is the creator's
+            // capability and nobody holds a copy any more
+            Some(o) if o.kind == ObjKind::Shared => {
+                let alone = o.root == c.node && crate::cap::mark_subtree(c.node, false, &mut [false; crate::cap::NODES]) == 0;
+                Out::Ret(o.pages as i64 | ((o.aux == obj::SHM_ORPHAN) as i64) << 32 | (alone as i64) << 33)
+            }
+            _ => Out::Ret(E_INVAL),
+        },
+        Err(e) => Out::Ret(e),
+    }
+}
+
+/// Block until the device interrupts. `timeout` > 0 bounds the wait in ticks: a device that never answers
+/// makes the call return `E_TIMEDOUT` instead of blocking the driver for ever.
+fn irq_wait(cur: usize, slot: u64, timeout: u64) -> Out {
+    let c = match lookup(cur, slot, Kind::Irq, R_RECV) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    match irq::wait(c.obj, cur, timeout) {
+        irq::Wait::Ready => Out::Ret(0),
+        irq::Wait::Blocked => Out::Block,
+        irq::Wait::Busy => Out::Ret(E_FULL),
+    }
+}
+
+/// `CAP_GRANT(slot, task, rights mask, dest)`: `dest` 0 puts the capability in the target's first free slot, `dest` = n + 1 in slot n exactly (refused
+/// if that slot is not free), which is how a program manager gives back the capability a program expects in a fixed slot.
+fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out {
+    let c = match lookup_any(cur, slot) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    if c.rights & R_GRANT == 0 {
+        return Out::Ret(E_PERM);
+    }
+    let target = target as usize;
+    if target >= MAX_TASKS || matches!(sched::state(target), State::Free | State::Dead) {
+        return Out::Ret(E_INVAL);
+    }
+    let mut t = task::lock(target); // only the target's table changes (the source is just read above)
+    let dst = if dest == 0 {
+        let Some(d) = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None) else {
+            return Out::Ret(E_NOMEM);
+        };
+        d
+    } else {
+        let want = (dest - 1) as usize;
+        if want >= NCAPS || want == CONSOLE_SLOT {
+            return Out::Ret(E_INVAL);
+        }
+        if t.caps[want].kind != Kind::None {
+            return Out::Ret(E_FULL);
+        }
+        want
+    };
+    let Some(node) = crate::cap::mint_granted(c.node, cur) else { return Out::Ret(E_NOMEM) };
+    // rights can only shrink; GRANT is not passed on unless explicitly masked in
+    let rights = c.rights & mask;
+    t.caps[dst] = Cap { rights, node, ..c };
+    if c.kind == Kind::Endpoint && rights & R_RECV != 0 {
+        sched::note_recv_endpoint(target, c.obj);
+    }
+    Out::Ret(dst as i64)
+}
+
+/// `CAP_REVOKE(slot, flags)`: everything derived from the capability in `slot`; with flag 1 the capability itself too
+/// (for the creator of a run-time endpoint, that ends the endpoint).
+fn cap_revoke(cur: usize, slot: u64, itself: bool) -> Out {
+    let c = match lookup_any(cur, slot) {
+        Ok(c) => c,
+        Err(e) => return Out::Ret(e),
+    };
+    if itself && c.kind == Kind::Memory && obj::is_dynamic(c.obj) {
+        // giving up one's own run-time memory is freeing it (as MC_FREE): the object and the frames go back
+        if let Some(o) = obj::get(c.obj) {
+            if o.kind == ObjKind::Shared {
+                // the creator's capability: the object ends, for every holder. A holder's copy just goes.
+                if o.root == c.node {
+                    let n = World::lock().revoke_subtree(c.node, true);
+                    obj::shm_destroy(c.obj);
+                    return Out::Ret(n as i64);
+                }
+                return Out::Ret(World::lock().revoke_subtree(c.node, true) as i64);
+            }
+            let n = World::lock().revoke_subtree(c.node, true);
+            for i in 0..o.pages {
+                mem::free(o.pa + i * mem::PAGE);
+            }
+            obj::release(c.obj);
+            return Out::Ret(n as i64);
+        }
+    }
+    Out::Ret(World::lock().revoke_subtree(c.node, itself) as i64)
+}
+
+fn log(cur: usize, slot: u64, ptr: usize, len: usize) -> Out {
+    if let Err(e) = lookup(cur, slot, Kind::Console, 0) {
+        return Out::Ret(e);
+    }
+    if len > MAX_LOG {
+        return Out::Ret(E_INVAL);
+    }
+    // copy the user bytes out under the task lock (the compactor may be moving its pages),
+    // then print without it
+    let mut buf = [0u8; MAX_LOG];
+    {
+        let space = task::aspace(cur);
+        let t = task::lock(space);
+        for (i, b) in buf.iter_mut().take(len).enumerate() {
+            let Some(pa) = ptr.checked_add(i).and_then(|va| crate::swap::translate(&t, space, va)) else { return Out::Ret(E_INVAL) };
+            let Some(v) = crate::frame::phys::try_read_u8(pa) else { return Out::Ret(E_INVAL) };
+            *b = v;
+        }
+    }
+    uart::write_bytes(&buf[..len]);
+    Out::Ret(len as i64)
+}

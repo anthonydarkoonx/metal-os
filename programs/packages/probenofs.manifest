@@ -1,0 +1,5 @@
+id = probenofs
+name = Probe (no files)
+version = 1.0.0
+heap_pages = 48
+ability = main service bin/probe

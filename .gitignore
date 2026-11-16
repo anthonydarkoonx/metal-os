@@ -1,0 +1,28 @@
+target/
+build.log
+user/build/
+target-window/
+disk.img
+target-noinherit/
+build-rfc8878.txt
+__pycache__/
+build-seed.bin
+run[0-9]*.img
+ui-*.img
+*.log
+*.sum
+build-*.png
+build-*.sock
+build-probe/
+kernel/target-*/
+programs/target*/
+user/target/
+rock 3c test/metal/user-target/
+rock 3c test/metal/logs/
+rock 3c test/boot/*.bin
+programs/build/
+*.img
+rock 3c test/third_party/
+rock 3c test/metal/stage/
+rock 3c test/**/target/
+rock 3c test/**/target-*/

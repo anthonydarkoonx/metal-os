@@ -1,0 +1,6 @@
+[package]
+name = "metal-rand"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ChaCha20 (RFC 8439) block function and a fast-key-erasure random generator on top of it; no_std"

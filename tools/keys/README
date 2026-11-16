@@ -1,0 +1,7 @@
+Signing keys for the sample apps (Ed25519 seeds, 64 hex digits).
+
+dev.seed    the key the system image trusts (its public half is written to /system/etc/app-keys by tools/mkmap.py)
+rogue.seed  a key the system does NOT trust: signs the `rogue` test package, which the app manager must refuse
+
+These are test keys and are meant to be public. A real deployment keeps its signing key off the build machine and puts only
+the public key into /system/etc/app-keys.

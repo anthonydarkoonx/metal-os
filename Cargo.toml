@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["libs/*"]
+exclude = ["kernel", "user"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+# host tests render pictures and run property tests: optimise them
+[profile.test]
+opt-level = 2

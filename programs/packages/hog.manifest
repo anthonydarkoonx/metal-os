@@ -1,0 +1,6 @@
+id = hog
+name = Memory Hog
+version = 1.0.0
+heap_pages = 40
+class = background
+ability = main service bin/hog

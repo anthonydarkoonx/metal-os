@@ -1,0 +1,32 @@
+[package]
+name = "metal-user"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+
+[workspace]
+
+[dependencies]
+metal-erofs = { path = "../libs/metal-erofs" }
+metal-lfs = { path = "../libs/metal-lfs" }
+metal-loader = { path = "../libs/metal-loader" }
+metal-net = { path = "../libs/metal-net" }
+metal-gfx = { path = "../libs/metal-gfx" }
+metal-input = { path = "../libs/metal-input" }
+metal-edit = { path = "../libs/metal-edit" }
+metal-compact = { path = "../libs/metal-compact" }
+metal-driver-rt = { path = "../libs/metal-driver-rt" }
+
+[profile.release]
+panic = "abort"
+# the kernel gives every boot task a private copy of this image: small matters (about 26 copies). The drawing crates, where the
+# desktop spends its time, are optimised for speed instead.
+opt-level = "s"
+lto = true
+codegen-units = 1
+
+[profile.release.package.metal-gfx]
+opt-level = 3
+
+[profile.dev]
+panic = "abort"

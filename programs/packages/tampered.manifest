@@ -1,0 +1,3 @@
+id = tampered
+version = 1.0.0
+ability = main service bin/counter

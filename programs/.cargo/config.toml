@@ -1,0 +1,8 @@
+[build]
+target = "aarch64-unknown-none-softfloat"
+
+# the browser's TLS needs random numbers: the `getrandom` crate has no backend for this OS, so it is told to call one the program defines
+# (browser/main.rs: the CPU's hardware generator, and nothing else). The Makefile's position-independent build sets RUSTFLAGS, which replaces
+# this setting, so the same flag is in its PIE_FLAGS.
+[target.aarch64-unknown-none-softfloat]
+rustflags = ["--cfg", "getrandom_backend=\"custom\""]

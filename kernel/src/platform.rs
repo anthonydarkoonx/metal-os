@@ -1,0 +1,18 @@
+//! The machine the kernel runs on. Exactly one platform is compiled in, chosen by a cargo feature; it provides:
+//!
+//! * the early devices as types for the traits in `hal.rs`: `Uart` (Console), `Intc` (IrqController), `Power` (PowerControl), `Clock` (Rtc);
+//! * constants: `RAM_BASE`, `LINK_BASE`, `RAM_UNMAPPED_BELOW`, `HAS_SMMU`, `SWAP_*`, `DESKTOP_HEAP_PAGES`, `BANNER_SUFFIX`, `INTC_NAME`, `SEED_SOURCE`;
+//! * hooks: `map_devices`, `psci_power`, `psci_cpu_on`, `exit_machine`, `early_boot`, `entropy_report`, `init_devices`, `irq`, `probe_devices`,
+//!   `boot_caps`, `spawn_extra_tasks`, `rtc_seconds`;
+//! * the boot-time parameters and test switches: `ram_size`, `flag`, `number`, `bytes`, `init_flags`, `interactive`, `map_log`, `only`, `fuzz_seed`,
+//!   `chaos_seed`.
+//!
+//! The shared kernel files call only these names, never a machine's addresses. To add a machine: write `platform/<machine>.rs`, give it a feature in
+//! Cargo.toml and a line below. (A board build that overlays its own `platform.rs` replaces this file and must supply the same names.)
+#[cfg(feature = "qemu-virt")]
+mod qemu_virt;
+#[cfg(feature = "qemu-virt")]
+pub use qemu_virt::*;
+
+#[cfg(not(feature = "qemu-virt"))]
+compile_error!("select a platform feature (see kernel/src/platform.rs)");

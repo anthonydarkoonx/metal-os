@@ -31,36 +31,6 @@ specifications, hardware documentation, or measurements of file formats.
 | `kernel/src/sched.rs`, `kernel/src/timer.rs`, `libs/metal-sched/src/{rt,util,energy}.rs` (time slices, real-time reservations, load balancing, energy-aware placement) | Textbook algorithms written for this project: earliest-deadline-first scheduling and its utilisation bound (Liu & Layland, 1973); periodic reservations with budget enforcement (the constant-bandwidth-server idea of throttling a task that overruns its budget until its period ends); round robin with a per-class quantum; a decaying average of busy time for utilisation; a convex power model for choosing the cheapest core. The Linux scheduler (and its deadline and energy-aware code) was not consulted, and no code, constants or names were taken from it. The power figures are nominal, rounded numbers chosen for this project, not from any datasheet or kernel table |
 | `tools/` | original |
 
-## The browser (`programs/browser/`) and its third-party crates
-
-The engine (URL and HTTP parsing, the HTML tokenizer and tree builder, the CSS parser, selectors and cascade, layout, painting, the picture and font plumbing) is
-original, written from the public specifications: RFC 3986 and RFC 9112, the WHATWG HTML tokenizer and tree-construction descriptions in simplified form, the CSS
-Syntax, Selectors, Color, Values, Box Model, Flexbox and Tables specifications, and CSS 2.1's margin-collapsing and inline-formatting rules. No code, tables or
-names were taken from Gecko, Servo, Blink or WebKit, and none of those sources was consulted. The user-agent stylesheet (`style.rs`) lists the usual defaults in
-the form the HTML specification's rendering section describes them. Real web pages (Hacker News, NPR's text site, a personal blog, Wikipedia) were rendered on the
-host as test material only; none of their content is in the repository.
-
-**This is the first part of the repository that uses third-party crates.** They are pinned to exact versions in `programs/Cargo.lock`, all permissively licensed, none
-copyleft:
-
-| crate | use | license |
-|---|---|---|
-| `rustls` 0.23.46 | the TLS protocol engine (`no_std`, "unbuffered" API) | Apache-2.0 OR ISC OR MIT |
-| `rustls-rustcrypto` 0.1.0-pre.0 and the RustCrypto crates under it (`aes-gcm`, `chacha20poly1305`, `p256`, `p384`, `x25519-dalek`, `ed25519-dalek`, `rsa`, `sha2`, ...) | the cryptographic algorithms behind it. **A pre-release, unaudited.** | MIT OR Apache-2.0 |
-| `rustls-webpki` | X.509 chain and name verification | ISC |
-| `webpki-roots` 1.0.12 | Mozilla's root certificates as data | CDLA-Permissive-2.0 |
-| `zune-inflate` 0.2.54 | gzip / deflate decoding | MIT OR Apache-2.0 OR Zlib |
-| `brotli-decompressor` 5.0.3 | brotli decoding (`no_std`) | BSD-3-Clause OR MIT |
-| `kataan` 0.0.10 (+ `puremp` 0.2.5, `timezone-data` 0.2.0) | JavaScript engine, its `alloc`-only build with `regex` (no JIT, no host runtime, no Intl); behind `programs/browser/src/js.rs` | MIT |
-| `image-webp` 0.2.4 (vendored and adapted to `no_std` in `programs/browser/src/webp/`, licenses alongside) | WebP decoding | MIT OR Apache-2.0 |
-| `fontdue` 0.9.5 (with `ttf-parser`, `hashbrown`) | TrueType rasterisation | MIT OR Apache-2.0 OR Zlib |
-| `zune-png`, `zune-jpeg`, `zune-core`, `zune-inflate` | PNG and JPEG decoding | MIT OR Apache-2.0 OR Zlib |
-| `getrandom` 0.4.3 | only to name its `Error` type in the custom backend (`browser/main.rs`), which calls the kernel's `GETRANDOM` | MIT OR Apache-2.0 |
-
-The five font files in `programs/browser/fonts/` are **IBM Plex Sans** (regular, bold, italic, bold italic) and **IBM Plex Mono** (regular), unmodified, under the SIL
-Open Font License 1.1 (the license text and copyright notice are in `fonts/COPYRIGHT-and-OFL-1.1.txt`, from the Debian `fonts-ibm-plex` package). They are embedded
-in the program as data; the same family is already used for the interface (see "Typeface" below).
-
 ## GPL tools used as black-box test oracles
 
 `mkfs.erofs`, `dump.erofs` and `fsck.erofs` (erofs-utils) and the `zstd`/`lz4` command-line tools are
@@ -76,7 +46,7 @@ vendored or shipped, and no source from them is in this repository.
   covers is where the *code* comes from.
 
 ## Typeface
-`libs/metal-gfx/src/font_data.rs` holds glyph bitmaps of **IBM Plex Sans** (Regular, Medium, SemiBold), rasterised by `tools/mkfont.py` from the font files of the build machine (`/usr/share/fonts/truetype/ibm-plex`). IBM Plex is published under the SIL Open Font License 1.1, which permits embedding and distribution; the bitmaps are not a font program and are not named as one. The 5x9 bitmap font of the terminal (`libs/metal-gfx/src/font.rs`) was drawn for this project.
+`libs/metal-gfx/src/font_data.rs` holds glyph bitmaps of **IBM Plex Sans** and **IBM Plex Mono**, rasterised from the font files of the original build machine (`/usr/share/fonts/truetype/ibm-plex`; the generator script was removed with the GUI on 2026-11-16, the data file stays). The terminal draws with the monospaced face (`typeface::MONO`). IBM Plex is published under the SIL Open Font License 1.1, which permits embedding and distribution; the bitmaps are not a font program and are not named as one. The 5x9 bitmap font in `libs/metal-gfx/src/font.rs` was drawn for this project.
 
 ## ROCK 3C test folder (exception)
 `rock 3c test/` is the one place where GPL-2.0 / Linux / U-Boot derived code is allowed, for testing on real hardware. Its rules are in `rock 3c test/EXCEPTION.md`, and its sources are in `rock 3c test/PROVENANCE-ROCK3C.md`. Nothing from that folder may flow back into the rest of the tree.

@@ -129,7 +129,7 @@ fn sys_path(id: &str) -> String {
 }
 
 /// The note that says "the package of this program is the one in the system image": installing a system program writes this, not a copy of the package
-/// (the browser is several MiB, more than the data disk of a small machine has room for, and the system image cannot be changed under it).
+/// (a package can be several MiB, more than the data disk of a small machine has room for, and the system image cannot be changed under it).
 fn link_path(id: &str) -> String {
     format!("/data/programs/{id}.sys")
 }
@@ -286,7 +286,7 @@ impl Mgr {
         }
         let m = pkg.manifest.clone();
         let a = m.abilities.get(ab).ok_or(E_NOABILITY)?;
-        // the program's image is cut out of the package where it lies (a browser is several MiB: no second copy, the manager's heap is not that big)
+        // the program's image is cut out of the package where it lies (a package can be several MiB: no second copy, the manager's heap is not that big)
         let (start, len) = {
             let f = pkg.file(&a.entry).ok_or(E_FAILED)?;
             (f.as_ptr() as usize - bytes.as_ptr() as usize, f.len())

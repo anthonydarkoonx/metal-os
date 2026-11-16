@@ -666,7 +666,7 @@ pub fn netd() -> ! {
 
 // =====================================================================================================================
 // Network time (SNTP, RFC 4330): the board has no battery-backed clock to read, so once the network is up netd asks a time
-// server and sets the kernel's wall clock (SETTIME, which only this service may call). Without a wall clock the browser
+// server and sets the kernel's wall clock (SETTIME, which only this service may call). Without a wall clock TLS
 // cannot check certificate validity dates. Repeats hourly; tries the next server after a failure.
 // =====================================================================================================================
 const NTP_SERVERS: [&str; 3] = ["pool.ntp.org", "time.cloudflare.com", "time.google.com"];

@@ -5,8 +5,7 @@ from memory and **must be checked against each board's documentation** before re
 
 ## What is portable as it is
 * The architecture-neutral core: scheduler (`kernel/src/sched.rs`, `libs/metal-sched`), capabilities, IPC and rings, memory manager policy
-  (compaction, zram swap, pager), spawn and the loader, the program manager, and every crate in `libs/` (file systems, network stack, window manager,
-  UI toolkit, compositor logic, programs). They are `no_std`, safe Rust, and host-tested.
+  (compaction, zram swap, pager), spawn and the loader, the program manager, and every crate in `libs/` (file systems, network stack, programs). They are `no_std`, safe Rust, and host-tested.
 * The Rust target (`aarch64-unknown-none-softfloat`: no floating point in the kernel) runs on any ARMv8-A core.
 * `boot.S` already drops from EL2 to EL1 and enables the GICv3 system-register interface "on hardware with a GICv3", so it expects to be entered the way
   U-Boot or board firmware enters a kernel. The kernel is position independent (KASLR moves it), so the link address is not a hard problem.
@@ -22,8 +21,8 @@ from memory and **must be checked against each board's documentation** before re
 | Boot hand-off | `boot.S`, `main.rs` | no use of the firmware's device tree pointer or memory map | at least the memory ranges; ideally a small device-tree reader for bases and interrupts |
 | Console | `uart.rs` | PL011 at 0x0900_0000, polled, no setup | the board's UART (PL011 or a 16550-style one with a different register layout), clock and pin setup if firmware did not leave it ready |
 | Interrupts | `gic.rs` (GICv2: GICD 0x0800_0000, GICC 0x0801_0000) | GICv2 at fixed addresses | the board's GIC; many SoCs have a GICv3 (distributor, redistributors, system registers): `gic.rs` has no GICv3 driver |
-| Cores, power | `smp.rs` (`MAX_CPUS` 4, PSCI CPU_ON through `hvc #0`), `frame::cpu::psci_power` (SYSTEM_OFF / SYSTEM_RESET, same conduit, used by Start > Shut Down / Restart) | PSCI over HVC, core id = index | PSCI over **SMC** (after the EL2 to EL1 drop nothing handles HVC), the board's core ids, 4 or 8 cores; some older firmware uses spin tables instead of PSCI |
-| Clock | `platform.rs` (PL031 RTC at 0x0901_0000) | an RTC at a fixed address | the board's RTC, or none (the taskbar clock then shows dashes, `SystemTime::now()` is `None`) |
+| Cores, power | `smp.rs` (`MAX_CPUS` 4, PSCI CPU_ON through `hvc #0`), `frame::cpu::psci_power` (SYSTEM_OFF / SYSTEM_RESET, same conduit, used to shut down and restart) | PSCI over HVC, core id = index | PSCI over **SMC** (after the EL2 to EL1 drop nothing handles HVC), the board's core ids, 4 or 8 cores; some older firmware uses spin tables instead of PSCI |
+| Clock | `platform.rs` (PL031 RTC at 0x0901_0000) | an RTC at a fixed address | the board's RTC, or none (`SystemTime::now()` is `None`) |
 | Test hooks | `platform.rs` (fw_cfg: RAM size, `opt/metal/*` flags), semihosting exit in `sched.rs` | QEMU's fw_cfg and semihosting | nothing: both are already optional (no fw_cfg means every flag is off and RAM is 128 MiB; keep an explicit RAM size) |
 | PCIe | `pci.rs` (ECAM 0x40_1000_0000, window 0x1000_0000..0x3eff_0000, only virtio vendor 0x1af4 matched) | firmware-free, ready-made host bridge | a host-controller driver and window set-up per SoC (if the board's devices hang off PCIe at all) |
 | IOMMU | `smmu.rs` (SMMUv3 at 0x0905_0000) | an Arm SMMUv3 confines every user-space driver's DMA | most SBC SoCs do not have one (some have a vendor IOMMU, a few an SMMU). Without it a user-space driver with a DMA-capable device can reach any memory, which weakens the "drivers are ordinary confined programs" story (see below) |
@@ -32,7 +31,7 @@ from memory and **must be checked against each board's documentation** before re
 
 ### The drivers a board needs (the real work)
 1. **Storage:** an SD/eMMC controller (SDHCI, Arasan, DesignWare MMC or a Broadcom/Rockchip variant) plus clocks.
-2. **Display:** start with the framebuffer the firmware leaves (a "simple framebuffer": address, size, stride from the device tree or firmware); a real HDMI/DSI driver is far larger. The compositor already draws into a framebuffer and flushes rectangles, so it needs only a driver that shows a rectangle (the `GPU_FLUSH` / `GPU_FLUSH2` protocol; on a plain framebuffer a flush is a cache clean).
+2. **Display:** start with the framebuffer the firmware leaves (a "simple framebuffer": address, size, stride from the device tree or firmware); a real HDMI/DSI driver is far larger. The terminal session (`user/src/desktop.rs`) already draws into a framebuffer and flushes rectangles, so it needs only a driver that shows a rectangle (the `GPU_FLUSH` / `GPU_FLUSH2` protocol; on a plain framebuffer a flush is a cache clean).
 3. **Input:** USB keyboard and mouse need a USB host controller stack (xHCI or DWC2) and HID: the largest single item. A serial-only shell is the first milestone.
 4. **Network:** the SoC's Ethernet MAC (or a PCIe NIC) plus PHY set-up; the stack in `libs/metal-net` is independent of it.
 5. **Platform plumbing** (clocks, resets, pin mux, regulators) that firmware may or may not have done.
@@ -40,7 +39,7 @@ from memory and **must be checked against each board's documentation** before re
 ## Suggested order
 1. **A platform layer. (Started 2026-11-16: `kernel/src/hal.rs` has the traits for console, interrupt controller, power/cores and clock; QEMU `virt` is `kernel/src/platform/qemu_virt.rs`; still to do: memory map and entropy behind the same layer, and the board's own files in the new shape, see BOARD-SYNC.md.)** Move every constant and little driver in the table above behind one module per target (`platform/qemu_virt.rs`, `platform/<board>.rs`) chosen by a cargo feature: memory map, UART, interrupt controller, PSCI conduit, RTC, entropy, load address. This is exactly the code that belongs in the framework side of the framekernel layering (`kernel/src/frame.rs` and its siblings), so the port is "implement the frame for a new board", and the safe modules (`cap`, `ipc`, `sched`, `spawn`, ...) stay as they are.
 2. **Milestone 1:** boot to the serial console on one board: memory map, UART, interrupt controller, timer, PSCI over SMC, and a larger frame table. QEMU can help before hardware arrives if it has a model of the board (check the installed QEMU's machine list); the interrupt controller and PSCI parts can be tried on QEMU `virt` with `gic-version=3`.
-3. **Milestone 2:** the firmware framebuffer plus the serial shell: the desktop appears, driven by a UART keyboard if need be.
+3. **Milestone 2:** the firmware framebuffer plus the serial shell: the terminal appears on the screen, driven by a UART keyboard if need be.
 4. **Milestone 3:** storage (the file systems and the program manager's data partition need it), then USB input, then network.
 
 ## Design points to decide before the first board

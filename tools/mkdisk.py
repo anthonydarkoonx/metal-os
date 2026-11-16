@@ -6,7 +6,7 @@
   sectors 1024..13311 system partition: read-only EROFS image (6 MiB)
   sectors 13312..24575 data partition: log-structured store (formatted by its server)
 (Layout 4: the system partition grew from 4 to 6 MiB for the JavaScript engine (Kataan, about 1.3 MB compressed), and the disk from 10 to 12 MiB so the data
-partition kept its size. Layout 3: the system partition grew from 2 to 4 MiB when the browser (TLS and the root certificates) outgrew it, and the disk from 8 to 10 MiB so the
+partition kept its size. Layout 3: the system partition grew from 2 to 4 MiB when TLS and the root certificates outgrew it, and the disk from 8 to 10 MiB so the
 data partition kept its size. Layout 2 had grown it from 1.5 to 2 MiB. Byte 40 of sector 0 says "layout=4"; an older disk is not kept.)
 """
 import os

@@ -162,7 +162,7 @@ impl Command {
 
     /// Start this code (an ELF image) instead of reading `program` from a file; `program` still names it for `argv[0]`.
     pub fn image(&mut self, bytes: Vec<u8>) -> &mut Command {
-        // (shared, not copied, when the command starts: a browser-sized image must not be held twice)
+        // (shared, not copied, when the command starts: a large image must not be held twice)
         self.image = Some(alloc::sync::Arc::new(bytes));
         self
     }

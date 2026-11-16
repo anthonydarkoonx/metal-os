@@ -29,8 +29,8 @@ See `PROVENANCE.md` for where every component comes from (no GPL-derived code). 
 | `libs/metal-erofs` | read-only EROFS reader incl. LZ4- and ZSTD-compressed files and big physical clusters; runs in the `rofs-server` task |
 | `libs/metal-lfs` | log-structured CoW block store with segment cleaning; runs in the `lfs-server` task |
 | `libs/metal-map` | the `.map` program package format: parser, validator, builder, trust store and signature policy (see `docs/PROGRAMS.md`) |
-| `libs/metal-gfx` | 2D drawing: clipped anti-aliased shapes, liquid glass (refraction, frosting, specular edges), cached shadows and glass, text (kept as the drawing foundation of the new GUI) |
-| `libs/metal-input` | device-neutral GUI input: pointer (mouse/touch/pen) and key events in 24.8 fixed point, the translator for the drivers' packed words, the gesture recogniser (tap, context menu, pan, fling, pinch) |
+| `libs/metal-gfx` | 2D drawing primitives and the bitmap/outline typefaces; the terminal draws its text with it. There is no GUI on top of it (it was removed on 2026-11-16) |
+| `libs/metal-input` | device-neutral input events: pointer (mouse/touch/pen) and key events in 24.8 fixed point, the translator for the drivers' packed words, the gesture recogniser (tap, context menu, pan, fling, pinch). Host-tested; nothing consumes it at the moment |
 | `libs/metal-ed25519` | SHA-512 and Ed25519 signature verification (RFC 8032), no heap |
 | `libs/metal-sched` | big.LITTLE placement policy; the kernel feeds it a mock topology |
 | `libs/metal-driver-rt` | what the user-space tasks and the device drivers share: the system-call layer and `println!`, the mapping layer, virtio, DMA cache maintenance, the driver/client protocols (`proto`) and the network ring layout (see `docs/DRIVER-PACKAGES.md`) |
@@ -469,9 +469,8 @@ A line is `cmd args | cmd args ... [> file | >> file]`, words may be quoted, and
 text, not regular expressions). `>` / `>>` write files on `/data` (`/system` is read-only and says so).
 `ps` lists the kernel's task table (state, restarts). Keys: **Tab** completes command names, files and
 directories (and lists the choices when there are several), Up/Down history, Backspace, Ctrl-L clears,
-Ctrl-C cancels. `make run-window` opens it; click into the window to give it the keyboard
-(Ctrl-Alt-G releases it). The system keeps running there after the tests finish (only the CPU-hog demo
-is stopped), so the clock keeps counting. Output is upper/lower case as typed; there is no mouse.
+Ctrl-C cancels. `make run-window` opens a QEMU window with the terminal centred on a plain backdrop (`user/src/desktop.rs`); click into the window to give it the keyboard
+(Ctrl-Alt-G releases it). That session skips the tests and starts the program manager. Output is upper/lower case as typed; there is no mouse support.
 
 *How it is tested.* The display driver's test card, and its restart after the IOMMU kills it, are checked from the guest's log by `make qemu-test` and `make qemu-test-noncoherent`. The screen itself is no longer read back from outside (the QMP screenshot harness went with the desktop).
 
@@ -506,7 +505,7 @@ real `mkfs.erofs` output (plain, LZ4, LZ4HC, ZSTD, legacy-index, 1 KiB blocks, b
 clusters: 172 files byte-for-byte in each), a ZSTD decoder checked against the reference `zstd` encoder
 (192 frames, levels 1-19, plus 30,000 corrupted frames that must not panic), LZ4, ZRAM.
 
-Not implemented (despite the original spec): a window system or compositor (a phone-style one was built and removed again on 2026-10-27), a mouse, a GPU beyond one 2D
+Not implemented (despite the original spec): a window system, compositor or any GUI (several were built and all were removed; the last on 2026-11-16), a mouse, a GPU beyond one 2D
 scanout (no 3D, cursor, resize or multiple outputs), shell features beyond line editing (no pipes,
 scripts, job control or tab completion); real SoC/mobile drivers; ARM CCA/RME realms (driver
 isolation here is plain EL0 + MMU); an IOMMU for devices other than the block device (only virtio-blk, virtio-gpu and the keyboard are

@@ -1,4 +1,4 @@
-//! The interface typeface: IBM Plex Sans, rasterised at the sizes the interface uses (`tools/mkfont.py`, data in `font_data.rs`),
+//! The typeface: IBM Plex, rasterised at fixed sizes (data in `font_data.rs`; the generator script is gone, see PROVENANCE.md),
 //! anti-aliased, proportional. A `Face` is one size and weight. Coordinates: `label` takes the top-left of the *line box*; the text
 //! sits on its baseline `ascent` pixels below it, and the box is `line_height()` tall.
 use crate::{blend, Canvas};

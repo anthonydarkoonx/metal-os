@@ -9,9 +9,7 @@ extern crate alloc;
 
 pub mod font;
 mod font_data;
-pub mod icons;
 pub mod typeface;
-pub use icons::Icon;
 pub use typeface::Face;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -636,7 +634,7 @@ impl Canvas<'_> {
 mod tests;
 
 // ---------------------------------------------------------------------------------------------------------------
-// anti-aliased polygons and lines (icons)
+// anti-aliased polygons and lines
 // ---------------------------------------------------------------------------------------------------------------
 fn isqrt64(v: i64) -> i64 {
     if v < 2 {

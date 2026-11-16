@@ -38,7 +38,7 @@ pub const HEAP_SLIDE_PAGES: usize = 4096;
 pub const HEAP_END: usize = 0x8F00_0000;
 pub const MAX_HEAP_PAGES: usize = 512;
 /// The storage servers (roles 6 and 7: the log-structured store and the file layer) stage a whole write in memory before it is committed, so the
-/// largest file that can be installed is about what their heap holds: 2048 pages (8 MiB) takes the browser's 2.6 MB package (512 pages took 1.3 MB).
+/// largest file that can be installed is about what their heap holds: 2048 pages (8 MiB) takes a 2.6 MB package (512 pages took 1.3 MB).
 pub const STORAGE_HEAP_PAGES: usize = 2048;
 /// The desktop (role 13): its own heap and the window surfaces of its clients (about 47 MiB in all: the wallpaper and its frosted copy, the shade snapshot, caches, and up to four 3 MiB fullscreen surfaces; a cap, not a reservation).
 pub const DESKTOP_HEAP_PAGES: usize = crate::platform::DESKTOP_HEAP_PAGES;

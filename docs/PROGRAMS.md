@@ -15,7 +15,7 @@ single-byte corruption and every truncation of a package). `tools/mkmap.py` buil
 
 Manifest (`key = value`, `#` comments): `id` (1-16 of `a-z 0-9 _ - .`), `name`, `version`, `unsigned`, `heap_pages`
 (1-4096, default 128), `threads` (0-8), `class` (interactive/background/heavy), `permission` (`files`, `network`,
-repeatable; `display` lets the program make windows; `allfiles` gives the whole file system instead of the program's own directory (a file manager); `shell` implies `display` and makes the program a shell client: the program manager gives it its control endpoint as slot 3 and the compositor lets it take the panel and desktop roles and manage other programs' windows, see `docs/DISPLAY.md`), `ability = NAME ui|service bin/PROGRAM` (repeatable, up to 8).
+repeatable; `display` gives the program the display endpoint (slot 2; no GUI uses it at the moment: the windowing system was removed on 2026-11-16); `allfiles` gives the whole file system instead of the program's own directory (for programs that browse the whole disk); `shell` makes the program a shell client: the program manager gives it its control endpoint as slot 3), `ability = NAME ui|service bin/PROGRAM` (repeatable, up to 8).
 
 ## Signing and trust (`libs/metal-ed25519`)
 A package may carry a signature block (72 bytes at the end: a key id and an Ed25519 signature of every byte before it). The system
@@ -80,14 +80,14 @@ by its limit and given up on, rights (files, control endpoint, spawn), stop, uni
 (tasks, frames, capability nodes). `make map-check` and `cargo test -p metal-map` cover the format.
 
 ## Boot and the shell
-`make run-window` no longer runs the test suite first: the conductor starts the program manager, gives the desktop (`docs/DISPLAY.md`) a send
-capability to its control endpoint, and the desktop takes the screen, with the shell as its terminal window. In the shell, `prog` runs `progctl` with that capability: `prog available` (the
+`make run-window` no longer runs the test suite first: the conductor starts the program manager, gives the screen task a send
+capability to its control endpoint, and the screen task shows the terminal (`user/src/desktop.rs`: terminal only, no windows). In the shell, `prog` runs `progctl` with that capability: `prog available` (the
 packages of the system image), `prog install ID`, `prog start ID`, `prog list`, `prog state ID` (state, restarts, the two saved words:
 the counter program's first word is its tick count), `program fg ID`, `program bg ID`, `prog stop ID`, `prog info ID`, `prog uninstall ID`.
 `make qemu-test` still runs the whole suite and does not start the manager outside its own test.
 
 ## Not done yet
-No service registry or UI. The manager is not restarted if it crashes, and what abilities `save` lives in its memory. Signature
+No service registry. The manager is not restarted if it crashes, and what abilities `save` lives in its memory. Signature
 checking trusts the system image's key list: nothing yet measures that the image itself is the one that was built.
 
 
@@ -101,6 +101,6 @@ What a program may do is the **manifest** (the ceiling, fixed at install), less 
 
 The program gets `manifest & !stored & !start`. Nothing can add a permission the manifest does not declare.
 
-**Taking away and giving back, live.** The permissions that stand for a capability take effect in a running program at once: *window* is the display endpoint (slot 2), *shell* the control endpoint (slot 3), *revoke* the revoke authority (slot 4). Taking one away is the kernel's `REVOKE_OF` (the task manager does it); giving it back is `GRANT` (the program manager hands its own copy over with `CAP_GRANT` and a destination slot, so the program finds it where it looks; it refuses unless the manifest declares the permission, the stored policy allows it and the program runs). *Files*, *network* and *all files* are sessions the kernel sets up at spawn: a change is stored and applies at the next start. A shell client that loses *shell* is told to the compositor (`Shell off`).
+**Taking away and giving back, live.** The permissions that stand for a capability take effect in a running program at once: *window* is the display endpoint (slot 2), *shell* the control endpoint (slot 3), *revoke* the revoke authority (slot 4). Taking one away is the kernel's `REVOKE_OF` (a privileged program does it); giving it back is `GRANT` (the program manager hands its own copy over with `CAP_GRANT` and a destination slot, so the program finds it where it looks; it refuses unless the manifest declares the permission, the stored policy allows it and the program runs). *Files*, *network* and *all files* are sessions the kernel sets up at spawn: a change is stored and applies at the next start.
 
-The front end is the **Capabilities** program (docs/DISPLAY.md): its *Permissions* tab ticks and unticks them, and a revoke of one of the three capabilities above can be **kept off** (a tick in the revoke box, on by default), which stores the policy bit after the kernel has accepted the revoke. In a running program only the bits that change at once (window, shell, revoke) follow in the program manager's record of what it runs without; the others show *on until restart* / *off until restart* until the next start.
+There is no graphical front end at the moment (the Capabilities program was removed with the GUI). A revoke of one of the three capabilities above can be **kept off**, which stores the policy bit after the kernel has accepted the revoke. In a running program only the bits that change at once (window, shell, revoke) follow in the program manager's record of what it runs without; the others show *on until restart* / *off until restart* until the next start.

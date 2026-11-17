@@ -114,6 +114,12 @@ pub fn enable_this_cpu() {
     let ttbr0 = KERNEL_L1.addr() as u64;
     unsafe {
         asm!(
+            // the tables were written by the boot core (or with the MMU off): finish those writes before this core's walker
+            // can look at them, and start from an empty instruction cache
+            "dsb ish",
+            "ic iallu",
+            "dsb nsh",
+            "isb",
             "msr mair_el1, {mair}",
             "msr tcr_el1, {tcr}",
             "msr ttbr0_el1, {ttbr}",

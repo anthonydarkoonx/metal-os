@@ -49,8 +49,11 @@ impl<E: core::fmt::Debug> Termination for Result<(), E> {
 }
 
 /// What `program!` calls: record the start-up state, run `main`, exit with what it returns.
+///
+/// # Safety
+/// The arguments must be what the kernel passed to `_start` (see `Ctx::new`).
 #[doc(hidden)]
-pub fn start<R: Termination>(main: fn(&crate::Ctx) -> R, arg: u64, parent: u64, args_ptr: u64, args_len: u64) -> ! {
+pub unsafe fn start<R: Termination>(main: fn(&crate::Ctx) -> R, arg: u64, parent: u64, args_ptr: u64, args_len: u64) -> ! {
     init(arg, parent, args_ptr, args_len);
-    crate::exit(main(&crate::Ctx::new(arg, parent, args_ptr, args_len)).report())
+    crate::exit(main(&unsafe { crate::Ctx::new(arg, parent, args_ptr, args_len) }).report())
 }

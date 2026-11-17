@@ -332,7 +332,7 @@ fn expose(f: &pci::Func, cursor: &mut usize, what: &str) -> Option<Exposed> {
     let irq_id = 32 + spi;
     kprintln!("[dev] {what} (PCI 00:{:02x}.0), BAR at {:#x} ({} KiB), IRQ {}", f.dev, bar.0, bar.1 / 1024, irq_id);
     let cfg_pa = mem::alloc(mem::OWNER_KERNEL).expect("pci config page");
-    pci::snapshot(f, cfg_pa as *mut u32);
+    pci::snapshot(f, cfg_pa);
     Some(Exposed { bar_pa: bar.0, bar_pages: bar.1 / mem::PAGE, cfg_pa, irq_id, sid: (f.dev as u16) << 3 })
 }
 

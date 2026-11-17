@@ -13,7 +13,11 @@ pub const E_TIMEDOUT: i64 = -9;
 
 /// Start a thread at `entry(arg)` on the stack that ends at `stack_top` (16-byte aligned). It gets copies of the
 /// capabilities in the slots named by the bits of `caps`. Returns its task id, or a negative error.
-pub fn create(entry: extern "C" fn(u64) -> !, stack_top: usize, arg: u64, caps: u32) -> i64 {
+///
+/// # Safety
+/// `stack_top` must be the 16-byte aligned end of memory this program owns, large enough for the thread and used by no one
+/// else until the thread has ended (the kernel cannot tell a good address from a bad one).
+pub unsafe fn create(entry: extern "C" fn(u64) -> !, stack_top: usize, arg: u64, caps: u32) -> i64 {
     svc(THREAD_CREATE, entry as usize as u64, stack_top as u64, arg, caps as u64, 0)[0] as i64
 }
 

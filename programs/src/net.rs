@@ -168,10 +168,12 @@ fn rpc<T>(op: u64, a: u64, b: u64, fill: impl FnOnce(&mut [u8; 4096]), take: imp
     let r = if MAPPED.load(Ordering::Relaxed) != 1 {
         Err(Error::new(ErrorKind::PermissionDenied))
     } else {
-        let page = unsafe { &mut *(va() as *mut [u8; 4096]) };
-        fill(page);
+        // SAFETY: `MAPPED == 1` means `va()` is the mapped 4096-byte session page; the lock is held, so no other thread of
+        // this program touches it. The service writes it while we are inside `call`, so the references do not live across it:
+        // `fill` gets one before, `take` gets a new one after.
+        fill(unsafe { &mut *(va() as *mut [u8; 4096]) });
         match crate::call(EP, [op, a, b]) {
-            (0, r) if r[0] == S_OK => Ok(take(&r, page)),
+            (0, r) if r[0] == S_OK => Ok(take(&r, unsafe { &*(va() as *const [u8; 4096]) })),
             (0, r) => Err(status_error(r[0], r[1])),
             (e, _) => Err(Error::from_kernel(e)),
         }
@@ -203,10 +205,14 @@ pub fn wait_for_address(timeout: Duration) -> io::Result<Config> {
 }
 
 fn mapped() -> bool {
+    // Under the lock, so two threads cannot both map the page, and the state read here is the state `map_page` wrote.
+    LOCK.lock();
     if MAPPED.load(Ordering::Relaxed) == 0 {
         MAPPED.store(map_page(), Ordering::Relaxed);
     }
-    MAPPED.load(Ordering::Relaxed) == 1
+    let m = MAPPED.load(Ordering::Relaxed) == 1;
+    LOCK.unlock();
+    m
 }
 
 /// The session's event counter: the service adds one and wakes whoever waits on it whenever something a "would block"

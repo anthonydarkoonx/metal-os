@@ -25,6 +25,8 @@ const QUEUE_DESC: usize = 0x20;
 const QUEUE_DRIVER: usize = 0x28;
 const QUEUE_DEVICE: usize = 0x30;
 
+const COMMON_LEN: usize = 0x38; // the common configuration structure ends after queue_used (0x30 + 8)
+
 const ACKNOWLEDGE: u8 = 1;
 const DRIVER: u8 = 2;
 const DRIVER_OK: u8 = 4;
@@ -63,23 +65,38 @@ fn read(f: &pci::Func, cursor: &mut usize) -> Option<[u8; BYTES]> {
     let (cb, coff, _, _) = pci::virtio_cap(f, 1)?;
     let (nb, noff, _, mult) = pci::virtio_cap(f, 2)?;
     let (common, notify) = (bars[cb as usize % 6].0 + coff, bars[nb as usize % 6].0 + noff);
-    if bars[cb as usize % 6].1 == 0 || bars[nb as usize % 6].1 == 0 {
+    // The offsets come from the device's own capability list: they must lie inside the BARs it was given before any
+    // register is touched (a bad one would make the kernel read or write arbitrary physical addresses).
+    let (clen, nlen) = (bars[cb as usize % 6].1, bars[nb as usize % 6].1);
+    if clen == 0 || nlen == 0 || coff.checked_add(COMMON_LEN)? > clen || noff.checked_add(2)? > nlen {
         return None;
     }
+    let notify_end = bars[nb as usize % 6].0 + nlen;
     pci::enable(f);
     pci::disable_intx(f);
     let page = mem::alloc(mem::OWNER_KERNEL)?;
     unsafe { core::ptr::write_bytes(page as *mut u8, 0, mem::PAGE) };
     obj::set_rng_dma(page);
     smmu::attach((f.dev as u16) << 3, SID_ROLE, &[obj::OBJ_RNG_DMA]);
-    let out = exchange(common, notify, mult, page);
+    let out = exchange(common, notify, notify_end, mult, page);
     // shut the device down and take its page away again
     w8(common + DEVICE_STATUS, 0);
+    // The reset is finished when the status reads 0 (virtio 1.x, 2.1.2); until then the device may still write the page.
+    let (start, freq) = counter();
+    let mut reset = false;
+    while (counter().0 - start) * 1000 <= WAIT_TICKS * freq {
+        if r8(common + DEVICE_STATUS) == 0 {
+            reset = true;
+            break;
+        }
+    }
     smmu::detach((f.dev as u16) << 3);
     obj::clear_rng_dma();
     let cmd = f.r32(4);
     f.w32(4, cmd & 0xffff & !0b110); // no more bus mastering
-    mem::free(page);
+    if reset {
+        mem::free(page);
+    } // else: a device that never completes its reset keeps its page (leaked, never handed to anyone else)
     out
 }
 
@@ -91,7 +108,7 @@ fn w16(a: usize, v: u16) { unsafe { write_volatile(a as *mut u16, v) } }
 fn r16(a: usize) -> u16 { unsafe { read_volatile(a as *const u16) } }
 fn w64(a: usize, v: u64) { w32(a, v as u32); w32(a + 4, (v >> 32) as u32) }
 
-fn exchange(common: usize, notify: usize, mult: u32, page: usize) -> Option<[u8; BYTES]> {
+fn exchange(common: usize, notify: usize, notify_end: usize, mult: u32, page: usize) -> Option<[u8; BYTES]> {
     w8(common + DEVICE_STATUS, 0);
     w8(common + DEVICE_STATUS, ACKNOWLEDGE);
     w8(common + DEVICE_STATUS, ACKNOWLEDGE | DRIVER);
@@ -130,7 +147,11 @@ fn exchange(common: usize, notify: usize, mult: u32, page: usize) -> Option<[u8;
         write_volatile((page + AVAIL + 2) as *mut u16, 1); // idx
     }
     cache::clean(page, mem::PAGE);
-    w16(notify + notify_off * mult as usize, 0);
+    let kick = notify.checked_add(notify_off.checked_mul(mult as usize)?)?;
+    if kick.checked_add(2)? > notify_end {
+        return None;
+    }
+    w16(kick, 0);
     let (start, freq) = counter();
     loop {
         cache::invalidate(page + USED, 8);

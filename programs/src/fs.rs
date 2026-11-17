@@ -34,23 +34,115 @@ pub const O_TRUNC: u64 = 8;
 /// ENOSPC 5, EINVAL 6, EIO 7, EEXIST 8, ENOTEMPTY 9).
 pub type Error = i64;
 
+/// Map the session page if it is not yet (the file lock is held).
+fn map_session() -> Result<(), i64> {
+    if va() == 0 {
+        let r = crate::map_anywhere(PAGE_SLOT, true);
+        if r < 0 {
+            return Err(r);
+        }
+        VA.store(r as usize, core::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// A handle to the program's file session. One session page serves the whole program, so every call takes the program's
+/// file lock: handles may be used from any thread, one request at a time.
 pub struct Fs(());
 
 impl Fs {
     /// Map the session page. Fails (with the kernel's error) if the program was started without file-system access.
     pub fn open() -> Result<Fs, i64> {
-        if va() == 0 {
-            let r = crate::map_anywhere(PAGE_SLOT, true);
-            if r < 0 {
-                return Err(r);
-            }
-            VA.store(r as usize, core::sync::atomic::Ordering::Relaxed);
-        }
-        Ok(Fs(()))
+        LOCK.lock();
+        let r = map_session();
+        LOCK.unlock();
+        r.map(|_| Fs(()))
     }
 
-    fn page(&self) -> &'static mut [u8; 4096] {
-        unsafe { &mut *(va() as *mut [u8; 4096]) }
+    fn with<T>(&self, f: impl FnOnce(&Sess) -> T) -> T {
+        LOCK.lock();
+        let r = f(&Sess(()));
+        LOCK.unlock();
+        r
+    }
+
+    pub fn open_file(&self, path: &str, flags: u64) -> Result<u64, Error> {
+        self.with(|s| s.open_file(path, flags))
+    }
+
+    pub fn close(&self, fd: u64) -> Result<(), Error> {
+        self.with(|s| s.close(fd))
+    }
+
+    /// Read up to `buf.len()` bytes; the number read (0 at the end of the file).
+    pub fn read(&self, fd: u64, buf: &mut [u8]) -> Result<usize, Error> {
+        self.with(|s| s.read(fd, buf))
+    }
+
+    pub fn write(&self, fd: u64, data: &[u8]) -> Result<usize, Error> {
+        self.with(|s| s.write(fd, data))
+    }
+
+    /// (size, kind) of a path: kind 1 = file, 2 = directory.
+    pub fn stat(&self, path: &str) -> Result<(u64, u64), Error> {
+        self.with(|s| s.stat(path))
+    }
+
+    /// The names in a directory, '\n'-separated, into `buf`; the number of bytes.
+    pub fn list(&self, path: &str, buf: &mut [u8]) -> Result<usize, Error> {
+        self.with(|s| s.list(path, buf))
+    }
+
+    pub fn unlink(&self, path: &str) -> Result<(), Error> {
+        self.with(|s| s.unlink(path))
+    }
+
+    pub fn mkdir(&self, path: &str) -> Result<(), Error> {
+        self.with(|s| s.mkdir(path))
+    }
+
+    /// Move a file, or a directory with everything in it, to a new path on the same disk (one commit: all or nothing).
+    pub fn rename(&self, from: &str, to: &str) -> Result<(), Error> {
+        self.with(|s| s.rename(from, to))
+    }
+
+    /// Have everything written so far put on the disk (a checkpoint of the whole data partition).
+    pub fn sync(&self) -> Result<(), Error> {
+        self.with(|s| s.sync())
+    }
+
+    /// Confine the program `child` (one this program started, not yet running) to the directory `dir`: its `/data` becomes `dir`.
+    pub fn scope(&self, child: u64, dir: &str) -> Result<(), Error> {
+        self.with(|s| s.scope(child, dir))
+    }
+
+    /// Whole-file write (created or truncated; the close commits it).
+    pub fn write_file(&self, path: &str, data: &[u8]) -> Result<(), Error> {
+        self.with(|s| s.write_file(path, data))
+    }
+}
+
+struct Sess(());
+
+impl Sess {
+    /// Copy `src` into the session page at `off`. The page is shared with the VFS server, so it is only touched through raw
+    /// pointers and only while the program's file lock is held (one request at a time).
+    fn put(&self, off: usize, src: &[u8]) {
+        assert!(off + src.len() <= 4096);
+        // SAFETY: `va()` is the mapped 4096-byte session page (Sess exists only after a successful map); the range is checked
+        // above; `src` is a caller slice that cannot overlap the foreign page.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), (va() as *mut u8).add(off), src.len()) }
+    }
+
+    fn put_byte(&self, off: usize, b: u8) {
+        self.put(off, &[b]);
+    }
+
+    /// Copy from the session page at `off` into `dst`.
+    fn get(&self, off: usize, dst: &mut [u8]) {
+        assert!(off + dst.len() <= 4096);
+        // SAFETY: as in `put`.
+        unsafe { core::ptr::copy_nonoverlapping((va() as *const u8).add(off), dst.as_mut_ptr(), dst.len()) }
     }
 
     fn rpc(&self, op: u64, a: u64, b: u64) -> Result<(u64, u64), Error> {
@@ -68,22 +160,21 @@ impl Fs {
         if path.len() >= DATA {
             return Err(6);
         }
-        let pg = self.page();
-        pg[..path.len()].copy_from_slice(path.as_bytes());
-        pg[path.len()] = 0;
+        self.put(0, path.as_bytes());
+        self.put_byte(path.len(), 0);
         self.rpc(op, a, 0)
     }
 
-    pub fn open_file(&self, path: &str, flags: u64) -> Result<u64, Error> {
+    fn open_file(&self, path: &str, flags: u64) -> Result<u64, Error> {
         self.with_path(path, V_OPEN, flags).map(|r| r.0)
     }
 
-    pub fn close(&self, fd: u64) -> Result<(), Error> {
+    fn close(&self, fd: u64) -> Result<(), Error> {
         self.rpc(V_CLOSE, fd, 0).map(|_| ())
     }
 
     /// Read up to `buf.len()` bytes; the number read (0 at the end of the file).
-    pub fn read(&self, fd: u64, buf: &mut [u8]) -> Result<usize, Error> {
+    fn read(&self, fd: u64, buf: &mut [u8]) -> Result<usize, Error> {
         let mut done = 0;
         while done < buf.len() {
             let want = (buf.len() - done).min(MAXIO);
@@ -91,17 +182,17 @@ impl Fs {
             if n == 0 {
                 break;
             }
-            buf[done..done + n as usize].copy_from_slice(&self.page()[DATA..DATA + n as usize]);
+            self.get(DATA, &mut buf[done..done + n as usize]);
             done += n as usize;
         }
         Ok(done)
     }
 
-    pub fn write(&self, fd: u64, data: &[u8]) -> Result<usize, Error> {
+    fn write(&self, fd: u64, data: &[u8]) -> Result<usize, Error> {
         let mut done = 0;
         while done < data.len() {
             let n = (data.len() - done).min(MAXIO);
-            self.page()[DATA..DATA + n].copy_from_slice(&data[done..done + n]);
+            self.put(DATA, &data[done..done + n]);
             let (wrote, _) = self.rpc(V_WRITE, fd, n as u64)?;
             done += wrote as usize;
         }
@@ -109,51 +200,50 @@ impl Fs {
     }
 
     /// (size, kind) of a path: kind 1 = file, 2 = directory.
-    pub fn stat(&self, path: &str) -> Result<(u64, u64), Error> {
+    fn stat(&self, path: &str) -> Result<(u64, u64), Error> {
         self.with_path(path, V_STAT, 0)
     }
 
     /// The names in a directory, '\n'-separated, into `buf`; the number of bytes.
-    pub fn list(&self, path: &str, buf: &mut [u8]) -> Result<usize, Error> {
+    fn list(&self, path: &str, buf: &mut [u8]) -> Result<usize, Error> {
         let (n, _) = self.with_path(path, V_LIST, 0)?;
         let n = (n as usize).min(buf.len()).min(MAXIO);
-        buf[..n].copy_from_slice(&self.page()[DATA..DATA + n]);
+        self.get(DATA, &mut buf[..n]);
         Ok(n)
     }
 
-    pub fn unlink(&self, path: &str) -> Result<(), Error> {
+    fn unlink(&self, path: &str) -> Result<(), Error> {
         self.with_path(path, V_UNLINK, 0).map(|_| ())
     }
 
-    pub fn mkdir(&self, path: &str) -> Result<(), Error> {
+    fn mkdir(&self, path: &str) -> Result<(), Error> {
         self.with_path(path, V_MKDIR, 0).map(|_| ())
     }
 
     /// Move a file, or a directory with everything in it, to a new path on the same disk (one commit: all or nothing).
-    pub fn rename(&self, from: &str, to: &str) -> Result<(), Error> {
+    fn rename(&self, from: &str, to: &str) -> Result<(), Error> {
         if from.len() + to.len() + 2 > DATA {
             return Err(6);
         }
-        let pg = self.page();
-        pg[..from.len()].copy_from_slice(from.as_bytes());
-        pg[from.len()] = 0;
-        pg[from.len() + 1..from.len() + 1 + to.len()].copy_from_slice(to.as_bytes());
-        pg[from.len() + 1 + to.len()] = 0;
+        self.put(0, from.as_bytes());
+        self.put_byte(from.len(), 0);
+        self.put(from.len() + 1, to.as_bytes());
+        self.put_byte(from.len() + 1 + to.len(), 0);
         self.rpc(V_RENAME, 0, 0).map(|_| ())
     }
 
     /// Have everything written so far put on the disk (a checkpoint of the whole data partition).
-    pub fn sync(&self) -> Result<(), Error> {
+    fn sync(&self) -> Result<(), Error> {
         self.rpc(V_SYNC, 0, 0).map(|_| ())
     }
 
     /// Confine the program `child` (one this program started, not yet running) to the directory `dir`: its `/data` becomes `dir`.
-    pub fn scope(&self, child: u64, dir: &str) -> Result<(), Error> {
+    fn scope(&self, child: u64, dir: &str) -> Result<(), Error> {
         self.with_path(dir, V_SCOPE, child).map(|_| ())
     }
 
     /// Whole-file write (created or truncated; the close commits it).
-    pub fn write_file(&self, path: &str, data: &[u8]) -> Result<(), Error> {
+    fn write_file(&self, path: &str, data: &[u8]) -> Result<(), Error> {
         let fd = self.open_file(path, O_WRITE | O_CREATE | O_TRUNC)?;
         let r = self.write(fd, data);
         self.close(fd)?;
@@ -183,12 +273,12 @@ fn to_io(e: Error) -> io::Error {
 }
 
 /// Run `f` on the program's session, mapping it first if need be.
-fn session<T>(f: impl FnOnce(&Fs) -> Result<T, Error>) -> io::Result<T> {
+fn session<T>(f: impl FnOnce(&Sess) -> Result<T, Error>) -> io::Result<T> {
     LOCK.lock();
     if OPENED.load(Ordering::Relaxed) == 0 {
-        OPENED.store(if Fs::open().is_ok() { 1 } else { 2 }, Ordering::Relaxed);
+        OPENED.store(if map_session().is_ok() { 1 } else { 2 }, Ordering::Relaxed);
     }
-    let r = if OPENED.load(Ordering::Relaxed) == 1 { f(&Fs(())).map_err(to_io) } else { Err(io::Error::new(ErrorKind::PermissionDenied)) };
+    let r = if OPENED.load(Ordering::Relaxed) == 1 { f(&Sess(())).map_err(to_io) } else { Err(io::Error::new(ErrorKind::PermissionDenied)) };
     LOCK.unlock();
     r
 }

@@ -860,8 +860,9 @@ fn client_page(sender: u64, gens: &mut [u64]) -> Option<(usize, bool, usize)> {
 }
 
 fn get_path(pg: &[u8; BS]) -> Option<String> {
-    let n = pg[..DATA].iter().position(|&c| c == 0)?;
-    norm(core::str::from_utf8(&pg[..n]).ok()?)
+    let own: [u8; DATA] = snapshot(&pg[..DATA]); // (the client may rewrite the page while we parse it)
+    let n = own.iter().position(|&c| c == 0)?;
+    norm(core::str::from_utf8(&own[..n]).ok()?)
 }
 
 pub fn vfs_server() -> ! {

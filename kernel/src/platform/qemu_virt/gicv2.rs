@@ -26,6 +26,8 @@ impl IrqController for GicV2 {
     }
 
     fn send_sgi_to(mask: u32, id: u32) {
+        // Whatever the sender wrote for the target (the work it will look for) must be visible before the interrupt is.
+        unsafe { core::arch::asm!("dsb ishst", options(nostack)) };
         w32(GICD + 0xF00, (mask & 0xFF) << 16 | id); // GICD_SGIR, TargetListFilter = target list
     }
 

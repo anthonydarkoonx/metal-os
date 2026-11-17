@@ -102,20 +102,20 @@ pub mod phys {
     /// Copy `src` into RAM at `pa`.
     pub fn copy_to(pa: usize, src: &[u8]) {
         check(pa, src.len(), 1);
-        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), pa as *mut u8, src.len()) }
+        unsafe { core::ptr::copy(src.as_ptr(), pa as *mut u8, src.len()) }
     }
 
     /// Copy RAM at `pa` into `dst`.
     pub fn copy_from(pa: usize, dst: &mut [u8]) {
         check(pa, dst.len(), 1);
-        unsafe { core::ptr::copy_nonoverlapping(pa as *const u8, dst.as_mut_ptr(), dst.len()) }
+        unsafe { core::ptr::copy(pa as *const u8, dst.as_mut_ptr(), dst.len()) }
     }
 
     /// Copy one whole frame to another.
     pub fn copy_page(dst: usize, src: usize) {
         check(dst, PAGE, PAGE);
         check(src, PAGE, PAGE);
-        unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, PAGE) }
+        unsafe { core::ptr::copy(src as *const u8, dst as *mut u8, PAGE) }
     }
 
     #[allow(dead_code)]

@@ -14,7 +14,8 @@ impl Iterator for Args {
 
 fn ctx() -> crate::Ctx {
     let (p, l, a, par) = crate::rt::saved();
-    crate::Ctx::new(a, par, p, l)
+    // SAFETY: `saved` returns what the kernel handed to `_start`.
+    unsafe { crate::Ctx::new(a, par, p, l) }
 }
 
 /// The command line, program name first.

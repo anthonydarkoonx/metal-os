@@ -220,8 +220,11 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// # Safety
+    /// `args_ptr..args_ptr + args_len` must be readable memory that stays mapped and unchanged for the life of the program
+    /// (or `args_len` 0). Only the program entry code, which gets these from the kernel, builds one.
     #[doc(hidden)]
-    pub fn new(arg: u64, parent: u64, args_ptr: u64, args_len: u64) -> Ctx {
+    pub unsafe fn new(arg: u64, parent: u64, args_ptr: u64, args_len: u64) -> Ctx {
         Ctx { arg, parent, args_ptr, args_len }
     }
 
@@ -418,7 +421,8 @@ macro_rules! program {
         #[no_mangle]
         #[link_section = ".text._start"]
         pub extern "C" fn _start(_role: u64, arg: u64, parent: u64, args_ptr: u64, args_len: u64) -> ! {
-            $crate::rt::start($main, arg, parent, args_ptr, args_len)
+            // SAFETY: the kernel starts every program with its own argument block; `_start` is only ever entered that way.
+            unsafe { $crate::rt::start($main, arg, parent, args_ptr, args_len) }
         }
     };
 }

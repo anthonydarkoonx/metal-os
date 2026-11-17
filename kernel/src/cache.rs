@@ -4,7 +4,7 @@
 use core::arch::asm;
 
 /// The smallest data cache line, from CTR_EL0.DminLine.
-fn line() -> usize {
+pub fn line() -> usize {
     let ctr: u64;
     unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
     4usize << ((ctr >> 16) & 0xF)
@@ -25,6 +25,9 @@ pub fn clean(addr: usize, len: usize) {
 /// cache line with data the CPU has written and not cleaned (here: whole queue entries, 16 or 32 bytes inside a
 /// page that holds nothing but the queue).
 pub fn invalidate(addr: usize, len: usize) {
+    // The caller learned the device had written (a status or index load); that load must complete before the lines are
+    // dropped, or the invalidate could run ahead of it and the later read see the old data.
+    unsafe { asm!("dsb ld", options(nostack)) };
     let step = line();
     let mut a = addr & !(step - 1);
     while a < addr + len {

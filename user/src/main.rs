@@ -53,6 +53,17 @@ fn verdict(ok: bool) -> &'static str {
     if ok { "PASS" } else { "FAIL" }
 }
 
+/// A private copy of bytes a client can change at any time (a session page). Parse the copy, never the page: a check made on
+/// the page proves nothing about what is there when the bytes are used.
+pub fn snapshot<const N: usize>(src: &[u8]) -> [u8; N] {
+    let mut out = [0u8; N];
+    for (i, o) in out.iter_mut().enumerate().take(src.len()) {
+        // SAFETY: `i < src.len()`; volatile so each byte is read exactly once.
+        *o = unsafe { read_volatile(src.as_ptr().add(i)) };
+    }
+    out
+}
+
 fn sum_bytes(p: *const u8, len: usize) -> u64 {
     let mut s = 0u64;
     for i in 0..len {
@@ -311,7 +322,7 @@ fn server() -> ! {
                     reply([1, r as u64, 0]);
                     continue;
                 }
-                let s = sum_bytes(SERVER_SHM as *const u8, m.w[2] as usize);
+                let s = sum_bytes(SERVER_SHM as *const u8, (m.w[2] as usize).min(4096)) /* one page is mapped */;
                 reply([0, s, 0]);
             }
             OP_NOTIFY => println!("[server] async notify {} from task {} (call={})", m.w[1], m.sender, m.is_call),

@@ -19,9 +19,13 @@ pub struct Mutex<T: ?Sized> {
 unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
 unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 
+/// Not `Send` (the raw mutex is released by the thread that took it) and `Sync` only when `T` is, like std's.
 pub struct MutexGuard<'a, T: ?Sized> {
     lock: &'a Mutex<T>,
+    _not_send: core::marker::PhantomData<*mut ()>,
 }
+
+unsafe impl<T: ?Sized + Sync> Sync for MutexGuard<'_, T> {}
 
 impl<T> Mutex<T> {
     pub const fn new(v: T) -> Mutex<T> {
@@ -36,11 +40,11 @@ impl<T> Mutex<T> {
 impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> MutexGuard<'_, T> {
         self.raw.lock();
-        MutexGuard { lock: self }
+        MutexGuard { lock: self, _not_send: core::marker::PhantomData }
     }
 
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
-        self.raw.try_lock().then(|| MutexGuard { lock: self })
+        self.raw.try_lock().then(|| MutexGuard { lock: self, _not_send: core::marker::PhantomData })
     }
 }
 

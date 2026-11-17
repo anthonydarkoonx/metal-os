@@ -534,7 +534,8 @@ impl Netd {
             }
             N_DNS_START => {
                 let len = (w[1] as usize).min(255);
-                let Ok(name) = core::str::from_utf8(&pg[DATA..DATA + len]) else { return [S_INVALID, 0, 0] };
+                let own: [u8; 255] = snapshot(&pg[DATA..DATA + len]);
+                let Ok(name) = core::str::from_utf8(&own[..len]) else { return [S_INVALID, 0, 0] };
                 let name = String::from(name);
                 match self.stack.dns_start(&name, now) {
                     Ok(q) => {

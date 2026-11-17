@@ -136,11 +136,13 @@ pub fn virtio_bar(f: &Func) -> Option<u8> {
     bar
 }
 
-/// Copy the first 256 bytes of configuration space (after BAR assignment) to `dst`.
-pub fn snapshot(f: &Func, dst: *mut u32) {
+/// Copy the first 256 bytes of configuration space (after BAR assignment) to the RAM page at `pa` (bounds-checked).
+pub fn snapshot(f: &Func, pa: usize) {
+    let mut words = [0u8; 256];
     for i in 0..64 {
-        unsafe { write_volatile(dst.add(i), f.r32(4 * i)) };
+        words[4 * i..4 * i + 4].copy_from_slice(&f.r32(4 * i).to_le_bytes());
     }
+    crate::frame::phys::copy_to(pa, &words);
 }
 
 /// The virtio vendor capability of type `cfg_type` (1 common, 2 notify, ...): (BAR index, offset in it, length, the word

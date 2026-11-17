@@ -53,7 +53,7 @@ pub fn idle() {
     unsafe {
         // wfi wakes on a *pending* interrupt even while masked, so an IPI sent just before
         // this point cannot be lost. Then unmask just long enough to take it.
-        asm!("wfi", "msr daifclr, #2", "isb", "msr daifset, #2", options(nomem, nostack));
+        asm!("wfi", "msr daifclr, #2", "isb", "msr daifset, #2", options(nostack));
     }
     IDLE_MASK.fetch_and(!me, Ordering::SeqCst);
 }

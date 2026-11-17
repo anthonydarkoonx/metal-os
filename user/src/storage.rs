@@ -157,8 +157,9 @@ pub fn rofs_server() -> ! {
             reply([9, 0, 0]);
             continue;
         };
-        let plen = page[..DATA_OFF].iter().position(|&c| c == 0).unwrap_or(DATA_OFF);
-        let path = core::str::from_utf8(&page[..plen]).unwrap_or("");
+        let own: [u8; DATA_OFF] = snapshot(&page[..DATA_OFF]); // (the client may rewrite the page while we parse it)
+        let plen = own.iter().position(|&c| c == 0).unwrap_or(DATA_OFF);
+        let path = core::str::from_utf8(&own[..plen]).unwrap_or("");
         let ino = match fs.lookup(path) {
             Ok(i) => i,
             Err(_) => {

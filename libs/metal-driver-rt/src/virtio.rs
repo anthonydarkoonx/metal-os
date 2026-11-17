@@ -64,9 +64,14 @@ pub struct Pci {
     common: usize,
     notify_base: usize,
     notify_mult: usize,
+    notify_end: usize,
     isr: usize,
     devcfg: usize,
+    devcfg_len: usize,
 }
+
+/// Size of virtio_pci_common_cfg up to and including queue_used (virtio 1.x, 4.1.4.3).
+const COMMON_LEN: usize = 0x38;
 
 impl Pci {
     /// Parse the vendor capabilities in the config-space copy at `cfg_va`. `bar_va` / `bar_bytes`
@@ -81,6 +86,7 @@ impl Pci {
             return Err("no capability list");
         }
         let (mut common, mut notify, mut mult, mut isr, mut dev) = (None, None, 0, None, None);
+        let (mut notify_len, mut dev_len) = (0, 0);
         let mut ptr = b(0x34) & !3;
         for _ in 0..48 {
             if ptr < 0x40 || ptr + 20 > 256 {
@@ -91,11 +97,12 @@ impl Pci {
                 if off.checked_add(len).map_or(true, |e| e > bar_bytes) {
                     return Err("capability outside the BAR");
                 }
+                // The device describes its own layout; a structure shorter than what the driver touches is refused.
                 match ty {
-                    1 => common = Some(off),
-                    2 => (notify, mult) = (Some(off), w(ptr + 16)),
-                    3 => isr = Some(off),
-                    4 => dev = Some(off),
+                    1 if len >= COMMON_LEN => common = Some(off),
+                    2 => (notify, mult, notify_len) = (Some(off), w(ptr + 16), len),
+                    3 if len >= 1 => isr = Some(off),
+                    4 => (dev, dev_len) = (Some(off), len),
                     _ => {}
                 }
             }
@@ -103,7 +110,15 @@ impl Pci {
         }
         match (common, notify, isr, dev) {
             (Some(c), Some(n), Some(i), Some(d)) => {
-                Ok(Pci { common: bar_va + c, notify_base: bar_va + n, notify_mult: mult, isr: bar_va + i, devcfg: bar_va + d })
+                Ok(Pci {
+                    common: bar_va + c,
+                    notify_base: bar_va + n,
+                    notify_mult: mult,
+                    notify_end: bar_va + n + notify_len,
+                    isr: bar_va + i,
+                    devcfg: bar_va + d,
+                    devcfg_len: dev_len,
+                })
             }
             _ => Err("missing virtio capability"),
         }
@@ -173,6 +188,12 @@ impl Pci {
         }
         wr16(self.common + C_QSIZE, size);
         let off = rd16(self.common + C_QNOTIFY_OFF) as usize;
+        // where this queue's doorbell is comes from the device too: it must be inside the notify structure
+        let notify = off
+            .checked_mul(self.notify_mult)
+            .and_then(|o| self.notify_base.checked_add(o))
+            .filter(|n| n.checked_add(2).map_or(false, |e| e <= self.notify_end))
+            .ok_or("queue doorbell outside the notify structure")?;
         wr64(self.common + C_QDESC, pa + OFF_DESC as u64);
         wr64(self.common + C_QAVAIL, pa + off_avail as u64);
         wr64(self.common + C_QUSED, pa + off_used as u64);
@@ -186,7 +207,7 @@ impl Pci {
             off_used,
             avail_idx: 0,
             used_seen: 0,
-            notify: self.notify_base + off * self.notify_mult,
+            notify,
             inflight: [(0, 0); MAX_CHAIN],
             ninflight: 0,
             posted: [(0, 0); MAX_POSTED],
@@ -204,15 +225,18 @@ impl Pci {
 
     /// A byte of the device-specific configuration.
     pub fn config8(&self, off: usize) -> u8 {
+        assert!(off < self.devcfg_len);
         unsafe { read_volatile((self.devcfg + off) as *const u8) }
     }
 
     pub fn set_config8(&self, off: usize, v: u8) {
+        assert!(off < self.devcfg_len);
         unsafe { write_volatile((self.devcfg + off) as *mut u8, v) }
     }
 
     /// A 32-bit word of the device-specific configuration.
     pub fn config32(&self, off: usize) -> u32 {
+        assert!(off + 4 <= self.devcfg_len);
         rd32(self.devcfg + off)
     }
 }
@@ -380,6 +404,67 @@ impl Queue {
 mod tests {
     extern crate std;
     use super::*;
+
+    /// A fake device: a 4 KiB BAR and a config-space copy with one virtio capability per `(type, offset, length, notify mult)`.
+    fn fake(caps: &[(u8, u32, u32, u32)], qnotify: u16) -> (std::vec::Vec<u64>, std::vec::Vec<u64>) {
+        let mut cfg = std::vec![0u64; 32]; // 256 bytes, aligned
+        let c = unsafe { core::slice::from_raw_parts_mut(cfg.as_mut_ptr() as *mut u8, 256) };
+        c[0..4].copy_from_slice(&(0x1042u32 << 16 | 0x1af4).to_le_bytes());
+        c[6] = 0x10; // capability list
+        c[0x34] = 0x40;
+        for (i, &(ty, off, len, mult)) in caps.iter().enumerate() {
+            let at = 0x40 + 20 * i;
+            c[at] = 0x09;
+            c[at + 1] = if i + 1 < caps.len() { (at + 20) as u8 } else { 0 };
+            c[at + 3] = ty;
+            c[at + 8..at + 12].copy_from_slice(&off.to_le_bytes());
+            c[at + 12..at + 16].copy_from_slice(&len.to_le_bytes());
+            c[at + 16..at + 20].copy_from_slice(&mult.to_le_bytes());
+        }
+        let mut bar = std::vec![0u64; 512];
+        let b = unsafe { core::slice::from_raw_parts_mut(bar.as_mut_ptr() as *mut u8, 4096) };
+        b[C_QSIZE..C_QSIZE + 2].copy_from_slice(&256u16.to_le_bytes());
+        b[C_QNOTIFY_OFF..C_QNOTIFY_OFF + 2].copy_from_slice(&qnotify.to_le_bytes());
+        (cfg, bar)
+    }
+
+    fn open(cfg: &mut [u64], bar: &mut [u64]) -> Result<Pci, &'static str> {
+        Pci::open(bar.as_mut_ptr() as usize, 4096, cfg.as_mut_ptr() as usize, 0x1042)
+    }
+
+    const GOOD: [(u8, u32, u32, u32); 4] = [(1, 0, 0x40, 0), (2, 0x100, 0x100, 4), (3, 0x200, 4, 0), (4, 0x300, 0x20, 0)];
+
+    #[test]
+    fn a_device_cannot_point_the_driver_outside_its_bar_or_structures() {
+        let (mut cfg, mut bar) = fake(&GOOD, 3);
+        let pci = open(&mut cfg, &mut bar).expect("a sane device opens");
+        let page = std::vec![0u8; 8192];
+        let va = (page.as_ptr() as usize + 4095) & !4095;
+        assert!(pci.queue_sized(0, 8, va, 0x1000).is_ok(), "doorbell 3*4 inside the notify structure");
+        // a structure past the end of the BAR
+        for bad in [(1u8, 4090u32, 0x40u32), (2, 0xFFFF_FFF0, 0x100), (3, 4095, 4), (4, 0x300, u32::MAX)] {
+            let mut caps = GOOD;
+            caps[bad.0 as usize - 1] = (bad.0, bad.1, bad.2, if bad.0 == 2 { 4 } else { 0 });
+            let (mut cfg, mut bar) = fake(&caps, 3);
+            assert!(open(&mut cfg, &mut bar).is_err(), "cap {bad:?} must be refused");
+        }
+        // a common structure too short to hold the registers the driver uses
+        let mut caps = GOOD;
+        caps[0].2 = 0x10;
+        let (mut cfg, mut bar) = fake(&caps, 3);
+        assert!(open(&mut cfg, &mut bar).is_err());
+        // a doorbell index that lands beyond the notify structure (and one whose multiplication overflows)
+        for q in [0x40u16, 0xFFFF] {
+            let (mut cfg, mut bar) = fake(&GOOD, q);
+            let pci = open(&mut cfg, &mut bar).unwrap();
+            assert!(pci.queue_sized(0, 8, va, 0x1000).is_err(), "doorbell index {q:#x}");
+        }
+        let mut caps = GOOD;
+        caps[1].3 = u32::MAX; // multiplier so large the product wraps
+        let (mut cfg, mut bar) = fake(&caps, 0xFFFF);
+        let pci = open(&mut cfg, &mut bar).unwrap();
+        assert!(pci.queue_sized(0, 8, va, 0x1000).is_err());
+    }
 
     #[test]
     fn the_used_ring_never_shares_a_cache_line_with_the_available_ring() {

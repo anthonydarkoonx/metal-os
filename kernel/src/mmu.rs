@@ -433,7 +433,7 @@ pub fn migrate_user_page(l1: usize, va: usize, old_pa: usize, new_pa: usize) -> 
     }
     *slot = 0;
     flush_tlb();
-    unsafe { core::ptr::copy_nonoverlapping(old_pa as *const u8, new_pa as *mut u8, mem::PAGE) };
+    unsafe { core::ptr::copy(old_pa as *const u8, new_pa as *mut u8, mem::PAGE) };
     if old & UXN == 0 {
         sync_icache(new_pa, mem::PAGE); // executable page: fresh bytes must be visible to fetch
     }
@@ -463,10 +463,11 @@ pub fn flush_tlb() {
 
 /// Make freshly written code visible to instruction fetch.
 pub fn sync_icache(pa: usize, len: usize) {
-    let mut a = pa & !63;
+    let step = crate::cache::line();
+    let mut a = pa & !(step - 1);
     while a < pa + len {
         unsafe { asm!("dc cvau, {}", in(reg) a) };
-        a += 64;
+        a += step;
     }
     unsafe { asm!("dsb ish", "ic ialluis", "dsb ish", "isb") };
 }

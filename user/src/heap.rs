@@ -58,7 +58,8 @@ impl Inner {
     unsafe fn grow(&mut self, need: usize) -> bool {
         let pages = need.div_ceil(PAGE).max(MIN_GROW_PAGES);
         let r: i64;
-        core::arch::asm!("svc #0", inout("x0") HEAP_GROW => r, in("x1") pages as u64, options(nostack));
+        // the kernel hands results back in x0..x5, so every argument register is declared as possibly changed
+        core::arch::asm!("svc #0", inout("x0") HEAP_GROW => r, inout("x1") pages as u64 => _, lateout("x2") _, lateout("x3") _, lateout("x4") _, lateout("x5") _, options(nostack));
         if r < 0 {
             return false;
         }

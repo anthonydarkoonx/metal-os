@@ -33,7 +33,8 @@ fn stack() -> usize {
 }
 
 fn start(f: extern "C" fn(u64) -> !, arg: u64) -> i64 {
-    thread::create(f, stack(), arg, CAPS.load(Relaxed))
+    // SAFETY: `stack()` maps a fresh stack of its own for each thread.
+    unsafe { thread::create(f, stack(), arg, CAPS.load(Relaxed)) }
 }
 
 fn count_under_lock(rounds: u32, hold: bool) {
@@ -301,7 +302,7 @@ program!("threads", |c| {
             let mut ok = true;
             for i in 0..150u32 {
                 DONE[2].store(0, SeqCst);
-                if thread::create(quick, stack, 0, 0) < 0 {
+                if unsafe { thread::create(quick, stack, 0, 0) } < 0 {
                     ok = false;
                     break;
                 }

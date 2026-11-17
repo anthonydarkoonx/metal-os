@@ -1,5 +1,6 @@
 //! ZRAM-style compressed page store. All storage is caller-provided (static
 //! arenas in the kernel), so there is no heap and no runtime allocation.
+#![forbid(unsafe_code)]
 #![no_std]
 
 use metal_lz4 as lz4;

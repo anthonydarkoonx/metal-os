@@ -5,6 +5,7 @@
 //! works unchanged with touch added later. Coordinates are logical pixels in 24.8 fixed point; time is milliseconds from any steady clock.
 //! No floating point, no allocation, no clock of its own: everything is driven by the events and `tick` calls it is given, so it is tested on
 //! the host with scripted traces.
+#![forbid(unsafe_code)]
 #![no_std]
 
 pub mod driver;

@@ -1,5 +1,6 @@
 //! Zero-allocation LZ4 block compressor / decompressor (clean-room, from the
 //! public LZ4 block format description). `no_std`, no heap, no `unsafe`.
+#![forbid(unsafe_code)]
 #![no_std]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -4,6 +4,7 @@
 //!
 //! Text is a list of lines of characters. The font is ASCII, so anything else shows as `?` (it is kept as it is in the buffer and written back as
 //! UTF-8). A tab is four columns wide on screen. There is no undo yet.
+#![forbid(unsafe_code)]
 #![no_std]
 extern crate alloc;
 

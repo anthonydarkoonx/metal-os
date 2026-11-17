@@ -6,6 +6,7 @@
 //! is the one number written out, and the RFC 8032 test vectors would fail with a wrong one.
 //!
 //! Not constant time: it verifies signatures, which are public, and handles no secret.
+#![forbid(unsafe_code)]
 #![no_std]
 
 // ---------------------------------------------------------------------------------------------------------------

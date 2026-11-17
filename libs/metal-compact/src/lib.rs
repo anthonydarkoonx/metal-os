@@ -11,6 +11,7 @@
 //! long as the unmovable pages allow.
 //!
 //! The planner only proposes; the kernel performs (or rejects) each move.
+#![forbid(unsafe_code)]
 #![no_std]
 
 /// What the planner needs to know about physical memory.

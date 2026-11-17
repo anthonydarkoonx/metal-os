@@ -8,6 +8,7 @@
 //! * `lite`: an allocation-free decompressor for exactly that subset (raw/RLE/Huffman literals,
 //!   predefined/RLE/transmitted tables, explicit offsets), which is all a kernel without a heap needs to
 //!   read what `encode` wrote.
+#![forbid(unsafe_code)]
 #![no_std]
 #[cfg(feature = "decoder")]
 extern crate alloc;

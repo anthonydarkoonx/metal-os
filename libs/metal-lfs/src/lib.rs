@@ -17,6 +17,7 @@
 //! Not handled: IO errors in the middle of a commit leave in-memory
 //! accounting stale (remount to recover); there is no wear-leveling beyond
 //! round-robin segment allocation.
+#![forbid(unsafe_code)]
 #![no_std]
 extern crate alloc;
 

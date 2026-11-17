@@ -34,6 +34,7 @@
 //!
 //! Everything is checked before a program is installed: sizes, the checksum, the manifest, that every path is a plain
 //! relative path inside the package, and that every ability's entry is an ELF file. The parser never panics.
+#![forbid(unsafe_code)]
 #![no_std]
 extern crate alloc;
 

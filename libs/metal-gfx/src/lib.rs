@@ -4,6 +4,7 @@
 //!
 //! Pixels are `0x00RRGGBB` words. Shapes are anti-aliased (coverage computed per edge pixel in 1/16 pixel units), shadows are
 //! stacks of translucent rounded rectangles, text uses the 5x9 bitmap font at an integer scale.
+#![forbid(unsafe_code)]
 #![no_std]
 extern crate alloc;
 

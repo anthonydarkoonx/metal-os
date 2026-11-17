@@ -14,6 +14,7 @@
 //!
 //! Either way a page may not be writable and executable at once (the kernel refuses such a page too: `TASK_LOAD` has no
 //! way to ask for one).
+#![cfg_attr(not(test), forbid(unsafe_code))]
 #![no_std]
 
 pub const PAGE: usize = 4096;

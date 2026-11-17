@@ -12,6 +12,7 @@
 //!
 //! The uncompressed path needs no heap. Reading compressed files allocates
 //! one buffer per decompressed extent (cached, last extent only).
+#![forbid(unsafe_code)]
 #![no_std]
 extern crate alloc;
 

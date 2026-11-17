@@ -8,6 +8,7 @@
 //! * `mix` folds more entropy (timestamps, device data) into the key at any time.
 //!
 //! This is not a vetted cryptographic RNG; it is meant to make layouts unpredictable to programs that can see their own.
+#![forbid(unsafe_code)]
 #![no_std]
 
 const SIGMA: [u32; 4] = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]; // "expand 32-byte k"

@@ -2,6 +2,7 @@
 //! core placement here, real-time reservations in `rt`, utilisation tracking in `util`,
 //! energy-aware placement in `energy`, time slices below. The kernel feeds them its topology and
 //! measurements.
+#![forbid(unsafe_code)]
 #![no_std]
 
 pub mod energy;

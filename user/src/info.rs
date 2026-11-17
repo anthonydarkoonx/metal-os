@@ -91,7 +91,7 @@ pub fn info_task() -> ! {
             }
             INFO_CONSOLE => {
                 reply([0, 0, 0]);
-                crate::screen::run(gather(), m.w[1])
+                crate::screen::run(gather(), m.w[1], m.w[2])
             }
             _ => {
                 reply([1, 0, 0]);

@@ -96,6 +96,43 @@ def programs():
     return {os.path.basename(f) if f.endswith(".elf") else os.path.basename(f).rsplit(".", 1)[0]: open(f, "rb").read() for f in files if os.path.basename(f).rsplit(".", 1)[0] not in package_only}
 
 
+def wallpapers():
+    """Two stand-in wallpapers, drawn here (the same pictures as metal-desktop's demo::wallpaper_ppm), 320 x 240 binary PPM."""
+    out = {}
+    for name in ("dunes", "night"):
+        w, h = 320, 240
+        px = bytearray()
+        for y2 in range(h):
+            y = y2 // 2
+            for x2 in range(w):
+                x = x2 // 2
+                if name == "night":
+                    if (x * 7 + y * 13) % 97 == 0 and y < 80:
+                        c = (255, 255, 230)
+                    elif y > 95 + (x // 9) % 6:
+                        c = (12, 14, 22)
+                    else:
+                        c = (10 + y // 6, 20 + y // 4, 60 + y // 2)
+                else:
+                    def hump(x, period, height):
+                        d = (x % period) - period // 2
+                        return height - (d * d) * height // ((period // 2) * (period // 2))
+                    far = (124 - hump(x2 + 60, 220, 28)) // 2
+                    near = (168 - hump(x2, 140, 32)) // 2
+                    yy = far - 1 if (y2 // 2 < far and (y2 + 1) // 2 >= far and far > 0) else y
+                    if yy < far:
+                        c = (120 + yy // 2, 165 + yy // 3, 215 + yy // 8)
+                    elif yy < near:
+                        s = min(yy - far, 30)
+                        c = (215 - s, 160 - s // 2, 105 - s // 3)
+                    else:
+                        s = min((yy - near) * 2, 70)
+                        c = (240 - s, 180 - s // 2, 110 - s // 3)
+                px += bytes(c)
+        out[name + ".ppm"] = b"P6\n# Metal OS stand-in\n%d %d\n255\n" % (w, h) + bytes(px)
+    return out
+
+
 def system_tree():
     tree = {
         "hello.txt": b"Hello from the Metal OS system image!\n",
@@ -109,4 +146,5 @@ def system_tree():
     tree["etc"]["program-keys"] = mkmap.program_keys().encode()
     tree["etc"]["program-policy"] = mkmap.program_policy().encode()
     tree["usr"]["programs"] = mkmap.packages()  # Metal Program Packages for the program manager (see docs/PROGRAMS.md)
+    tree["usr"]["share"]["wallpapers"] = wallpapers()  # the desktop's (../docs/DESKTOP.md §10.5)
     return tree

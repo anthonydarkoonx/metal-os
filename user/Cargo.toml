@@ -16,6 +16,10 @@ metal-input = { path = "../libs/metal-input" }
 metal-edit = { path = "../libs/metal-edit" }
 metal-compact = { path = "../libs/metal-compact" }
 metal-driver-rt = { path = "../libs/metal-driver-rt" }
+# the desktop (the screen task is the compositor): its crates are the metal-os-desktop repository
+metal-compositor-os = { git = "https://github.com/anthonydarkoonx/metal-os-desktop" }
+metal-ui = { git = "https://github.com/anthonydarkoonx/metal-os-desktop" }
+metal-desktop-proto = { git = "https://github.com/anthonydarkoonx/metal-os-desktop" }
 
 [profile.release]
 panic = "abort"
@@ -30,3 +34,8 @@ opt-level = 3
 
 [profile.dev]
 panic = "abort"
+
+# the desktop crates take these from GitHub; this tree uses its own copies (one of each in the build)
+[patch."https://github.com/anthonydarkoonx/metal-os"]
+metal-gfx = { path = "../libs/metal-gfx" }
+metal-driver-rt = { path = "../libs/metal-driver-rt" }

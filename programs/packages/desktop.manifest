@@ -1,0 +1,9 @@
+id = desktop
+name = Desktop
+version = 0.1.0
+heap_pages = 2048
+class = interactive
+permission = display
+permission = shell
+permission = files
+ability = main ui bin/desktop

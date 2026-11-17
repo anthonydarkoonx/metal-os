@@ -35,6 +35,7 @@ pub mod ability;
 pub mod env;
 pub mod fs;
 pub mod ctl;
+pub mod desk;
 pub mod heap;
 pub mod io;
 pub mod ipc;

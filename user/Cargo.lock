@@ -7,6 +7,32 @@ name = "metal-compact"
 version = "0.1.0"
 
 [[package]]
+name = "metal-compositor"
+version = "0.1.0"
+source = "git+https://github.com/anthonydarkoonx/metal-os-desktop#f6a8f9c140f13b29e4d60537aceb853ae11747d3"
+dependencies = [
+ "metal-desktop-proto",
+ "metal-gfx",
+ "metal-ui",
+]
+
+[[package]]
+name = "metal-compositor-os"
+version = "0.1.0"
+source = "git+https://github.com/anthonydarkoonx/metal-os-desktop#f6a8f9c140f13b29e4d60537aceb853ae11747d3"
+dependencies = [
+ "metal-compositor",
+ "metal-desktop-proto",
+ "metal-driver-rt",
+ "metal-ui",
+]
+
+[[package]]
+name = "metal-desktop-proto"
+version = "0.1.0"
+source = "git+https://github.com/anthonydarkoonx/metal-os-desktop#f6a8f9c140f13b29e4d60537aceb853ae11747d3"
+
+[[package]]
 name = "metal-driver-rt"
 version = "0.1.0"
 
@@ -47,10 +73,21 @@ name = "metal-net"
 version = "0.1.0"
 
 [[package]]
+name = "metal-ui"
+version = "0.1.0"
+source = "git+https://github.com/anthonydarkoonx/metal-os-desktop#f6a8f9c140f13b29e4d60537aceb853ae11747d3"
+dependencies = [
+ "metal-desktop-proto",
+ "metal-gfx",
+]
+
+[[package]]
 name = "metal-user"
 version = "0.1.0"
 dependencies = [
  "metal-compact",
+ "metal-compositor-os",
+ "metal-desktop-proto",
  "metal-driver-rt",
  "metal-edit",
  "metal-erofs",
@@ -59,6 +96,7 @@ dependencies = [
  "metal-lfs",
  "metal-loader",
  "metal-net",
+ "metal-ui",
 ]
 
 [[package]]

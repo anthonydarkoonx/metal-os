@@ -35,6 +35,8 @@ const OP_NAME: u64 = 12;
 const OP_POLICY_GET: u64 = 13;
 const OP_POLICY_SET: u64 = 14;
 const OP_GRANT: u64 = 15;
+/// TASKS: the task of a program's n-th running instance (n in bits 16..23 of `w0`): [OK, task] or E_NOAPP past the last.
+const OP_TASKS: u64 = 16;
 
 const OK: u64 = 0;
 const E_NOAPP: u64 = 1; // not installed (or: INSTALL found no package)
@@ -52,6 +54,19 @@ const CTL: Endpoint = Endpoint(0);
 const DISPLAY: Endpoint = Endpoint(3);
 /// An ability's slot for it.
 const DISPLAY_SLOT: u8 = 2;
+/// The compositor's program-manager requests (`metal_desktop_proto::op`, `../docs/DESKTOP.md` §8.2).
+const MGR_PROGRAM_ENDED: u64 = 96;
+const MGR_SET_ROLE: u64 = 97;
+
+/// The program a task belongs to, as the compositor names it (SYSINFO page 5).
+fn program_of(task: u64) -> u64 {
+    let r = svc(SYSINFO, 5, task, 0, 0, 0);
+    if r[0] as i64 == 0 {
+        r[3]
+    } else {
+        task
+    }
+}
 /// A shell client's slot for the control endpoint.
 const SHELL_CTL_SLOT: u8 = 3;
 /// The manager's own copy of the revoke authority, and the slot a program with `permission = admin` gets it in (right: revoke, `R_REVOKE`).
@@ -337,8 +352,13 @@ impl Mgr {
         match cmd.spawn() {
             Ok(c) => {
                 println!("[progmgr] {id}/{} started as task {}", a.name, c.id());
-                if shell {
-                    // the compositor lets this task make panels and overlays and use the shell requests (it only listens to the manager for this)
+                // (proposal P5 of ../docs/DESKTOP.md) the program `desktop` gets the compositor's desktop role: panels, overlays and the
+                // shell requests (the compositor only listens to the manager for this)
+                if display && id == "desktop" {
+                    let program = program_of(c.id() as u64);
+                    // (an asynchronous message: the compositor may be the very task waiting for this START to be answered)
+                    let st = svc(IPC_SEND, DISPLAY.0, MGR_SET_ROLE | 1 << 24, program, 0, 0)[0] as i64;
+                    println!("[progmgr] desktop role for program {program}: sent ({st})");
                 }
                 self.insts[ix].child = Some(c);
                 Ok(())
@@ -355,11 +375,14 @@ impl Mgr {
         if ab >= m.abilities.len() {
             return [E_NOABILITY, 0, 0];
         }
-        let ix = match self.inst(id, ab) {
+        // (more than one instance of a program may run, each with its own board entry; the desktop is one of a kind: it holds the
+        // compositor's desktop role)
+        if id == "desktop" && self.inst(id, ab).is_some_and(|ix| self.running(&self.insts[ix])) {
+            return [E_STATE, 0, 0];
+        }
+        let free = self.insts.iter().position(|i| i.program == id && i.ability == ab && !(i.child.is_some() || i.restart_at.is_some()));
+        let ix = match free {
             Some(ix) => {
-                if self.running(&self.insts[ix]) {
-                    return [E_STATE, 0, 0];
-                }
                 self.insts[ix].restarts = 0;
                 self.insts[ix].crashes.clear();
                 ix
@@ -507,6 +530,13 @@ impl Mgr {
                     }
                 }
             }
+            OP_TASKS => {
+                let n = ((w[0] >> 16) & 0xFF) as usize;
+                match self.insts.iter().filter(|i| i.program == id).filter_map(|i| i.child.as_ref()).nth(n) {
+                    Some(c) => [OK, c.id() as u64, 0],
+                    None => [E_NOAPP, 0, 0],
+                }
+            }
             OP_POLICY_GET => match self.program(&id) {
                 Some(m) => {
                     let declared = m.files as u64 | (m.network as u64) << 1 | (m.display as u64) << 2 | (m.shell as u64) << 3 | (m.allfiles as u64) << 4 | (m.admin as u64) << 5;
@@ -578,6 +608,8 @@ impl Mgr {
     fn ended(&mut self, ix: usize, code: u64, now: u64) {
         // the compositor drops the task's windows now: a restart may get the same task number, and its old windows must not stay behind
         if let Some(c) = self.insts[ix].child.take() {
+            // (P5) the compositor drops its windows, sessions and tray items now
+            let _ = svc(IPC_SEND, DISPLAY.0, MGR_PROGRAM_ENDED, program_of(c.id() as u64), 0, 0);
         }
         self.insts[ix].last_exit = code;
         let entry = self.insts[ix].entry;

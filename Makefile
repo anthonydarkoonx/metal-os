@@ -65,7 +65,7 @@ kernel: user
 # Programs started with SPAWN (programs/): position-independent ELF files in programs/build (random image base each run; the
 # loader relocates them), packed into the system image under /bin. `sleeper` stays a flat image (the user crate embeds
 # it); the static `.elf` copies of argdump and hello exist to test the loader's fixed-address path.
-PROGRAM_BINS := guardtest pager pagetest hello crash ping mem burn spawner cat fswrite ls fdprobe kv kvc blocker argdump upper threads stdtest nettest netcheck fetch quotatest shmtest pietest progmgr progctl counter crasher hog probe fsprog
+PROGRAM_BINS := guardtest pager pagetest hello crash ping mem burn spawner cat fswrite ls fdprobe kv kvc blocker argdump upper threads stdtest nettest netcheck fetch quotatest shmtest pietest progmgr progctl counter crasher hog probe fsprog desktop settings files taskmgr capmgr
 PIE_FLAGS := -C relocation-model=pic -C link-arg=-pie -C link-arg=--no-dynamic-linker -C link-arg=-znorelro --cfg getrandom_backend=\"custom\"
 programs:
 	rm -rf programs/build; mkdir -p programs/build

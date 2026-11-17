@@ -1,0 +1,10 @@
+id = taskmgr
+name = Task manager
+version = 0.1.0
+heap_pages = 1024
+class = interactive
+permission = display
+permission = shell
+permission = files
+permission = admin
+ability = main ui bin/taskmgr

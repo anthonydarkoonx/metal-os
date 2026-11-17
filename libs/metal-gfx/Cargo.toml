@@ -4,3 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "2D drawing for the compositor and the UI toolkit: rectangles, damage regions, alpha blending, anti-aliased rounded shapes, shadows, text"
+
+[lints]
+workspace = true

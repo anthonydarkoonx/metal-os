@@ -64,6 +64,7 @@ program!("pagetest", |c| -> u64 {
                 println!("[pagetest] LOG on a page on disk returned {r}");
                 return 200;
             }
+            // SAFETY: pages 0..N are from `heap_grow(N)` and are filled and readable (page 3 is skipped).
             let bad = (0..N).filter(|&p| p != 3 && !unsafe { check(base, p, 0) }).count();
             // page 3 holds the message in the middle of its pattern: compare around it
             // SAFETY: page 3 is one of the `N` pages from `heap_grow` and `w < PAGE / 8`, so each 8-aligned word read is inside it.
@@ -84,14 +85,17 @@ program!("pagetest", |c| -> u64 {
                 if p == 3 {
                     continue;
                 }
+                // SAFETY: `base` is `heap_grow(N)`, `p < N`, so page `p` is mapped, readable memory of this program.
                 if !unsafe { check(base, p, gens[p]) } {
                     bad += 1;
                 }
                 gens[p] += 1;
+                // SAFETY: as above, and the pages are writable.
                 unsafe { fill(base, p, gens[p]) };
                 rounds += 1;
                 sleep(1); // (a page touched at once after being pushed out never gets as far as the disk)
             }
+            // SAFETY: `base` is `heap_grow(N)`, `p < N` (page 3 skipped), so page `p` is mapped, readable memory.
             let after = (0..N).filter(|&p| p != 3 && !unsafe { check(base, p, gens[p]) }).count();
             println!("[pagetest] {rounds} rewrites, {bad} wrong while running, {after} wrong at the end");
             (bad + after).min(99) as u64

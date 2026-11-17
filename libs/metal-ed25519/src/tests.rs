@@ -46,14 +46,14 @@ const V: [(&str, &str, &str, &str); 5] = [
 
 #[test]
 fn rfc8032_vectors() {
-    for (i, (pk, msg, sig, _)) in V.iter().enumerate() {
+    for (i, (pk, msg, sig, _)) in V.iter().enumerate().take(if cfg!(miri) { 2 } else { usize::MAX }) {
         let (pk, msg, sig) = (h32(pk), hex(msg), h64(sig));
         assert!(verify(&pk, &msg, &sig), "vector {}", i + 1);
         // any change is caught: the message, each byte of the signature, the key
         let mut m2 = msg.clone();
         m2.push(0);
         assert!(!verify(&pk, &m2, &sig));
-        for b in 0..64 {
+        for b in (0..64).step_by(if cfg!(miri) { 9 } else { 1 }) {
             let mut s2 = sig;
             s2[b] ^= 1;
             assert!(!verify(&pk, &msg, &s2), "vector {} signature byte {b}", i + 1);

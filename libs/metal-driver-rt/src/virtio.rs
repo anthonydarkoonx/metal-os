@@ -54,8 +54,11 @@ unsafe fn wr32(a: usize, v: u32) {
 /// # Safety
 /// As `wr32` for `a` and `a + 4`.
 unsafe fn wr64(a: usize, v: u64) {
-    wr32(a, v as u32);
-    wr32(a + 4, (v >> 32) as u32);
+    // SAFETY: the caller's contract covers both halves, `a` and `a + 4`.
+    unsafe {
+        wr32(a, v as u32);
+        wr32(a + 4, (v >> 32) as u32);
+    }
 }
 /// # Safety
 /// `a` must be a 2-aligned address of a mapped device register of this task.
@@ -124,12 +127,13 @@ impl Pci {
     /// 4-aligned 256-byte copy of its configuration space. Every register address the returned `Pci` and its queues touch is
     /// derived from those two ranges, after the checks in this function.
     pub unsafe fn open(bar_va: usize, bar_bytes: usize, cfg_va: usize, device: u16) -> Result<Pci, &'static str> {
-        // SAFETY (this and the reads below): inside the 256-byte config copy (`ptr + 20 <= 256` is checked in the loop).
-        if rd32(cfg_va) != (device as u32) << 16 | 0x1af4 {
+        // SAFETY: offset 0 is inside the 256-byte config copy the caller provides.
+        if unsafe { rd32(cfg_va) } != (device as u32) << 16 | 0x1af4 {
             return Err("not the expected virtio device");
         }
         // SAFETY: `cfg_va` is the kernel-provided read-only config-space copy (256 bytes, page mapped); every `o` used is < 256 (ptr + 20 <= 256 is checked before capability reads).
         let b = |o: usize| unsafe { read_volatile((cfg_va + o) as *const u8) } as usize;
+        // SAFETY: as for `b`: every `o` used is inside the 256-byte config copy (`ptr + 20 <= 256` is checked in the loop), 4-aligned by the caller's contract.
         let w = |o: usize| unsafe { rd32(cfg_va + o) } as usize;
         if b(0x06) & 0x10 == 0 {
             return Err("no capability list");

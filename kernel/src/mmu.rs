@@ -81,7 +81,9 @@ pub fn init() {
     let gib = crate::platform::RAM_BASE & !0x3FFF_FFFF;
     for (i, e) in l2.iter_mut().enumerate() {
         let pa = gib + i * (2 << 20);
-        *e = if pa < crate::platform::RAM_UNMAPPED_BELOW { 0 } else { pa as u64 | VALID_BLOCK | normal };
+        #[allow(clippy::absurd_extreme_comparisons)] // the bound is 0 on some platforms (QEMU), non-zero on others
+        let unmapped = pa < crate::platform::RAM_UNMAPPED_BELOW;
+        *e = if unmapped { 0 } else { pa as u64 | VALID_BLOCK | normal };
     }
     // SAFETY: `__stack_top` is a linker symbol; only its address is taken, it is never read.
     let top = unsafe { &__stack_top as *const u8 as usize };

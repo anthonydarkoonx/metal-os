@@ -303,6 +303,7 @@ impl<T> Global<T> {
     /// # Safety
     /// Only the boot core runs (no other core is started yet), and no other reference to the value exists or is made while the
     /// returned one lives.
+    #[allow(clippy::mut_from_ref)] // exclusivity is the caller's contract (see Safety)
     pub unsafe fn boot_get(&self) -> &mut T {
         // SAFETY: the caller's contract.
         unsafe { &mut *self.data.get() }
@@ -310,6 +311,7 @@ impl<T> Global<T> {
 
     /// Hand the value out for the rest of the kernel's life, once (an arena a long-lived allocator keeps). `None` the second
     /// time or while a guard from `get` is alive.
+    #[allow(clippy::mut_from_ref)] // exclusivity is enforced at run time: `state` stays WRITER and `taken` flips once
     pub fn take(&'static self) -> Option<&'static mut T> {
         if self.state.compare_exchange(0, WRITER, Ordering::Acquire, Ordering::Relaxed).is_err() {
             return None;

@@ -35,26 +35,29 @@ impl Inner {
     /// # Safety
     /// `addr..addr + size` must be a free, 16-byte-aligned region of at least 16 bytes owned by this heap (fresh HEAP_GROW pages or a block returned to `dealloc`) and not already on the list.
     unsafe fn insert(&mut self, addr: usize, size: usize) {
-        let mut prev: *mut Node = null_mut();
-        let mut cur = self.head;
-        while !cur.is_null() && (cur as usize) < addr {
-            prev = cur;
-            cur = (*cur).next;
-        }
-        let node = addr as *mut Node;
-        (*node).size = size;
-        (*node).next = cur;
-        if !cur.is_null() && addr + size == cur as usize {
-            (*node).size += (*cur).size;
-            (*node).next = (*cur).next;
-        }
-        if prev.is_null() {
-            self.head = node;
-        } else if prev as usize + (*prev).size == addr {
-            (*prev).size += (*node).size;
-            (*prev).next = (*node).next;
-        } else {
-            (*prev).next = node;
+        // SAFETY: the caller guarantees `addr..addr + size` is a free, aligned region we own, so writing a `Node` header there is valid; every node already on the list was written by `insert`/`alloc`/`dealloc` and stays valid.
+        unsafe {
+            let mut prev: *mut Node = null_mut();
+            let mut cur = self.head;
+            while !cur.is_null() && (cur as usize) < addr {
+                prev = cur;
+                cur = (*cur).next;
+            }
+            let node = addr as *mut Node;
+            (*node).size = size;
+            (*node).next = cur;
+            if !cur.is_null() && addr + size == cur as usize {
+                (*node).size += (*cur).size;
+                (*node).next = (*cur).next;
+            }
+            if prev.is_null() {
+                self.head = node;
+            } else if prev as usize + (*prev).size == addr {
+                (*prev).size += (*node).size;
+                (*prev).next = (*node).next;
+            } else {
+                (*prev).next = node;
+            }
         }
     }
 
@@ -64,11 +67,13 @@ impl Inner {
         let pages = need.div_ceil(PAGE).max(MIN_GROW_PAGES);
         let r: i64;
         // the kernel hands results back in x0..x5, so every argument register is declared as possibly changed
-        core::arch::asm!("svc #0", inout("x0") HEAP_GROW => r, inout("x1") pages as u64 => _, lateout("x2") _, lateout("x3") _, lateout("x4") _, lateout("x5") _, options(nostack));
+        // SAFETY: `svc #0` is the HEAP_GROW syscall; every register the kernel may write is declared clobbered, and it touches no memory this program tracks.
+        unsafe { core::arch::asm!("svc #0", inout("x0") HEAP_GROW => r, inout("x1") pages as u64 => _, lateout("x2") _, lateout("x3") _, lateout("x4") _, lateout("x5") _, options(nostack)) };
         if r < 0 {
             return false;
         }
-        self.insert(r as usize, pages * PAGE);
+        // SAFETY: on success the kernel returned `pages` fresh, 16-aligned, writable pages at `r` that nothing else uses, and they are not on the list yet.
+        unsafe { self.insert(r as usize, pages * PAGE) };
         true
     }
 }
@@ -82,28 +87,31 @@ unsafe impl GlobalAlloc for Heap {
             return null_mut();
         }
         let size = round(l.size());
-        let h = &mut *self.0.get();
-        loop {
-            let mut prev: *mut *mut Node = &mut h.head;
-            let mut cur = h.head;
-            while !cur.is_null() {
-                if (*cur).size >= size {
-                    let rem = (*cur).size - size;
-                    if rem >= 16 {
-                        let n = (cur as usize + size) as *mut Node;
-                        (*n).size = rem;
-                        (*n).next = (*cur).next;
-                        *prev = n;
-                    } else {
-                        *prev = (*cur).next;
+        // SAFETY: the task is single-threaded, so `self.0` is not aliased; every node on the list is a free block written by `insert`/`alloc`, so reading and splitting nodes is valid, and `grow` is called with the same exclusive access.
+        unsafe {
+            let h = &mut *self.0.get();
+            loop {
+                let mut prev: *mut *mut Node = &mut h.head;
+                let mut cur = h.head;
+                while !cur.is_null() {
+                    if (*cur).size >= size {
+                        let rem = (*cur).size - size;
+                        if rem >= 16 {
+                            let n = (cur as usize + size) as *mut Node;
+                            (*n).size = rem;
+                            (*n).next = (*cur).next;
+                            *prev = n;
+                        } else {
+                            *prev = (*cur).next;
+                        }
+                        return cur as *mut u8;
                     }
-                    return cur as *mut u8;
+                    prev = &mut (*cur).next;
+                    cur = (*cur).next;
                 }
-                prev = &mut (*cur).next;
-                cur = (*cur).next;
-            }
-            if !h.grow(size) {
-                return null_mut();
+                if !h.grow(size) {
+                    return null_mut();
+                }
             }
         }
     }
@@ -111,6 +119,7 @@ unsafe impl GlobalAlloc for Heap {
     /// # Safety
     /// `p` must come from `alloc` with the same `l`; the block is re-inserted with the same rounded size.
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        (*self.0.get()).insert(p as usize, round(l.size()));
+        // SAFETY: the task is single-threaded so `self.0` is not aliased; by the caller contract `p` is a block from `alloc` with the same `l`, so it is a free-able, 16-aligned region not on the list.
+        unsafe { (*self.0.get()).insert(p as usize, round(l.size())) };
     }
 }

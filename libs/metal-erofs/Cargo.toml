@@ -7,3 +7,6 @@ license.workspace = true
 [dependencies]
 metal-lz4 = { path = "../metal-lz4" }
 metal-zstd = { path = "../metal-zstd" }
+
+[lints]
+workspace = true

@@ -4,3 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "A network stack for Metal OS written from the RFCs: Ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP and DNS (no_std + alloc, driven by the caller)"
+
+[lints]
+workspace = true

@@ -240,7 +240,8 @@ pub fn psci_power(reset: bool) {
 /// # Safety
 /// `entry` must be the secondary core's entry point.
 pub unsafe fn psci_cpu_on(core: usize, entry: u64) -> i64 {
-    Power::cpu_on(core, entry)
+    // SAFETY: the caller's contract (`entry` is the secondary core's entry point) is exactly `cpu_on`'s.
+    unsafe { Power::cpu_on(core, entry) }
 }
 
 /// End the run with `code` where the machine can (QEMU: semihosting); returns if it cannot.

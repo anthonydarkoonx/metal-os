@@ -11,3 +11,10 @@ license = "Apache-2.0 OR MIT"
 # host tests render pictures and run property tests: optimise them
 [profile.test]
 opt-level = 2
+
+# Hardening lints: every operation inside an `unsafe fn` needs its own `unsafe` block, and every `unsafe` block a `// SAFETY:` comment.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"

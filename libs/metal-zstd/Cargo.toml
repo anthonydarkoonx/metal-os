@@ -7,3 +7,6 @@ license.workspace = true
 [features]
 default = ["decoder"]
 decoder = []
+
+[lints]
+workspace = true

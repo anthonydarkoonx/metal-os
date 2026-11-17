@@ -102,18 +102,30 @@ fn read(f: &pci::Func, cursor: &mut usize) -> Option<[u8; BYTES]> {
     out
 }
 
-// SAFETY: `a` is a register inside the BAR (bounds checked in `read`) in the device block; byte access needs no alignment; volatile MMIO.
-fn r8(a: usize) -> u8 { unsafe { read_volatile(a as *const u8) } }
-// SAFETY: `a` is a register inside the BAR (bounds checked in `read`) in the device block; byte access needs no alignment; volatile MMIO.
-fn w8(a: usize, v: u8) { unsafe { write_volatile(a as *mut u8, v) } }
-// SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
-fn r32(a: usize) -> u32 { unsafe { read_volatile(a as *const u32) } }
-// SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
-fn w32(a: usize, v: u32) { unsafe { write_volatile(a as *mut u32, v) } }
-// SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
-fn w16(a: usize, v: u16) { unsafe { write_volatile(a as *mut u16, v) } }
-// SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
-fn r16(a: usize) -> u16 { unsafe { read_volatile(a as *const u16) } }
+fn r8(a: usize) -> u8 {
+    // SAFETY: `a` is a register inside the BAR (bounds checked in `read`) in the device block; byte access needs no alignment; volatile MMIO.
+    unsafe { read_volatile(a as *const u8) }
+}
+fn w8(a: usize, v: u8) {
+    // SAFETY: `a` is a register inside the BAR (bounds checked in `read`) in the device block; byte access needs no alignment; volatile MMIO.
+    unsafe { write_volatile(a as *mut u8, v) }
+}
+fn r32(a: usize) -> u32 {
+    // SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
+    unsafe { read_volatile(a as *const u32) }
+}
+fn w32(a: usize, v: u32) {
+    // SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
+    unsafe { write_volatile(a as *mut u32, v) }
+}
+fn w16(a: usize, v: u16) {
+    // SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
+    unsafe { write_volatile(a as *mut u16, v) }
+}
+fn r16(a: usize) -> u16 {
+    // SAFETY: `a` is a register inside the BAR (bounds checked in `read`), aligned for this width (the BAR base is page aligned and `read` refuses unaligned capability offsets); volatile MMIO.
+    unsafe { read_volatile(a as *const u16) }
+}
 fn w64(a: usize, v: u64) { w32(a, v as u32); w32(a + 4, (v >> 32) as u32) }
 
 fn exchange(common: usize, notify: usize, notify_end: usize, mult: u32, page: usize) -> Option<[u8; BYTES]> {

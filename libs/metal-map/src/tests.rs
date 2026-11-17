@@ -31,17 +31,20 @@ fn round_trip() {
     assert_eq!(p.files().len(), 3);
 }
 
+/// Under Miri (about 100x slower) the exhaustive byte sweeps look at every 37th byte instead of every byte.
+const MIRI_STRIDE: usize = if cfg!(miri) { 37 } else { 1 };
+
 #[test]
 fn every_corruption_is_refused() {
     let b = pkg();
     // flipping any single byte of the body is caught by the checksum, of the header by the header checks
-    for i in 0..b.len() {
+    for i in (0..b.len()).step_by(MIRI_STRIDE) {
         let mut c = b.clone();
         c[i] ^= 0x01;
         assert!(Package::parse(&c).is_err(), "byte {i} flipped went unnoticed");
     }
     // every truncation is refused
-    for n in 0..b.len() {
+    for n in (0..b.len()).step_by(MIRI_STRIDE) {
         assert!(Package::parse(&b[..n]).is_err(), "truncated to {n}");
     }
 }
@@ -49,7 +52,7 @@ fn every_corruption_is_refused() {
 #[test]
 fn parser_never_panics_on_noise() {
     let mut s = 0x1234_5678u32;
-    for _ in 0..3000 {
+    for _ in 0..if cfg!(miri) { 100 } else { 3000 } {
         let n = (s % 300) as usize;
         let mut v: Vec<u8> = (0..n).map(|_| { s = s.wrapping_mul(1664525).wrapping_add(1013904223); (s >> 24) as u8 }).collect();
         if n > 8 && s & 1 == 0 {
@@ -193,7 +196,9 @@ fn every_change_to_a_signed_package_is_caught() {
     // change one byte anywhere before the signature and repair the checksum: only the signature can notice
     let sig_at = signed.len() - SIG_LEN;
     let mut caught = 0;
-    for i in 0..sig_at {
+    let mut tried = 0;
+    for i in (0..sig_at).step_by(MIRI_STRIDE) {
+        tried += 1;
         let mut b = signed.clone();
         b[i] ^= 0x01;
         if i >= HEADER {
@@ -208,9 +213,9 @@ fn every_change_to_a_signed_package_is_caught() {
             }
         }
     }
-    assert_eq!(caught, sig_at);
+    assert_eq!(caught, tried);
     // and every byte of the signature block itself
-    for i in sig_at..signed.len() {
+    for i in (sig_at..signed.len()).step_by(MIRI_STRIDE) {
         let mut b = signed.clone();
         b[i] ^= 0x80;
         let p = Package::parse(&b).unwrap();

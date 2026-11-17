@@ -170,7 +170,9 @@ impl Shell {
     /// # Safety
     /// As `Console::new` for `fb`.
     pub unsafe fn new(fb: *mut u32, facts: Facts, host: Host) -> Shell {
-        Shell { con: Console::new(fb), vfs: Vfs::new(5, SHELL_SHM), cwd: String::from("/"), line: String::new(), hist: Vec::new(), hist_at: 0, facts, stdout: None, progmgr: None, host, edit: None, saved_screen: None }
+        // SAFETY: forwarded from `Shell::new`'s contract: `fb` is valid for `Console::new`.
+        let con = unsafe { Console::new(fb) };
+        Shell { con, vfs: Vfs::new(5, SHELL_SHM), cwd: String::from("/"), line: String::new(), hist: Vec::new(), hist_at: 0, facts, stdout: None, progmgr: None, host, edit: None, saved_screen: None }
     }
 
     /// Draw the first screen: banner, the machine summary, a prompt.

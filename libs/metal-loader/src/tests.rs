@@ -191,7 +191,7 @@ fn random_images_never_break_the_invariants() {
         flat(4096, 16384, 5000),
     ];
     let mut accepted = 0;
-    for i in 0..300_000 {
+    for i in 0..if cfg!(miri) { 2_000 } else { 300_000 } {
         let mut img = seeds[i % seeds.len()].clone();
         for _ in 0..1 + next() % 6 {
             let at = (next() % img.len().min(64 + 56 * 3 + 8) as u64) as usize;
@@ -215,7 +215,7 @@ fn random_images_never_break_the_invariants() {
         }
         assert!(seen_entry);
     }
-    assert!(accepted > 1000, "the mutations should leave plenty of valid images ({accepted})");
+    assert!(accepted > if cfg!(miri) { 200 } else { 1000 }, "the mutations should leave plenty of valid images ({accepted})");
 }
 
 #[test]

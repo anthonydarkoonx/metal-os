@@ -7,3 +7,6 @@ description = "The Metal Program Package (.map) format: parser, validator and bu
 
 [dependencies]
 metal-ed25519 = { path = "../metal-ed25519" }
+
+[lints]
+workspace = true

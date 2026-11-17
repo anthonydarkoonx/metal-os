@@ -19,7 +19,7 @@ impl PowerControl for PsciHvc {
         let r: i64;
         let target = core as u64; // QEMU: Aff0 = core
         // SAFETY: PSCI CPU_ON through HVC with the contract above; the clobber list covers x0..x17 (SMCCC); the call does not touch Rust-visible memory.
-        core::arch::asm!("hvc #0", inout("x0") 0xC400_0003u64 => r, inout("x1") target => _, inout("x2") entry => _, inout("x3") core as u64 => _, lateout("x4") _, lateout("x5") _, lateout("x6") _, lateout("x7") _, lateout("x8") _, lateout("x9") _, lateout("x10") _, lateout("x11") _, lateout("x12") _, lateout("x13") _, lateout("x14") _, lateout("x15") _, lateout("x16") _, lateout("x17") _, options(nostack));
+        unsafe { core::arch::asm!("hvc #0", inout("x0") 0xC400_0003u64 => r, inout("x1") target => _, inout("x2") entry => _, inout("x3") core as u64 => _, lateout("x4") _, lateout("x5") _, lateout("x6") _, lateout("x7") _, lateout("x8") _, lateout("x9") _, lateout("x10") _, lateout("x11") _, lateout("x12") _, lateout("x13") _, lateout("x14") _, lateout("x15") _, lateout("x16") _, lateout("x17") _, options(nostack)) };
         r
     }
 }

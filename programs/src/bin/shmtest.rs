@@ -72,7 +72,9 @@ program!("shmtest", |c| {
             if map(s, BIG + 0x10_0000, true) != 0 {
                 return 6;
             }
+            // SAFETY: both mappings of the same object (BIG and BIG + 0x10_0000) succeeded above (`map` returned 0), so the address is 4-aligned and inside a live mapping.
             unsafe { word(BIG + 0x10_0000 + 4) }.store(0xCAFE_F00D, Ordering::SeqCst);
+            // SAFETY: BIG was mapped above (`map` returned 0) and the address is 4-aligned and inside it.
             if unsafe { word(BIG + 4) }.load(Ordering::SeqCst) != 0xCAFE_F00D {
                 return 7;
             }
@@ -242,6 +244,7 @@ program!("shmtest", |c| {
             if map(0, BIG, true) != 0 {
                 return 1;
             }
+            // SAFETY: slot 0 was just mapped at BIG (`map` returned 0), so BIG is 4-aligned and inside a live mapping.
             let w = unsafe { word(BIG) };
             let t0 = ticks();
             let r = metal_programs::thread::wait_word(w, 0, 300);
@@ -273,6 +276,7 @@ program!("shmtest", |c| {
                 return 1;
             }
             loop {
+                // SAFETY: the `pages`-page object was mapped at BIG (`map` returned 0 above), and `p < pages`, so the 4-aligned address is inside the mapping.
                 let _ = unsafe { word(BIG) }.load(Ordering::SeqCst);
                 sleep(1);
             }
@@ -300,8 +304,10 @@ program!("shmtest", |c| {
                 return 3;
             }
             for p in 0..pages {
+                // SAFETY: the `pages`-page object is mapped at BIG and `p < pages`, so the 4-aligned address is inside the mapping.
                 unsafe { word(BIG + p * PAGE) }.store(p as u32 ^ 0x5555, Ordering::SeqCst);
             }
+            // SAFETY: as above: `p < pages`, inside the mapping at BIG.
             if (0..pages).any(|p| unsafe { word(BIG + p * PAGE) }.load(Ordering::SeqCst) != p as u32 ^ 0x5555) {
                 return 4;
             }
@@ -313,8 +319,11 @@ program!("shmtest", |c| {
                 if s < 0 || map(s as u64, BIG, true) != 0 {
                     return 1;
                 }
+                // SAFETY: the 4096-page object was mapped at BIG (`map` returned 0), so BIG is 4-aligned and inside it.
                 unsafe { word(BIG) }.store(round + 1, Ordering::SeqCst);
+                // SAFETY: the last word, BIG + 4096 * PAGE - 4, is 4-aligned and inside the 4096-page mapping.
                 unsafe { word(BIG + 4096 * PAGE - 4) }.store(!round, Ordering::SeqCst);
+                // SAFETY: both addresses (first and last word) are 4-aligned and inside the live 4096-page mapping; `revoke_self` runs only afterwards.
                 if unsafe { word(BIG) }.load(Ordering::SeqCst) != round + 1 || unsafe { word(BIG + 4096 * PAGE - 4) }.load(Ordering::SeqCst) != !round {
                     return 2;
                 }
@@ -328,6 +337,7 @@ program!("shmtest", |c| {
             if map(0, BIG, true) != 0 {
                 return 1;
             }
+            // SAFETY: slot 0 was mapped at BIG (`map` returned 0), so BIG + 8 is 4-aligned and inside the mapping.
             unsafe { word(BIG + 8) }.store(0x600D, Ordering::SeqCst);
             0
         }

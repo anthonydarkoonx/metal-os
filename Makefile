@@ -50,7 +50,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -432,3 +432,10 @@ inherit-ab: user disk
 	@echo "--- with inheritance (1 CPU):"
 	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=2,iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
 	  -kernel $(KERNEL_BIN) 2>&1 | grep "priority inheritance" || true
+
+# Hardening lints (fast, no QEMU): deny-level clippy plus the unsafe_op_in_unsafe_fn / undocumented_unsafe_blocks rules from each Cargo.toml.
+clippy:
+	cargo clippy --workspace --all-targets
+	cd kernel && cargo clippy --release
+	cd user && cargo clippy --release
+	cd programs && cargo clippy --release

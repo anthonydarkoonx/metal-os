@@ -48,5 +48,7 @@ vendored or shipped, and no source from them is in this repository.
 ## Typeface
 `libs/metal-gfx/src/font_data.rs` holds glyph bitmaps of **IBM Plex Sans** and **IBM Plex Mono**, rasterised from the font files of the original build machine (`/usr/share/fonts/truetype/ibm-plex`; the generator script was removed with the GUI on 2026-11-16, the data file stays). The terminal draws with the monospaced face (`typeface::MONO`). IBM Plex is published under the SIL Open Font License 1.1, which permits embedding and distribution; the bitmaps are not a font program and are not named as one. The 5x9 bitmap font in `libs/metal-gfx/src/font.rs` was drawn for this project.
 
-## ROCK 3C test folder (exception)
-`rock 3c test/` is the one place where GPL-2.0 / Linux / U-Boot derived code is allowed, for testing on real hardware. Its rules are in `rock 3c test/EXCEPTION.md`, and its sources are in `rock 3c test/PROVENANCE-ROCK3C.md`. Nothing from that folder may flow back into the rest of the tree.
+## ROCK 3C board port (separate repository)
+The board port to the Radxa ROCK 3C lives in its own repository, [metal-os-drivers](https://github.com/anthonydarkoonx/metal-os-drivers),
+licensed GPL-2.0-only as a whole: its drivers are ported from Linux and U-Boot. Nothing from it comes into this tree; a driver for
+this tree is written from the hardware manuals.

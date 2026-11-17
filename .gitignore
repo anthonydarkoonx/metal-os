@@ -17,7 +17,6 @@ build-probe/
 kernel/target-*/
 programs/target*/
 user/target/
-rock 3c test/metal/user-target/
 rock 3c test/metal/logs/
 rock 3c test/boot/*.bin
 programs/build/
@@ -26,3 +25,6 @@ rock 3c test/third_party/
 rock 3c test/metal/stage/
 rock 3c test/**/target/
 rock 3c test/**/target-*/
+# private signing keys (tools/mkmap.py makes them on first use) and the board port (its own repository: metal-os-drivers)
+*.seed
+rock 3c test/

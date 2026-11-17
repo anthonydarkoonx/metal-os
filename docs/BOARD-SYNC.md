@@ -1,4 +1,7 @@
 # The ROCK 3C board and the general tree
+> The board folder is now its own repository, https://github.com/anthonydarkoonx/metal-os-drivers (GPL-2.0-only). Its scripts
+> find this tree through `METAL_OS`; the rules below still hold. Paths `rock 3c test/...` below mean that repository.
+
 
 **Rule (user, 2026-11-15):** `rock 3c test/` holds ONLY the board's drivers and platform code. Every OS-level change (kernel, programs, UI, memory policy, tests, libs)
 is made in the general tree and nowhere else. Nothing is copied back out of `rock 3c test/` (it is the GPL-2.0 exception, one-way flow: see its EXCEPTION.md).

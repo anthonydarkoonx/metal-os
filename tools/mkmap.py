@@ -27,7 +27,13 @@ MAGIC = b"METALMAP"
 
 
 def load_key(name):
-    seed = bytes.fromhex(open(os.path.join(HERE, "keys", name + ".seed")).read().strip())
+    path = os.path.join(HERE, "keys", name + ".seed")
+    if not os.path.exists(path):
+        # (the seeds are not in the repository: each checkout makes its own on first use, and the image trusts that dev key)
+        with open(path, "w") as f:
+            f.write(os.urandom(32).hex() + "\n")
+        print(f"made a new signing key {path}", file=sys.stderr)
+    seed = bytes.fromhex(open(path).read().strip())
     return Ed25519PrivateKey.from_private_bytes(seed)
 
 

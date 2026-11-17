@@ -15,7 +15,8 @@ servers, a VFS, and host-tested storage / memory libraries. Licensed Apache-2.0 
     make provenance-check   # verify the ZSTD tables against RFC 8878 (needs network once)
     make run RAM_MIB=32     # choose the RAM size (passed to the kernel via QEMU fw_cfg)
 
-See `PROVENANCE.md` for where every component comes from (no GPL-derived code). Exception: `rock 3c test/` (see its `EXCEPTION.md`).
+See `PROVENANCE.md` for where every component comes from (no GPL-derived code). The Radxa ROCK 3C board port, whose drivers are
+ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metal-os-drivers](https://github.com/anthonydarkoonx/metal-os-drivers).
 
 ## Layout
 | path | what |

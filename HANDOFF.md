@@ -1,7 +1,7 @@
 # Metal OS handoff (rewritten 2026-11-16)
 
 ## Where things stand
-Metal OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C board port lives in `rock 3c test/`, GPL-2.0 exception, see its `EXCEPTION.md`).
+Metal OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C board port lives in the separate GPL-2.0-only repository `metal-os-drivers` (formerly `rock 3c test/`; see its `README.md`).
 **There is no GUI.** On 2026-11-16 the whole GUI was deleted from the general tree: the libs `metal-classic metal-gui metal-gui-proto metal-taskbar metal-wm
 metal-theme metal-font metal-prefs metal-files`, the `shell` (taskbar / Start menu) program, `docs/GUI-SPEC.md`, the icon code and the GUI test images. Earlier
 GUI generations (retro blue, flat pastel, SerenityOS-style classic) and the programs that went with them (browser, editor, Control Panel, Files, Task Manager,
@@ -13,7 +13,7 @@ Paint, dialogs, desktop icons) are gone too; none of it is in the tree or in git
 **Naming (2026-11-17):** the screen task, once "the desktop", is now the **console** (role 13, task name `console`, `kernel/src/devices.rs` `Phase::Console`, `CONSOLE_HEAP_PAGES`, `user/src/screen.rs`, `INFO_CONSOLE`, `programs::console_session()`). The role number 13 and the board's `DESK_*` display constants keep their numbers.
 **Leftover wiring (harmless, can go with a future GUI decision):** the display endpoint that `progmgr` still hands to programs with the `window` permission (`docs/PROGRAMS.md`, `metal-map`'s permission list).
 **Memory safety (2026-11-17):** see `docs/BOARD-SYNC.md` and the git log. Miri passed on the libs' completed tests; the long-running ones (`random_images_never_break_the_invariants`, three `metal-map` fuzz tests, `rfc8032_vectors`) have no verdict yet. Every `unsafe` site has a SAFETY comment; the kernel's lock-free globals are borrow-checked at run time (`kernel/src/sync.rs`); the board runs the new kernel (self-test 88/13/1, same as before).
-**Repository:** https://github.com/anthonydarkoonx/metal-os (private; disk images, `rock 3c test/third_party/` and build output are not in it).
+**Repository:** https://github.com/anthonydarkoonx/metal-os (public; disk images, signing keys and build output are not in it; the board port is https://github.com/anthonydarkoonx/metal-os-drivers).
 **Rules from the user:** OS changes only in the general tree, the board folder holds drivers only (`docs/BOARD-SYNC.md` logs every change); say "program", not "app";
 do not add programs nobody asked for; run only fast host tests unless asked.
 

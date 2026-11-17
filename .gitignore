@@ -25,6 +25,6 @@ rock 3c test/third_party/
 rock 3c test/metal/stage/
 rock 3c test/**/target/
 rock 3c test/**/target-*/
-# private signing keys (tools/mkmap.py makes them on first use) and the board port (its own repository: metal-os-drivers)
+# private signing keys (tools/mkmap.py makes them on first use) and the board port (its own repository: metal-os-rock3c)
 *.seed
 rock 3c test/

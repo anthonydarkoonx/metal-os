@@ -1,5 +1,5 @@
 # The ROCK 3C board and the general tree
-> The board folder is now its own repository, https://github.com/anthonydarkoonx/metal-os-drivers (GPL-2.0-only). Its scripts
+> The board folder is now its own repository, https://github.com/anthonydarkoonx/metal-os-rock3c (GPL-2.0-only). Its scripts
 > find this tree through `METAL_OS`; the rules below still hold. Paths `rock 3c test/...` below mean that repository.
 
 

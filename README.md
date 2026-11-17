@@ -16,7 +16,7 @@ servers, a VFS, and host-tested storage / memory libraries. Licensed Apache-2.0 
     make run RAM_MIB=32     # choose the RAM size (passed to the kernel via QEMU fw_cfg)
 
 See `PROVENANCE.md` for where every component comes from (no GPL-derived code). The Radxa ROCK 3C board port, whose drivers are
-ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metal-os-drivers](https://github.com/anthonydarkoonx/metal-os-drivers).
+ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metal-os-rock3c](https://github.com/anthonydarkoonx/metal-os-rock3c).
 
 ## Layout
 | path | what |

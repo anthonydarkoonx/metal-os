@@ -137,7 +137,8 @@ fn grow(v: &mut Vec<Owner>, i: usize) -> &mut Owner {
 
 impl Netd {
     fn ring(&self, which: usize) -> Ring {
-        Ring(va(RING_VA) + which)
+        // SAFETY: the ring page is mapped at RING_VA for the life of this task (`init`), and `which` is one of the ring offsets in it.
+        unsafe { Ring::at(va(RING_VA) + which) }
     }
 
     fn page(&self, k: usize) -> &'static mut [u8; 4096] {

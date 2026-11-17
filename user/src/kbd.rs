@@ -246,7 +246,8 @@ fn dev_init(which: usize, base: u64) -> Result<Dev, &'static str> {
     if s1 != 0 || s2 != 0 {
         return Err("cap_info failed");
     }
-    let pci = virtio::Pci::open(mmio_va, bar_pages as usize * 4096, cfg_va, 0x1052)?;
+    // SAFETY: the BAR and config-space mappings the kernel gave this driver (`bar_pages` pages at MMIO_VA / CFG_VA, per its facts).
+    let pci = unsafe { virtio::Pci::open(mmio_va, bar_pages as usize * 4096, cfg_va, 0x1052) }?;
     // a pointer has absolute axes: ask the device which kinds of events it produces (virtio-input's EV_BITS query)
     pci.set_config8(0, CFG_EV_BITS);
     pci.set_config8(1, EV_ABS as u8);

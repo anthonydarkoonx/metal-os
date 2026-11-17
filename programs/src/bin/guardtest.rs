@@ -34,10 +34,11 @@ extern "C" fn worker(_: u64) -> ! {
     SEEN_SP.store(top as u64, SeqCst);
     SEEN_HELD.store(quota().held, SeqCst);
     match ACTION.load(SeqCst) {
-        // UNVERIFIED: the first write is the lowest byte of the thread's own stack (mapped, unused), but the second is its topmost byte (`top - 1`), which may be a live slot of `worker`'s own frame; harmless only if it is a dead saved register, which the code does not establish.
+        // SAFETY: the first and last byte of the lowest page of the thread's own stack: mapped, writable, and far below anything the
+        // thread's frames use (they are at the top).
         0 => unsafe {
             core::ptr::write_volatile((top - TSTACK_PAGES * PAGE) as *mut u8, 1);
-            core::ptr::write_volatile((top - 1) as *mut u8, 2);
+            core::ptr::write_volatile((top - TSTACK_PAGES * PAGE + PAGE - 1) as *mut u8, 2);
         },
         // SAFETY: deliberately not sound: this is just below the thread's stack, in its guard page, so the write must fault and end the program; that is the test.
         1 => unsafe { core::ptr::write_volatile((top - TSTACK_PAGES * PAGE - 8) as *mut u64, 1) },
@@ -93,10 +94,10 @@ program!("guardtest", |c| -> u64 {
             0
         }
         4 => {
-            // UNVERIFIED: the first write is the lowest byte of the main stack (mapped, unused), but the second is its topmost byte (`stack_top - 1`), which may be a live slot of the start-up frame; harmless only if it is dead, which the code does not establish.
+            // SAFETY: the first and last byte of the lowest page of the main stack: mapped, writable, and far below the frames in use.
             unsafe {
                 core::ptr::write_volatile((stack_top - STACK_PAGES * PAGE) as *mut u8, 1);
-                core::ptr::write_volatile((stack_top - 1) as *mut u8, 2);
+                core::ptr::write_volatile((stack_top - STACK_PAGES * PAGE + PAGE - 1) as *mut u8, 2);
             }
             0
         }

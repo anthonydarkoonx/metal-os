@@ -34,10 +34,23 @@ pub const EPOCH: usize = INFO + 12;
 pub const POLL: usize = INFO + 16;
 
 /// One end of a ring at `base` (the ring page's address in this task plus the ring's offset).
+///
+/// The type's invariant: `base` is the address of a mapped, 4-aligned region of at least `RING_BYTES` bytes in this task for
+/// as long as the `Ring` is used (so its methods can be safe). `Ring::at` is how one is made.
 #[derive(Clone, Copy)]
-pub struct Ring(pub usize);
+pub struct Ring(usize);
+
+/// Bytes a ring occupies: producer word, consumer word (one cache line each) and the entries.
+pub const RING_BYTES: usize = 128 + 4 * RING_ENTRIES;
 
 impl Ring {
+    /// # Safety
+    /// `base .. base + RING_BYTES` must be mapped read-write in this task, 4-aligned, and stay mapped while the `Ring` (or a
+    /// copy) is used.
+    pub unsafe fn at(base: usize) -> Ring {
+        Ring(base)
+    }
+
     fn prod(&self) -> *mut u32 {
         self.0 as *mut u32
     }
@@ -50,7 +63,7 @@ impl Ring {
 
     pub fn len(&self) -> u32 {
         fence(Ordering::SeqCst);
-        // SAFETY: UNVERIFIED: `Ring` wraps a bare address, so this relies on the constructor convention (a mapped, 4-aligned ring page of >= 0x180 bytes in this task, which netd/netdrv map from their RING_VA window); not enforced by the type, and these methods are safe fns.
+        // SAFETY: `Ring::at`'s contract: the ring region is mapped and aligned, so the producer and consumer words are valid to read.
         unsafe { read_volatile(self.prod()).wrapping_sub(read_volatile(self.cons())).min(RING_ENTRIES as u32) }
     }
 

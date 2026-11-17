@@ -7,7 +7,9 @@ use crate::*;
 // the conductor's display tests; the pixels are drawn by the screen task (info.rs)
 // ---------------------------------------------------------------------------
 /// Colour bars (white, yellow, cyan, green, magenta, red, blue, black), a grey ramp, and a title.
-pub fn draw_test_card(fb: *mut u32) {
+/// # Safety
+/// `fb` must be the mapped `W * H` word framebuffer.
+pub unsafe fn draw_test_card(fb: *mut u32) {
     const BARS: [u32; 8] = [0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x000000];
     for y in 0..H {
         for x in 0..W {
@@ -23,7 +25,8 @@ pub fn draw_test_card(fb: *mut u32) {
             unsafe { write_volatile(fb.add(y * W + x), c) };
         }
     }
-    font::draw_text(fb, W, (W - 8 * 6 * 8) / 2, H * 5 / 6 + 28, 8, 0xFFFFFF, "METAL OS");
+    // SAFETY: the contract: `fb` is `W * H` mapped words; the reference lives for this call only.
+    font::draw_text(unsafe { core::slice::from_raw_parts_mut(fb, W * H) }, W, (W - 8 * 6 * 8) / 2, H * 5 / 6 + 28, 8, 0xFFFFFF, "METAL OS");
 }
 
 fn flush_all() -> i64 {

@@ -81,7 +81,8 @@ pub fn info_task() -> ! {
         let m = recv(0);
         match m.w[0] {
             INFO_CARD => {
-                crate::gputest::draw_test_card(fb);
+                // SAFETY: `fb` is the W x H scanout buffer mapped at FB_VA above.
+                unsafe { crate::gputest::draw_test_card(fb) };
                 let ok = call(1, [GPU_FLUSH, (W as u64) << 32 | (H as u64) << 48, 0]);
                 reply([(ok.0 != 0 || ok.1[0] != 0) as u64, 0, 0]);
             }

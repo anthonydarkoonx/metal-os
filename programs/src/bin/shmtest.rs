@@ -11,8 +11,11 @@ const MC_STATS: u64 = 0;
 const BIG: usize = 0xA000_0000;
 const PAGE: usize = 4096;
 
-fn word(va: usize) -> &'static AtomicU32 {
-    // UNVERIFIED: `word` is a safe fn that turns any integer into a `&'static AtomicU32`; sound only because every caller passes a 4-aligned address inside an object it has just mapped (and, in scenario 4, the object may be revoked underneath it on purpose).
+/// # Safety
+/// `va` must be a 4-aligned address inside an object this program has mapped and still has mapped. (Scenario 4 revokes an object
+/// while it is in use on purpose, to see what the kernel does: that test accepts the fault.)
+unsafe fn word(va: usize) -> &'static AtomicU32 {
+    // SAFETY: the caller's contract.
     unsafe { &*(va as *const AtomicU32) }
 }
 
@@ -69,8 +72,8 @@ program!("shmtest", |c| {
             if map(s, BIG + 0x10_0000, true) != 0 {
                 return 6;
             }
-            word(BIG + 0x10_0000 + 4).store(0xCAFE_F00D, Ordering::SeqCst);
-            if word(BIG + 4).load(Ordering::SeqCst) != 0xCAFE_F00D {
+            unsafe { word(BIG + 0x10_0000 + 4) }.store(0xCAFE_F00D, Ordering::SeqCst);
+            if unsafe { word(BIG + 4) }.load(Ordering::SeqCst) != 0xCAFE_F00D {
                 return 7;
             }
             // an address already mapped cannot be mapped over
@@ -239,7 +242,7 @@ program!("shmtest", |c| {
             if map(0, BIG, true) != 0 {
                 return 1;
             }
-            let w = word(BIG);
+            let w = unsafe { word(BIG) };
             let t0 = ticks();
             let r = metal_programs::thread::wait_word(w, 0, 300);
             let dt = ticks() - t0;
@@ -270,7 +273,7 @@ program!("shmtest", |c| {
                 return 1;
             }
             loop {
-                let _ = word(BIG).load(Ordering::SeqCst);
+                let _ = unsafe { word(BIG) }.load(Ordering::SeqCst);
                 sleep(1);
             }
         }
@@ -297,9 +300,9 @@ program!("shmtest", |c| {
                 return 3;
             }
             for p in 0..pages {
-                word(BIG + p * PAGE).store(p as u32 ^ 0x5555, Ordering::SeqCst);
+                unsafe { word(BIG + p * PAGE) }.store(p as u32 ^ 0x5555, Ordering::SeqCst);
             }
-            if (0..pages).any(|p| word(BIG + p * PAGE).load(Ordering::SeqCst) != p as u32 ^ 0x5555) {
+            if (0..pages).any(|p| unsafe { word(BIG + p * PAGE) }.load(Ordering::SeqCst) != p as u32 ^ 0x5555) {
                 return 4;
             }
             0
@@ -310,9 +313,9 @@ program!("shmtest", |c| {
                 if s < 0 || map(s as u64, BIG, true) != 0 {
                     return 1;
                 }
-                word(BIG).store(round + 1, Ordering::SeqCst);
-                word(BIG + 4096 * PAGE - 4).store(!round, Ordering::SeqCst);
-                if word(BIG).load(Ordering::SeqCst) != round + 1 || word(BIG + 4096 * PAGE - 4).load(Ordering::SeqCst) != !round {
+                unsafe { word(BIG) }.store(round + 1, Ordering::SeqCst);
+                unsafe { word(BIG + 4096 * PAGE - 4) }.store(!round, Ordering::SeqCst);
+                if unsafe { word(BIG) }.load(Ordering::SeqCst) != round + 1 || unsafe { word(BIG + 4096 * PAGE - 4) }.load(Ordering::SeqCst) != !round {
                     return 2;
                 }
                 if revoke_self(s as u64) < 0 {
@@ -325,7 +328,7 @@ program!("shmtest", |c| {
             if map(0, BIG, true) != 0 {
                 return 1;
             }
-            word(BIG + 8).store(0x600D, Ordering::SeqCst);
+            unsafe { word(BIG + 8) }.store(0x600D, Ordering::SeqCst);
             0
         }
         9 => {

@@ -647,8 +647,8 @@ pub fn tests() {
         let during = sysinfo(0)[3];
         let (mapped, intact, info) = if (0..32).contains(&slot) {
             let m = svc(4, slot as u64, BIG as u64 + 0x40_0000, 0, 0, 0)[0] == 0;
-            // SAFETY: UNVERIFIED: this slice is built before `m` (the mapping result) is known to be true, although it is only read when `m` holds; when mapped, `slot` is an 8-page object mapped read-only at BIG + 0x40_0000.
-            let mem = unsafe { core::slice::from_raw_parts((BIG + 0x40_0000) as *const u8, 8 * PAGE) };
+            // SAFETY: only when `m` (the mapping succeeded) is the 8-page object `slot` readable at BIG + 0x40_0000.
+            let mem: &[u8] = if m { unsafe { core::slice::from_raw_parts((BIG + 0x40_0000) as *const u8, 8 * PAGE) } } else { &[] };
             (m, m && (0..8 * PAGE).all(|i| mem[i] == pat(i, 9)), svc(38, slot as u64, 0, 0, 0, 0)[0])
         } else {
             (false, false, 0)

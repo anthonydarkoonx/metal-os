@@ -100,7 +100,8 @@ fn blk_init() -> Result<Blk, &'static str> {
         }
         buf_pa[i] = pa;
     }
-    let pci = virtio::Pci::open(va(MMIO_VA), bar_pages as usize * 4096, va(CFG_VA), 0x1042)?;
+    // SAFETY: the BAR and config-space mappings the kernel gave this driver (`bar_pages` pages at MMIO_VA / CFG_VA, per its facts).
+    let pci = unsafe { virtio::Pci::open(va(MMIO_VA), bar_pages as usize * 4096, va(CFG_VA), 0x1042) }?;
     pci.start()?; // resets the device: also discards any state a crashed predecessor left behind
     // The DMA page outlives a crashed driver: wipe stale avail/used indices so the
     // device cannot replay the previous instance's requests.

@@ -61,7 +61,8 @@ pub fn run(facts: crate::info::Facts, ctl: u64) -> ! {
     // SAFETY: the scanout buffer is `W * H` words.
     unsafe { core::slice::from_raw_parts_mut(fb, W * H) }.fill(BACKDROP);
     let _ = call(1, [GPU_FLUSH2, (W as u64) << 32 | (H as u64) << 48, 0]);
-    let mut shell = Terminal::new(term_buf.as_mut_ptr(), facts, Host { keys: take_keys, idle: || sleep(1) });
+    // SAFETY: `term_buf` is leaked, so it lives for ever; it holds `tw * th` (WIDTH * HEIGHT) words and nothing else uses it.
+    let mut shell = unsafe { Terminal::new(term_buf.as_mut_ptr(), facts, Host { keys: take_keys, idle: || sleep(1) }) };
     shell.progmgr = (ctl != 0).then_some(ctl);
     shell.start();
     println!("[desktop] up: terminal only, no windowing system");

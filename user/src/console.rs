@@ -78,8 +78,19 @@ const NONE: usize = usize::MAX;
 
 impl Console {
     /// A console drawing into `fb`, a buffer of `WIDTH` x `HEIGHT` pixels.
-    pub fn new(fb: *mut u32) -> Console {
+    ///
+    /// # Safety
+    /// `fb` must point to `WIDTH * HEIGHT` mapped, writable words that stay mapped (and are used by nothing else in this task) for
+    /// as long as the console lives.
+    pub unsafe fn new(fb: *mut u32) -> Console {
         Console { fb, cx: 0, cy: 0, fg: FG, cursor_shown: false }
+    }
+
+    /// The pixel buffer, for the font routines (which bounds-check every write).
+    fn px(&mut self) -> &'static mut [u32] {
+        // SAFETY: `Console::new`'s contract: `fb` is `WIDTH * HEIGHT` mapped words for the console's life; the slice is used within
+        // one drawing call and no other reference to the buffer is live then.
+        unsafe { core::slice::from_raw_parts_mut(self.fb, WIDTH * HEIGHT) }
     }
 
     fn mark(&mut self, y0: usize, y1: usize) {
@@ -93,7 +104,7 @@ impl Console {
 
     /// Clear everything and put the cursor at the top left.
     pub fn reset(&mut self) {
-        font::fill_rect(self.fb, WIDTH, 0, 0, WIDTH, HEIGHT, themed(BG));
+        font::fill_rect(self.px(), WIDTH, 0, 0, WIDTH, HEIGHT, themed(BG));
         self.cx = 0;
         self.cy = 0;
         self.cursor_shown = false;
@@ -114,7 +125,7 @@ impl Console {
             return;
         }
         let (x, y) = Self::cell(self.cx.min(COLS - 1), self.cy);
-        font::fill_rect(self.fb, WIDTH, x, y + 16, CELL_W, 2, if on { themed(ACCENT) } else { themed(BG) });
+        font::fill_rect(self.px(), WIDTH, x, y + 16, CELL_W, 2, if on { themed(ACCENT) } else { themed(BG) });
         self.cursor_shown = on;
         self.mark(y, y + CELL_H);
     }
@@ -128,7 +139,7 @@ impl Console {
         // scroll the text area up by one line
         // SAFETY: `fb` is the WIDTH x HEIGHT buffer; source rows MARGIN+CELL_H.. and destination rows MARGIN.. both end inside it ((ROWS-1)*CELL_H rows from row MARGIN+CELL_H <= HEIGHT-MARGIN); `copy` handles the overlap.
         unsafe { core::ptr::copy(self.fb.add((MARGIN + CELL_H) * WIDTH), self.fb.add(MARGIN * WIDTH), (ROWS - 1) * CELL_H * WIDTH) };
-        font::fill_rect(self.fb, WIDTH, 0, MARGIN + (ROWS - 1) * CELL_H, WIDTH, CELL_H, themed(BG));
+        font::fill_rect(self.px(), WIDTH, 0, MARGIN + (ROWS - 1) * CELL_H, WIDTH, CELL_H, themed(BG));
         self.mark(MARGIN, MARGIN + ROWS * CELL_H);
     }
 
@@ -142,7 +153,7 @@ impl Console {
                     self.newline();
                 }
                 let (x, y) = Self::cell(self.cx, self.cy);
-                font::draw_mono(self.fb, WIDTH, x, y, themed(self.fg), ch);
+                font::draw_mono(self.px(), WIDTH, x, y, themed(self.fg), ch);
                 self.cx += 1;
                 self.mark(y, y + CELL_H);
             }
@@ -168,7 +179,7 @@ impl Console {
         }
         self.cx -= 1;
         let (x, y) = Self::cell(self.cx, self.cy);
-        font::fill_rect(self.fb, WIDTH, x, y, CELL_W, CELL_H, themed(BG));
+        font::fill_rect(self.px(), WIDTH, x, y, CELL_W, CELL_H, themed(BG));
         self.mark(y, y + CELL_H);
     }
 
@@ -180,9 +191,9 @@ impl Console {
         self.cursor(false);
         let (x, y) = Self::cell(col, row);
         let (bg, fg) = if inverse { (themed(FG), themed(BG)) } else { (themed(BG), themed(FG)) };
-        font::fill_rect(self.fb, WIDTH, x, y, CELL_W, CELL_H, bg);
+        font::fill_rect(self.px(), WIDTH, x, y, CELL_W, CELL_H, bg);
         if (0x20..=0x7e).contains(&ch) && ch != b' ' {
-            font::draw_mono(self.fb, WIDTH, x, y, fg, ch);
+            font::draw_mono(self.px(), WIDTH, x, y, fg, ch);
         }
         self.mark(y, y + CELL_H);
     }

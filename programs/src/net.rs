@@ -219,13 +219,20 @@ fn mapped() -> bool {
 /// The session's event counter: the service adds one and wakes whoever waits on it whenever something a "would block"
 /// answer was waiting for may have happened. Read it *before* the call that may say "would block".
 fn event() -> u32 {
-    if mapped() {
-        // SAFETY: `mapped()` is true, so `va()` is the mapped session page and offset 0 is a 4-aligned word; volatile because the service updates it.
-        // UNVERIFIED: this runs without the lock, so another thread inside `rpc` may hold a `&mut [u8; 4096]` over the same word (aliasing) and the service's write is not atomic as Rust sees it.
-        unsafe { core::ptr::read_volatile(va() as *const u32) }
+    // Under the lock: `rpc` holds it for the whole of its call, so no `&mut` over the session page is live while the word is read,
+    // and it is read atomically (the service updates it from another task).
+    LOCK.lock();
+    if MAPPED.load(Ordering::Relaxed) == 0 {
+        MAPPED.store(map_page(), Ordering::Relaxed);
+    }
+    let v = if MAPPED.load(Ordering::Relaxed) == 1 {
+        // SAFETY: `MAPPED == 1`, so `va()` is the mapped session page; offset 0 is a 4-aligned word that lives as long as the mapping.
+        unsafe { core::sync::atomic::AtomicU32::from_ptr(va() as *mut u32) }.load(Ordering::Acquire)
     } else {
         0
-    }
+    };
+    LOCK.unlock();
+    v
 }
 
 /// Sleep until the event counter is no longer `seen` (or `remaining` is over, or half a second, whichever is first).

@@ -167,7 +167,9 @@ fn common_prefix(items: &[String]) -> String {
 type Reply = Result<String, String>;
 
 impl Shell {
-    pub fn new(fb: *mut u32, facts: Facts, host: Host) -> Shell {
+    /// # Safety
+    /// As `Console::new` for `fb`.
+    pub unsafe fn new(fb: *mut u32, facts: Facts, host: Host) -> Shell {
         Shell { con: Console::new(fb), vfs: Vfs::new(5, SHELL_SHM), cwd: String::from("/"), line: String::new(), hist: Vec::new(), hist_at: 0, facts, stdout: None, progmgr: None, host, edit: None, saved_screen: None }
     }
 

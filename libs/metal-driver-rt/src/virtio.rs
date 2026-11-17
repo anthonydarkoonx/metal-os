@@ -39,24 +39,34 @@ pub fn packed_layout(size: u16) -> Option<(usize, usize)> {
     (used + 6 + 8 * size as usize <= 4096).then_some((avail, used))
 }
 
-fn rd32(a: usize) -> u32 {
-    // SAFETY: UNVERIFIED: safe fn dereferencing a raw address; every caller passes an address inside the BAR / config-space mappings given to `Pci::open` (bounds were checked there), but `rd32` itself does not enforce that. Volatile because it is device MMIO.
+/// # Safety
+/// `a` must be a 4-aligned address of a mapped device register (or readable memory) of this task.
+unsafe fn rd32(a: usize) -> u32 {
+    // SAFETY: the caller's contract; volatile because it is device MMIO.
     unsafe { read_volatile(a as *const u32) }
 }
-fn wr32(a: usize, v: u32) {
-    // SAFETY: UNVERIFIED: as `rd32` - address is by convention inside the mapped BAR (offsets from `Pci::open`, checked against `bar_bytes`); volatile device MMIO write.
+/// # Safety
+/// As `rd32`, writable.
+unsafe fn wr32(a: usize, v: u32) {
+    // SAFETY: the caller's contract; volatile device MMIO write.
     unsafe { write_volatile(a as *mut u32, v) }
 }
-fn wr64(a: usize, v: u64) {
+/// # Safety
+/// As `wr32` for `a` and `a + 4`.
+unsafe fn wr64(a: usize, v: u64) {
     wr32(a, v as u32);
     wr32(a + 4, (v >> 32) as u32);
 }
-fn rd16(a: usize) -> u16 {
-    // SAFETY: UNVERIFIED: as `rd32` - address is by convention inside the mapped BAR; volatile device MMIO read.
+/// # Safety
+/// `a` must be a 2-aligned address of a mapped device register of this task.
+unsafe fn rd16(a: usize) -> u16 {
+    // SAFETY: the caller's contract; volatile device MMIO read.
     unsafe { read_volatile(a as *const u16) }
 }
-fn wr16(a: usize, v: u16) {
-    // SAFETY: UNVERIFIED: as `rd32` - address is by convention inside the mapped BAR; volatile device MMIO write.
+/// # Safety
+/// As `rd16`, writable.
+unsafe fn wr16(a: usize, v: u16) {
+    // SAFETY: the caller's contract; volatile device MMIO write.
     unsafe { write_volatile(a as *mut u16, v) }
 }
 pub fn fence() {
@@ -78,15 +88,49 @@ pub struct Pci {
 const COMMON_LEN: usize = 0x38;
 
 impl Pci {
+    // The common configuration structure: `open` checked that `common .. common + COMMON_LEN` lies inside the mapped BAR, and
+    // every offset used below is one of the C_* register offsets (all inside COMMON_LEN, naturally aligned).
+    fn cr32(&self, off: usize) -> u32 {
+        assert!(off + 4 <= COMMON_LEN && off % 4 == 0);
+        // SAFETY: inside the common structure `open` validated (see above).
+        unsafe { rd32(self.common + off) }
+    }
+    fn cw32(&self, off: usize, v: u32) {
+        assert!(off + 4 <= COMMON_LEN && off % 4 == 0);
+        // SAFETY: as `cr32`.
+        unsafe { wr32(self.common + off, v) }
+    }
+    fn cr16(&self, off: usize) -> u16 {
+        assert!(off + 2 <= COMMON_LEN && off % 2 == 0);
+        // SAFETY: as `cr32`.
+        unsafe { rd16(self.common + off) }
+    }
+    fn cw16(&self, off: usize, v: u16) {
+        assert!(off + 2 <= COMMON_LEN && off % 2 == 0);
+        // SAFETY: as `cr32`.
+        unsafe { wr16(self.common + off, v) }
+    }
+    fn cw64(&self, off: usize, v: u64) {
+        assert!(off + 8 <= COMMON_LEN && off % 4 == 0);
+        // SAFETY: as `cr32`.
+        unsafe { wr64(self.common + off, v) }
+    }
+
     /// Parse the vendor capabilities in the config-space copy at `cfg_va`. `bar_va` / `bar_bytes`
     /// describe the mapped BAR; `device` is the PCI device id the driver expects.
-    pub fn open(bar_va: usize, bar_bytes: usize, cfg_va: usize, device: u16) -> Result<Pci, &'static str> {
+    ///
+    /// # Safety
+    /// `bar_va .. bar_va + bar_bytes` must be this task's mapping of the device's register BAR, and `cfg_va` the mapped,
+    /// 4-aligned 256-byte copy of its configuration space. Every register address the returned `Pci` and its queues touch is
+    /// derived from those two ranges, after the checks in this function.
+    pub unsafe fn open(bar_va: usize, bar_bytes: usize, cfg_va: usize, device: u16) -> Result<Pci, &'static str> {
+        // SAFETY (this and the reads below): inside the 256-byte config copy (`ptr + 20 <= 256` is checked in the loop).
         if rd32(cfg_va) != (device as u32) << 16 | 0x1af4 {
             return Err("not the expected virtio device");
         }
         // SAFETY: `cfg_va` is the kernel-provided read-only config-space copy (256 bytes, page mapped); every `o` used is < 256 (ptr + 20 <= 256 is checked before capability reads).
         let b = |o: usize| unsafe { read_volatile((cfg_va + o) as *const u8) } as usize;
-        let w = |o: usize| rd32(cfg_va + o) as usize;
+        let w = |o: usize| unsafe { rd32(cfg_va + o) } as usize;
         if b(0x06) & 0x10 == 0 {
             return Err("no capability list");
         }
@@ -150,23 +194,23 @@ impl Pci {
         self.set_status(0);
         self.set_status(ST_ACK);
         self.set_status(ST_ACK | ST_DRIVER);
-        wr32(self.common + C_DEVFEAT_SEL, 1);
-        let feat = rd32(self.common + C_DEVFEAT);
+        self.cw32(C_DEVFEAT_SEL, 1);
+        let feat = self.cr32(C_DEVFEAT);
         if feat & 1 == 0 {
             return Err("device lacks VIRTIO_F_VERSION_1");
         }
         if feat & 2 == 0 {
             return Err("device lacks VIRTIO_F_ACCESS_PLATFORM");
         }
-        wr32(self.common + C_DEVFEAT_SEL, 0);
-        let low = rd32(self.common + C_DEVFEAT);
+        self.cw32(C_DEVFEAT_SEL, 0);
+        let low = self.cr32(C_DEVFEAT);
         if low & extra != extra {
             return Err("device lacks a feature the driver needs");
         }
-        wr32(self.common + C_DRVFEAT_SEL, 0);
-        wr32(self.common + C_DRVFEAT, extra);
-        wr32(self.common + C_DRVFEAT_SEL, 1);
-        wr32(self.common + C_DRVFEAT, 0b11);
+        self.cw32(C_DRVFEAT_SEL, 0);
+        self.cw32(C_DRVFEAT, extra);
+        self.cw32(C_DRVFEAT_SEL, 1);
+        self.cw32(C_DRVFEAT, 0b11);
         self.set_status(ST_ACK | ST_DRIVER | ST_FEATURES_OK);
         if self.status() & ST_FEATURES_OK == 0 {
             return Err("device rejected features");
@@ -189,22 +233,22 @@ impl Pci {
     }
 
     fn queue_at(&self, index: u16, size: u16, va: usize, pa: u64, off_avail: usize, off_used: usize) -> Result<Queue, &'static str> {
-        wr16(self.common + C_QSEL, index);
-        if rd16(self.common + C_QSIZE) < size {
+        self.cw16(C_QSEL, index);
+        if self.cr16(C_QSIZE) < size {
             return Err("queue too small");
         }
-        wr16(self.common + C_QSIZE, size);
-        let off = rd16(self.common + C_QNOTIFY_OFF) as usize;
+        self.cw16(C_QSIZE, size);
+        let off = self.cr16(C_QNOTIFY_OFF) as usize;
         // where this queue's doorbell is comes from the device too: it must be inside the notify structure
         let notify = off
             .checked_mul(self.notify_mult)
             .and_then(|o| self.notify_base.checked_add(o))
             .filter(|n| n.checked_add(2).map_or(false, |e| e <= self.notify_end))
             .ok_or("queue doorbell outside the notify structure")?;
-        wr64(self.common + C_QDESC, pa + OFF_DESC as u64);
-        wr64(self.common + C_QAVAIL, pa + off_avail as u64);
-        wr64(self.common + C_QUSED, pa + off_used as u64);
-        wr16(self.common + C_QENABLE, 1);
+        self.cw64(C_QDESC, pa + OFF_DESC as u64);
+        self.cw64(C_QAVAIL, pa + off_avail as u64);
+        self.cw64(C_QUSED, pa + off_used as u64);
+        self.cw16(C_QENABLE, 1);
         Ok(Queue {
             va,
             pa,
@@ -247,7 +291,8 @@ impl Pci {
     /// A 32-bit word of the device-specific configuration.
     pub fn config32(&self, off: usize) -> u32 {
         assert!(off + 4 <= self.devcfg_len);
-        rd32(self.devcfg + off)
+        // SAFETY: `off + 4 <= devcfg_len` (asserted); the device-config structure lies inside the BAR (checked in `open`).
+        unsafe { rd32(self.devcfg + off) }
     }
 }
 
@@ -290,7 +335,8 @@ impl Queue {
     pub fn submit(&mut self, chain: &[Buf]) {
         self.submit_quiet(chain);
         fence();
-        wr16(self.notify, self.index);
+        // SAFETY: `notify` was checked in `queue_at` to lie, with its 2 bytes, inside the notify structure inside the BAR.
+        unsafe { wr16(self.notify, self.index) };
     }
 
     /// Publish a chain without notifying the device: it will not look at it. (Tests use this to model
@@ -393,7 +439,8 @@ impl Queue {
 
     pub fn kick(&self) {
         fence();
-        wr16(self.notify, self.index);
+        // SAFETY: `notify` was checked in `queue_at` to lie, with its 2 bytes, inside the notify structure inside the BAR.
+        unsafe { wr16(self.notify, self.index) };
     }
 
     /// The next buffer the device has finished with: (descriptor id, bytes written).
@@ -450,7 +497,8 @@ mod tests {
     }
 
     fn open(cfg: &mut [u64], bar: &mut [u64]) -> Result<Pci, &'static str> {
-        Pci::open(bar.as_mut_ptr() as usize, 4096, cfg.as_mut_ptr() as usize, 0x1042)
+        // SAFETY: `bar` is a 4096-byte buffer and `cfg` a 256-byte, 8-aligned one, both alive for the call and the test.
+        unsafe { Pci::open(bar.as_mut_ptr() as usize, 4096, cfg.as_mut_ptr() as usize, 0x1042) }
     }
 
     const GOOD: [(u8, u32, u32, u32); 4] = [(1, 0, 0x40, 0), (2, 0x100, 0x100, 4), (3, 0x200, 4, 0), (4, 0x300, 0x20, 0)];

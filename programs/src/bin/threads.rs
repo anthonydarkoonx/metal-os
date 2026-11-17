@@ -333,10 +333,12 @@ program!("threads", |c| {
             let mine = heap_grow(1);
             let pages: [u32; 4] = core::array::from_fn(|i| PAGES[i].load(SeqCst));
             let distinct = (0..4).all(|i| (0..4).all(|j| i == j || pages[i] != pages[j]) && pages[i] as i64 != mine);
-            // SAFETY: each `pages[i]` is the page a `heaper` thread got from `heap_grow` (page-aligned, below 4 GiB so it survives the u32 round trip) and wrote to. UNVERIFIED on the failure path:
-            // if a thread's `heap_grow` failed, the stored value is not an address and this read faults (it is evaluated before the SHARED == 4 check); that still fails the test.
-            let seen = (0..4).all(|i| unsafe { core::ptr::read_volatile(pages[i] as *const u64) } == 0xABCD_0000 + i as u64);
-            if SHARED.load(SeqCst) == 4 && mine > 0 && distinct && seen { 0 } else { 2 }
+            // `SHARED == 4` (every thread's `heap_grow` succeeded and it wrote its page) is checked first, so the reads below only
+            // happen when each `pages[i]` is a real address.
+            // SAFETY: each `pages[i]` is the page a `heaper` thread got from `heap_grow` (page-aligned, below 4 GiB so it survives the
+            // u32 round trip) and wrote to; this program still owns it.
+            let seen = || (0..4).all(|i| unsafe { core::ptr::read_volatile(pages[i] as *const u64) } == 0xABCD_0000 + i as u64);
+            if SHARED.load(SeqCst) == 4 && mine > 0 && distinct && seen() { 0 } else { 2 }
         }
         // a thread that ends naming a read-only page as its exit word cannot make the kernel write there
         11 => {

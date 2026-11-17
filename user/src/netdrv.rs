@@ -43,7 +43,8 @@ fn init() -> Result<Dev, &'static str> {
     if s1 != 0 || s2 != 0 || s4 != 0 {
         return Err("cap_info failed");
     }
-    let pci = virtio::Pci::open(va(MMIO_VA), bar_pages as usize * 4096, va(CFG_VA), 0x1041)?;
+    // SAFETY: the BAR and config-space mappings the kernel gave this driver (`bar_pages` pages at MMIO_VA / CFG_VA, per its facts).
+    let pci = unsafe { virtio::Pci::open(va(MMIO_VA), bar_pages as usize * 4096, va(CFG_VA), 0x1041) }?;
     pci.start_with(F_MAC)?;
     // SAFETY: QUEUES_VA is the two-page queue area mapped (checked) from capability 2 just above; the device has not been given the queues yet.
     unsafe { core::ptr::write_bytes(va(QUEUES_VA) as *mut u8, 0, 8192) }; // forget a crashed predecessor's ring state
@@ -55,7 +56,8 @@ fn init() -> Result<Dev, &'static str> {
     let mac_hi = pci.config32(4);
     let ring = va(RING_VA);
     for r in [RXQ, RXFREE, TXQ, TXDONE] {
-        Ring(ring + r).reset();
+        // SAFETY: the ring page is mapped at RING_VA; `r` is one of its ring offsets.
+        unsafe { Ring::at(ring + r) }.reset();
     }
     // SAFETY: RING_VA is the ring page mapped (checked) from capability 5; INFO..POLL are inside its first 0x820 bytes; netd waits for READY, which is written last, behind the fence.
     unsafe {
@@ -91,7 +93,8 @@ pub fn net_driver() -> ! {
     // SAFETY: the ring page is mapped and the MAC bytes at INFO..INFO+6 were written by this task in `init`; netd only reads them.
     let mac = unsafe { core::slice::from_raw_parts((va(RING_VA) + INFO) as *const u8, 6) };
     println!("[net] virtio-net ready, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, {NRX} receive and {NTX} transmit buffers", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    let (rxq, rxfree, txq, txdone) = (Ring(va(RING_VA) + RXQ), Ring(va(RING_VA) + RXFREE), Ring(va(RING_VA) + TXQ), Ring(va(RING_VA) + TXDONE));
+    // SAFETY: the ring page is mapped at RING_VA; each offset is one of its rings.
+    let (rxq, rxfree, txq, txdone) = unsafe { (Ring::at(va(RING_VA) + RXQ), Ring::at(va(RING_VA) + RXFREE), Ring::at(va(RING_VA) + TXQ), Ring::at(va(RING_VA) + TXDONE)) };
     let mut last_event = 0u64;
     loop {
         // an interrupt, a kick from netd, or a tick

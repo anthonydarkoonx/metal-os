@@ -246,7 +246,7 @@ fn start_write(me: usize) -> Option<Op> {
                         p.want = 0; // the swap file is full
                         return None;
                     };
-                    if !crate::swap::load_to(handle, SCRATCH.get()) {
+                    if !crate::swap::load_to(handle, &mut SCRATCH.get()) {
                         p.used[slot as usize / 64] &= !(1 << (slot % 64));
                         return None;
                     }

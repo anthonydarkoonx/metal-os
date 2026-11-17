@@ -225,7 +225,7 @@ fn set_callee(sender: &mut task::Task, tag: u8, rcv: usize) {
 
 /// Write a message into a receiver's saved registers (its pending IPC_RECV result).
 fn deliver_regs(rcv: usize, m: &Msg) {
-    let f = frame(rcv);
+    let mut f = frame(rcv);
     f.x[0] = 0;
     f.x[1] = m.sender as u64;
     f.x[2] = m.w[0];
@@ -314,7 +314,7 @@ pub fn reply(server: usize, w: [u64; 3]) -> bool {
         return false; // caller died or moved on
     }
     tc.callee = None;
-    let f = frame(c);
+    let mut f = frame(c);
     f.x[0] = 0;
     f.x[1] = w[0];
     f.x[2] = w[1];

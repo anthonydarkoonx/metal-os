@@ -54,7 +54,14 @@ pub const fn pool_bytes() -> usize {
 
 fn with_store<R>(f: impl FnOnce(&mut Zram<'static>) -> R) -> R {
     let mut g = STORE.lock(R_SWAP);
-    let z = g.get_or_insert_with(|| Zram::with_zstd(POOL.get(), SLOTS.get(), WS.get()));
+    let z = g.get_or_insert_with(|| {
+        // (runs once, under the lock: the arenas belong to the store for good)
+        Zram::with_zstd(
+            POOL.take().expect("swap pool taken twice"),
+            SLOTS.take().expect("swap slots taken twice"),
+            WS.take().expect("swap workspace taken twice"),
+        )
+    });
     f(z)
 }
 

@@ -16,7 +16,7 @@ use crate::smp::MAX_CPUS;
 use core::arch::asm;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 /// Serialises SPAWN (taken outside every task lock).
 pub const R_SPAWNING: u16 = 5;
@@ -172,21 +172,204 @@ impl<T> Drop for Guard<'_, T> {
     }
 }
 
-/// Globals that are only written during single-core boot, or that belong to one core.
-/// Not a lock: callers uphold the access rule stated at each use.
-pub struct Global<T>(UnsafeCell<T>);
+// ---- borrow-checked globals -----------------------------------------------------------------------------------------------
+//
+// Some kernel state has no lock because of an ownership rule ("only the core running the task writes its frame", "only boot
+// touches the tables"). Rust cannot see such rules, so these cells check them at run time instead: every access takes a
+// guard, and an access that overlaps another one it may not overlap panics on the spot. A broken rule becomes a deterministic
+// kernel panic, never two live `&mut` to the same memory.
 
-unsafe impl<T> Sync for Global<T> {}
+const WRITER: i32 = -1;
+
+fn borrow_violation(what: &str) -> ! {
+    crate::uart::panic_print(format_args!("[kernel] PANIC: overlapping borrow of {what}"));
+    crate::sched::semihost_exit(4)
+}
+
+/// Shared access to one value (see `Slots::read`).
+pub struct Ref<'a, T> {
+    state: &'a AtomicI32,
+    data: &'a T,
+}
+
+/// Exclusive access to one value (see `Global::get`, `Slots::write`).
+pub struct RefMut<'a, T> {
+    state: &'a AtomicI32,
+    data: *mut T,
+    _p: core::marker::PhantomData<&'a mut T>,
+}
+
+/// How long a table entry's borrow waits for another core to let go before it is called an overlap. A holder on another core
+/// lets go within microseconds; the same core can never get here while its own guard is alive, so it spends the whole budget
+/// and then panics.
+const SPINS: u32 = 5_000_000;
+
+fn acquire_write<'a, T>(state: &'a AtomicI32, data: *mut T, what: &str, spins: u32) -> RefMut<'a, T> {
+    let mut left = spins;
+    while state.compare_exchange(0, WRITER, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        if left == 0 {
+            borrow_violation(what);
+        }
+        left -= 1;
+        core::hint::spin_loop();
+    }
+    RefMut { state, data, _p: core::marker::PhantomData }
+}
+
+fn acquire_read<'a, T>(state: &'a AtomicI32, data: &'a T, what: &str, spins: u32) -> Ref<'a, T> {
+    let mut left = spins;
+    loop {
+        let s = state.load(Ordering::Relaxed);
+        if s >= 0 && state.compare_exchange(s, s + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+            return Ref { state, data };
+        }
+        if left == 0 {
+            borrow_violation(what);
+        }
+        left -= 1;
+        core::hint::spin_loop();
+    }
+}
+
+impl<T> Deref for Ref<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        self.data
+    }
+}
+impl<T> Drop for Ref<'_, T> {
+    fn drop(&mut self) {
+        self.state.fetch_sub(1, Ordering::Release);
+    }
+}
+impl<T> Deref for RefMut<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: the guard holds the cell's exclusive state, so nothing else refers to the value.
+        unsafe { &*self.data }
+    }
+}
+impl<T> DerefMut for RefMut<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as above.
+        unsafe { &mut *self.data }
+    }
+}
+impl<T> Drop for RefMut<'_, T> {
+    fn drop(&mut self) {
+        self.state.store(0, Ordering::Release);
+    }
+}
+
+/// One value with no lock, for state only boot or one core touches. `get` is exclusive and checked.
+pub struct Global<T> {
+    state: AtomicI32,
+    taken: AtomicBool,
+    data: UnsafeCell<T>,
+}
+
+// SAFETY: every access goes through the state word (exclusive guard) or `take` (once, then no guards are handed out).
+unsafe impl<T: Send> Sync for Global<T> {}
 
 impl<T> Global<T> {
     pub const fn new(v: T) -> Self {
-        Global(UnsafeCell::new(v))
+        Global { state: AtomicI32::new(0), taken: AtomicBool::new(false), data: UnsafeCell::new(v) }
     }
 
-    /// Callers must not hold the returned reference across a call that can
-    /// obtain another one to the same global.
-    #[allow(clippy::mut_from_ref)]
-    pub fn get(&self) -> &mut T {
-        unsafe { &mut *self.0.get() }
+    /// Exclusive access for as long as the guard lives. Panics if another guard on this global is alive (on this core or
+    /// another), or if `take` already gave the value away.
+    pub fn get(&self) -> RefMut<'_, T> {
+        if self.taken.load(Ordering::Acquire) {
+            borrow_violation("a global that was taken for good");
+        }
+        acquire_write(&self.state, self.data.get(), "a global", 0)
+    }
+
+    /// Hand the value out for the rest of the kernel's life, once (an arena a long-lived allocator keeps). `None` the second
+    /// time or while a guard from `get` is alive.
+    pub fn take(&'static self) -> Option<&'static mut T> {
+        if self.state.compare_exchange(0, WRITER, Ordering::Acquire, Ordering::Relaxed).is_err() {
+            return None;
+        }
+        if self.taken.swap(true, Ordering::AcqRel) {
+            return None; // (state stays WRITER, so `get` keeps refusing too)
+        }
+        // SAFETY: `state` is left at WRITER for good and `taken` flips once, so this is the only reference there will ever be.
+        Some(unsafe { &mut *self.data.get() })
+    }
+
+    /// The value's address (to hand to hardware or assembly; using it is the caller's business).
+    pub fn addr(&self) -> *mut T {
+        self.data.get()
+    }
+}
+
+/// `N` values, each checked on its own: the per-task and per-core tables, where different cores use different entries at the
+/// same time but one entry has one user (or many readers) at a time.
+pub struct Slots<T, const N: usize> {
+    state: [AtomicI32; N],
+    data: UnsafeCell<[T; N]>,
+}
+
+// SAFETY: an entry is reached only through its state word (many readers or one writer).
+unsafe impl<T: Send, const N: usize> Sync for Slots<T, N> {}
+
+impl<T, const N: usize> Slots<T, N> {
+    pub const fn new(v: [T; N]) -> Self {
+        Slots { state: [const { AtomicI32::new(0) }; N], data: UnsafeCell::new(v) }
+    }
+
+    /// Exclusive access to entry `i` (panics if it is borrowed in any way, or `i` is out of range).
+    pub fn write(&self, i: usize) -> RefMut<'_, T> {
+        let st = &self.state[i];
+        // SAFETY: `i` is in range (indexed above); the pointer stays inside the array.
+        let p = unsafe { (self.data.get() as *mut T).add(i) };
+        acquire_write(st, p, "a table entry", SPINS)
+    }
+
+    /// Shared access to entry `i` (panics if it is being written).
+    pub fn read(&self, i: usize) -> Ref<'_, T> {
+        let st = &self.state[i];
+        // SAFETY: as in `write`; while a read guard lives no writer gets in.
+        let r = unsafe { &*(self.data.get() as *const T).add(i) };
+        acquire_read(st, r, "a table entry", SPINS)
+    }
+
+    /// Exclusive access to the whole table (boot-time set-up; panics if any entry is borrowed).
+    pub fn all_mut(&self) -> AllMut<'_, T, N> {
+        for (k, st) in self.state.iter().enumerate() {
+            if st.compare_exchange(0, WRITER, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                for u in &self.state[..k] {
+                    u.store(0, Ordering::Release);
+                }
+                borrow_violation("a table");
+            }
+        }
+        AllMut { t: self }
+    }
+}
+
+pub struct AllMut<'a, T, const N: usize> {
+    t: &'a Slots<T, N>,
+}
+
+impl<T, const N: usize> Deref for AllMut<'_, T, N> {
+    type Target = [T; N];
+    fn deref(&self) -> &[T; N] {
+        // SAFETY: every entry's state is WRITER, held by this guard.
+        unsafe { &*self.t.data.get() }
+    }
+}
+impl<T, const N: usize> DerefMut for AllMut<'_, T, N> {
+    fn deref_mut(&mut self) -> &mut [T; N] {
+        // SAFETY: as above.
+        unsafe { &mut *self.t.data.get() }
+    }
+}
+impl<T, const N: usize> Drop for AllMut<'_, T, N> {
+    fn drop(&mut self) {
+        for st in &self.t.state {
+            st.store(0, Ordering::Release);
+        }
     }
 }

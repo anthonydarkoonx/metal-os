@@ -129,15 +129,51 @@ pub mod phys {
         unsafe { core::ptr::write_bytes(pa as *mut u8, 0, PAGE) }
     }
 
-    /// Look at the frame at `pa` for the duration of `f`. The caller owns the frame (nobody maps it writable meanwhile).
+    // Frames lent out as `&` / `&mut` by `with_page` / `with_page_mut`. Lending a frame that is already lent (the same page
+    // reached twice, whether by the same core or two cores) would give out aliasing references, so it panics instead.
+    const LENT_SLOTS: usize = 16;
+    static LENT: [AtomicUsize; LENT_SLOTS] = [const { AtomicUsize::new(0) }; LENT_SLOTS];
+
+    struct Lent(usize);
+
+    impl Lent {
+        fn new(pa: usize) -> Lent {
+            // (RAM_BASE is not 0, so 0 can mean "free")
+            let Some(mine) = (0..LENT_SLOTS).find(|&i| LENT[i].compare_exchange(0, pa, Ordering::AcqRel, Ordering::Relaxed).is_ok()) else {
+                panic!("frame::phys: too many frames lent at once");
+            };
+            // look for another entry for the same frame, after ours is published (two cores lending it at once see each other)
+            if (0..LENT_SLOTS).any(|i| i != mine && LENT[i].load(Ordering::Acquire) == pa) {
+                LENT[mine].store(0, Ordering::Release);
+                panic!("frame::phys: frame {pa:#x} lent twice (aliasing references)");
+            }
+            Lent(mine)
+        }
+    }
+
+    impl Drop for Lent {
+        fn drop(&mut self) {
+            LENT[self.0].store(0, Ordering::Release);
+        }
+    }
+
+    /// Look at the frame at `pa` for the duration of `f`. The caller owns the frame (nobody maps it writable meanwhile);
+    /// a second loan of the same frame while this one lives panics.
     pub fn with_page<R>(pa: usize, f: impl FnOnce(&[u8; PAGE]) -> R) -> R {
         check(pa, PAGE, PAGE);
+        let _loan = Lent::new(pa);
+        // SAFETY: the page is inside RAM and aligned (checked); the loan table guarantees no other reference from here exists
+        // for the duration; the caller's contract (it owns the frame: no mapping, no device) covers everything that is not a
+        // reference.
         f(unsafe { &*(pa as *const [u8; PAGE]) })
     }
 
-    /// Modify the frame at `pa` for the duration of `f`. The caller owns the frame.
+    /// Modify the frame at `pa` for the duration of `f`. The caller owns the frame; a second loan of it while this one
+    /// lives panics.
     pub fn with_page_mut<R>(pa: usize, f: impl FnOnce(&mut [u8; PAGE]) -> R) -> R {
         check(pa, PAGE, PAGE);
+        let _loan = Lent::new(pa);
+        // SAFETY: as in `with_page`.
         f(unsafe { &mut *(pa as *mut [u8; PAGE]) })
     }
 }

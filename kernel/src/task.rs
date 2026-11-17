@@ -12,7 +12,7 @@ use crate::cap::*;
 use crate::ipc::{self, Endpoint, NEP};
 use crate::mem::{self, PAGE};
 use crate::sched;
-use crate::sync::{Global, Guard, SpinLock, R_TASK};
+use crate::sync::{Guard, Slots, SpinLock, R_TASK};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mmu, obj};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -165,11 +165,48 @@ pub fn lock(tid: usize) -> Guard<'static, Task> {
     TASKS[tid].lock(R_TASK + tid as u16)
 }
 
-/// Fixed facts about a task, written once at spawn (before other cores run) and never changed.
+/// A task's name: up to 15 bytes of printable ASCII, kept inside the `Info` so a copy of it stays valid when the slot is reused.
+#[derive(Clone, Copy)]
+pub struct Name {
+    buf: [u8; 15],
+    len: u8,
+}
+
+impl Name {
+    pub const EMPTY: Name = Name { buf: [0; 15], len: 0 };
+
+    /// From a string (cut at 15 bytes; anything not printable ASCII becomes `?`).
+    pub fn new(s: &[u8]) -> Name {
+        let mut n = Name::EMPTY;
+        for &b in s.iter().take(15) {
+            n.buf[n.len as usize] = if (0x20..0x7F).contains(&b) { b } else { b'?' };
+            n.len += 1;
+        }
+        n
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len as usize]
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.as_bytes()).unwrap_or("?") // (`new` keeps it ASCII)
+    }
+}
+
+impl core::fmt::Display for Name {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Facts about a task: set when the slot is filled (at boot, or by SPAWN while the slot is free) and, for the two limits, by QUOTA.
+/// Read by copy (`info`), so no reference outlives the slot's use.
+#[derive(Clone, Copy)]
 pub struct Info {
     pub role: u8,
     pub restartable: bool,
-    pub name: &'static str,
+    pub name: Name,
     pub class: Class,
     /// Core this task is confined to (`NOT_PINNED` = any).
     pub pinned: u8,
@@ -179,24 +216,26 @@ pub struct Info {
     pub budget: usize,
 }
 
-static INFO: Global<[Info; MAX_TASKS]> = Global::new(
-    [const { Info { role: 0, restartable: false, name: "", class: Class::Background, pinned: NOT_PINNED, heap_quota: MAX_HEAP_PAGES, budget: 0 } }; MAX_TASKS],
+static INFO: Slots<Info, MAX_TASKS> = Slots::new(
+    [const { Info { role: 0, restartable: false, name: Name::EMPTY, class: Class::Background, pinned: NOT_PINNED, heap_quota: MAX_HEAP_PAGES, budget: 0 } }; MAX_TASKS],
 );
 
-pub fn info(tid: usize) -> &'static Info {
-    &INFO.get()[tid]
+pub fn info(tid: usize) -> Info {
+    *INFO.read(tid)
 }
 
-static FRAMES: Global<[TrapFrame; MAX_TASKS]> = Global::new([TrapFrame::ZERO; MAX_TASKS]);
+static FRAMES: Slots<TrapFrame, MAX_TASKS> = Slots::new([TrapFrame::ZERO; MAX_TASKS]);
 
 /// The task's saved registers. Not behind a lock: whoever currently *owns* the task writes it.
 /// That is the core running it (from kernel entry until its dispatch), or, while it is blocked,
 /// the one waker that completed what it waits for (the endpoint / interrupt / ring lock that
 /// hands the task over guarantees there is exactly one). The scheduler lock, taken after the
 /// last write and before the task becomes runnable, publishes the contents to the next core.
-#[allow(clippy::mut_from_ref)]
-pub fn frame(tid: usize) -> &'static mut TrapFrame {
-    &mut FRAMES.get()[tid]
+///
+/// The access is checked: while the returned guard lives, a second `frame(tid)` (on this core or another) panics instead of
+/// handing out a second `&mut`.
+pub fn frame(tid: usize) -> crate::sync::RefMut<'static, TrapFrame> {
+    FRAMES.write(tid)
 }
 
 /// Root of the task's page tables, readable by the dispatcher without taking the task lock.
@@ -455,7 +494,7 @@ fn build(t: &mut Task, tid: usize) -> Result<(), &'static str> {
     t.heap_base = random_heap_base();
     t.l1 = l1;
     L1[tid].store(l1, Ordering::Release);
-    let f = frame(tid);
+    let mut f = frame(tid);
     *f = TrapFrame::ZERO;
     f.x[0] = info(tid).role as u64;
     f.x[1] = tid as u64; // instance number for roles with several copies
@@ -477,30 +516,16 @@ fn build(t: &mut Task, tid: usize) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Names of tasks created at run time (`Info::name` must be `'static`): one fixed buffer per slot, rewritten only
-/// while the slot is free.
-static DYN_NAMES: Global<[[u8; 9]; MAX_TASKS]> = Global::new([[0; 9]; MAX_TASKS]);
-
 /// Describe a task about to be created at run time in slot `tid` (which is free, so nobody uses its entry).
 pub fn set_dynamic_info(tid: usize, role: u8, name: &[u8; 8], class: Class, heap_pages: usize, budget: usize) {
-    let buf = &mut DYN_NAMES.get()[tid];
     let n = name.iter().position(|&b| b == 0).unwrap_or(8);
-    let clean = |b: u8| if (0x20..0x7F).contains(&b) { b } else { b'?' };
-    for i in 0..n {
-        buf[i] = clean(name[i]);
-    }
-    if n == 0 {
-        buf[..4].copy_from_slice(b"prog");
-    }
-    let len = if n == 0 { 4 } else { n };
-    let buf: &'static [u8; 9] = buf;
-    let name: &'static str = core::str::from_utf8(&buf[..len]).unwrap_or("prog"); // `clean` made it printable ASCII
-    INFO.get()[tid] = Info { role, restartable: false, name, class, pinned: NOT_PINNED, heap_quota: heap_pages, budget };
+    let name = if n == 0 { Name::new(b"prog") } else { Name::new(&name[..n]) };
+    *INFO.write(tid) = Info { role, restartable: false, name, class, pinned: NOT_PINNED, heap_quota: heap_pages, budget };
 }
 
 /// Change a program's limits (`QUOTA`): done under its task lock, which is what `heap_grow` reads them under.
 pub fn set_limits(tid: usize, heap_quota: usize, budget: usize) {
-    let i = &mut INFO.get()[tid];
+    let mut i = INFO.write(tid);
     i.heap_quota = heap_quota;
     i.budget = budget;
 }
@@ -515,11 +540,10 @@ pub fn spawn(role: u8, name: &'static str, class: Class, restartable: bool) -> u
     let tid = (0..MAX_TASKS).find(|&i| sched::state(i) == State::Free).expect("no free task slot");
     let core = sched::assign_core(class);
     sched::init_task(tid, core);
-    let i = &mut INFO.get()[tid];
-    *i = Info {
+    let mut i = Info {
         role,
         restartable,
-        name,
+        name: Name::new(name.as_bytes()),
         class,
         pinned: NOT_PINNED,
         heap_quota: match role {
@@ -537,6 +561,7 @@ pub fn spawn(role: u8, name: &'static str, class: Class, restartable: bool) -> u
     } else if role == 11 {
         i.pinned = (tid - FIRST_BENCH_CLIENT) as u8;
     }
+    *INFO.write(tid) = i;
     let mut t = lock(tid);
     build(&mut t, tid).expect("failed to build task");
     kprintln!("[kernel] spawned task {tid} '{name}' ({class:?}) on core {core} ({:?})", sched::core_kind(core));

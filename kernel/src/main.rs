@@ -53,8 +53,8 @@ static ZWS: Global<PageWorkspace> = Global::new(PageWorkspace::new());
 /// Boot-time self-test of the ZRAM path using real physical frames:
 /// compress cold pages, wipe the frames, bring the data back, verify.
 fn zram_selftest() {
-    zram_check("lz4", Zram::new(ZPOOL.get(), ZSLOTS.get()));
-    zram_check("zstd", Zram::with_zstd(ZPOOL.get(), ZSLOTS.get(), ZWS.get()));
+    zram_check("lz4", Zram::new(&mut *ZPOOL.get(), &mut *ZSLOTS.get()));
+    zram_check("zstd", Zram::with_zstd(&mut *ZPOOL.get(), &mut *ZSLOTS.get(), &mut *ZWS.get()));
 }
 
 fn zram_check(codec: &str, mut z: Zram) {

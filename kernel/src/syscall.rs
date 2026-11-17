@@ -213,7 +213,7 @@ fn run(cur: usize) -> (u64, Out) {
         GETRANDOM => {
             let mut b = [0u8; 40];
             if crate::rand::secure_fill(&mut b) {
-                let f = frame(cur);
+                let mut f = frame(cur);
                 for i in 0..5 {
                     f.x[i + 1] = u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
                 }
@@ -519,7 +519,7 @@ fn obj_name(o: u8) -> &'static str {
 }
 
 fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
-    let f = frame(cur);
+    let mut f = frame(cur);
     match page {
         0 => {
             f.x[1] = crate::frame::cpu::midr();
@@ -557,7 +557,8 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                 State::Embryo => 9,
                 State::WordWait(_) => 10,
             };
-            let name = info(t).name.as_bytes();
+            let nm = info(t).name;
+            let name = nm.as_bytes();
             let pack = |off: usize| (0..8).fold(0u64, |v, i| v | (name.get(off + i).copied().unwrap_or(0) as u64) << (8 * i));
             f.x[1] = pack(0);
             f.x[2] = pack(8);
@@ -815,7 +816,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
 ///  * `SC_RT_CLEAR`: give the reservation back.
 ///  * `SC_STATS`: read-only measurements, selected by `p1` (see the match below).
 fn sched_call(cur: usize, a: [u64; 5]) -> Out {
-    let f = frame(cur);
+    let mut f = frame(cur);
     match a[0] {
         SC_RT_SET => {
             if let Err(e) = lookup(cur, a[1], Kind::Sched, R_RT) {
@@ -1023,7 +1024,7 @@ fn cap_info(cur: usize, slot: u64) -> Out {
     };
     match obj::get(c.obj) {
         Some(o) if o.kind != ObjKind::Ram && o.kind != ObjKind::Shared => {
-            let f = frame(cur);
+            let mut f = frame(cur);
             f.x[1] = o.pa as u64;
             f.x[2] = o.pages as u64;
             f.x[3] = o.aux as u64;
@@ -1118,7 +1119,7 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
     if let Err(e) = lookup(cur, slot, Kind::MemCtl, need) {
         return Out::Ret(e);
     }
-    let f = frame(cur);
+    let mut f = frame(cur);
     match op {
         MC_STATS => {
             let s = compact::stats();

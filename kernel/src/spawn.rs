@@ -153,7 +153,7 @@ pub fn quota(cur: usize, op: u64, child: u64, heap: u64, budget: u64) -> i64 {
     match op {
         0 => {
             let held = lock(pa).held_pages() + contig_pages(pa);
-            let f = frame(cur);
+            let mut f = frame(cur);
             f.x[1] = held as u64;
             f.x[2] = task::info(pa).budget as u64;
             f.x[3] = DELEGATED[pa].load(Ordering::SeqCst) as u64;
@@ -652,7 +652,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
         return fail(e);
     }
     task::set_l1(tid, l1);
-    let f = frame(tid);
+    let mut f = frame(tid);
     *f = TrapFrame::ZERO;
     f.x[0] = ROLE_PROGRAM as u64;
     f.x[1] = arg;
@@ -915,7 +915,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
         sp
     };
     task::set_l1(tid, task::l1_of(leader));
-    let f = frame(tid);
+    let mut f = frame(tid);
     *f = TrapFrame::ZERO;
     f.x[0] = arg;
     f.sp = sp as u64;
@@ -992,7 +992,8 @@ pub fn free_thread_stack(t: &mut task::Task, tid: usize) {
 
 fn name_of(tid: usize) -> [u8; 8] {
     let mut n = [0u8; 8];
-    let src = task::info(tid).name.as_bytes();
+    let nm = task::info(tid).name;
+    let src = nm.as_bytes();
     n[..src.len().min(8)].copy_from_slice(&src[..src.len().min(8)]);
     n
 }

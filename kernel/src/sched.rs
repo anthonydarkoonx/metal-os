@@ -29,7 +29,7 @@
 #![forbid(unsafe_code)]
 use crate::ipc;
 use crate::smp::{self, MAX_CPUS};
-use crate::sync::{Global, SpinLock, R_RT};
+use crate::sync::{Slots, SpinLock, R_RT};
 use crate::task::{self, frame, info, State, MAX_TASKS, NOT_PINNED};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mem, mmu, timer};
@@ -395,9 +395,9 @@ pub fn set_current(core: usize, tid: usize) {
 // All times below are system-counter ticks (see timer.rs). Every field is written by one core at a
 // time: the core that owns the task (see the ownership rule above), or the one dispatching.
 
-static TASK_UTIL: Global<[Padded<Util>; MAX_TASKS]> = Global::new([const { Padded(Util::new(1)) }; MAX_TASKS]);
+static TASK_UTIL: Slots<Padded<Util>, MAX_TASKS> = Slots::new([const { Padded(Util::new(1)) }; MAX_TASKS]);
 
-static CORE_TRACK: Global<[Padded<Util>; MAX_CPUS]> = Global::new([const { Padded(Util::new(1)) }; MAX_CPUS]);
+static CORE_TRACK: Slots<Padded<Util>, MAX_CPUS> = Slots::new([const { Padded(Util::new(1)) }; MAX_CPUS]);
 
 /// Derived once the timer is running: everything the policy compares times against.
 static WINDOW: AtomicU64 = AtomicU64::new(1);
@@ -432,11 +432,10 @@ pub fn init() {
     for (level, class) in [(1, Class::Interactive), (2, Class::Background), (3, Class::Heavy)] {
         QUANTUM[level].store(c(quantum_us(class)), Ordering::Relaxed);
     }
-    *TASK_UTIL.get() = [const { Padded(Util::new(1)) }; MAX_TASKS];
-    for u in TASK_UTIL.get().iter_mut() {
+    for u in TASK_UTIL.all_mut().iter_mut() {
         **u = Util::new(c(UTIL_WINDOW_US));
     }
-    for u in CORE_TRACK.get().iter_mut() {
+    for u in CORE_TRACK.all_mut().iter_mut() {
         **u = Util::new(c(UTIL_WINDOW_US));
     }
 }
@@ -611,7 +610,10 @@ pub fn core_stats(core: usize) -> (u32, u64) {
 // ---- placement ------------------------------------------------------------------------------
 
 /// Mock 2+2 DynamIQ-style topology (QEMU gives us identical cores). Boot-time only.
-static CORES: Global<[Core; 4]> = Global::new([
+///
+/// The loads change when tasks are created on one core and die on another, so the table is behind a lock (it was a
+/// lock-free global that two cores could write at once).
+static CORES: SpinLock<[Core; 4]> = SpinLock::new([
     Core { kind: CoreKind::Little, load: 0, throttled: false },
     Core { kind: CoreKind::Little, load: 0, throttled: false },
     Core { kind: CoreKind::Big, load: 0, throttled: false },
@@ -619,8 +621,8 @@ static CORES: Global<[Core; 4]> = Global::new([
 ]);
 
 pub fn assign_core(class: Class) -> usize {
-    let cores = CORES.get();
-    let c = place(cores, class).unwrap_or(0);
+    let mut cores = CORES.lock(R_RT);
+    let c = place(&*cores, class).unwrap_or(0);
     cores[c].load += match class {
         Class::Background => 10,
         Class::Interactive => 25,
@@ -631,7 +633,7 @@ pub fn assign_core(class: Class) -> usize {
 
 /// A task placed by `assign_core` is gone: its weight no longer counts against the core.
 pub fn release_core(core: usize, class: Class) {
-    let cores = CORES.get();
+    let mut cores = CORES.lock(R_RT);
     let w = match class {
         Class::Background => 10,
         Class::Interactive => 25,
@@ -646,7 +648,8 @@ pub fn home_core(tid: usize) -> usize {
 }
 
 pub fn core_kind(core: usize) -> CoreKind {
-    CORES.get()[core].kind
+    // (the topology is fixed: cores 0 and 1 are the little ones, 2 and 3 the big ones)
+    if core < 2 { CoreKind::Little } else { CoreKind::Big }
 }
 
 fn big_online() -> bool {
@@ -663,7 +666,7 @@ pub fn init_task(tid: usize, core: usize) {
 pub fn forget_task(tid: usize) {
     rt_clear(tid);
     SLOT[tid].util.store(0, Ordering::Relaxed);
-    *TASK_UTIL.get()[tid] = Util::new(WINDOW.load(Ordering::Relaxed));
+    **TASK_UTIL.write(tid) = Util::new(WINDOW.load(Ordering::Relaxed));
     SLOT[tid].slice_end.store(u64::MAX, Ordering::Relaxed);
     SLOT[tid].run_start.store(0, Ordering::Relaxed);
 }
@@ -782,7 +785,7 @@ static RT_DEADLINE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(u64::MAX) }
 /// The reserved share it was admitted with.
 static RT_SHARE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
 /// The job state. Only the task's own core touches it after admission (the core the task is confined to).
-static RT_JOB: Global<[Option<Job>; MAX_TASKS]> = Global::new([None; MAX_TASKS]);
+static RT_JOB: Slots<Option<Job>, MAX_TASKS> = Slots::new([None; MAX_TASKS]);
 /// Tasks that hold a reservation.
 static RT_TASKS: AtomicU64 = AtomicU64::new(0);
 static ADMISSION: SpinLock<Admission<MAX_CPUS>> = SpinLock::new(Admission::new());
@@ -829,7 +832,7 @@ pub fn rt_set(tid: usize, runtime_us: u64, period_us: u64, hint: Option<usize>) 
     }
     let (core, share) = ADMISSION.lock(R_RT).admit(&order[..n], params).map_err(|_| RtError::NoCapacity)?;
     let job = Job::start(params, timer::counter());
-    RT_JOB.get()[tid] = Some(job);
+    *RT_JOB.write(tid) = Some(job);
     rt_publish(tid, &job);
     RT_SHARE[tid].store(share, Ordering::Relaxed);
     SLOT[tid].slice_end.store(u64::MAX, Ordering::Relaxed); // no slice: its budget limits it
@@ -845,7 +848,7 @@ pub fn rt_clear(tid: usize) {
     if core != NO_CORE {
         RT_TASKS.fetch_and(!(1u64 << tid), Ordering::SeqCst);
         ADMISSION.lock(R_RT).release(core as usize, RT_SHARE[tid].swap(0, Ordering::Relaxed));
-        RT_JOB.get()[tid] = None;
+        *RT_JOB.write(tid) = None;
         RT_DEADLINE[tid].store(u64::MAX, Ordering::Relaxed);
         SLOT[tid].slice_end.store(0, Ordering::Relaxed); // an ordinary task again: its next dispatch starts a slice
     }
@@ -854,7 +857,8 @@ pub fn rt_clear(tid: usize) {
 /// The running real-time task says its job is done. Returns the start of its next period and
 /// whether it has to wait for it.
 pub fn rt_wait(tid: usize) -> Option<(u64, bool)> {
-    let job = RT_JOB.get()[tid].as_mut()?;
+    let mut slot = RT_JOB.write(tid);
+    let job = slot.as_mut()?;
     let now = timer::counter();
     let wake_at = job.finish(now);
     rt_publish(tid, job);
@@ -868,7 +872,8 @@ pub fn rt_wait(tid: usize) -> Option<(u64, bool)> {
 
 /// (jobs, missed deadlines, budget left, runtime, period) in counter ticks.
 pub fn rt_stats(tid: usize) -> Option<(u32, u32, u64, u64, u64)> {
-    let j = RT_JOB.get()[tid].as_ref()?;
+    let slot = RT_JOB.read(tid);
+    let j = slot.as_ref()?;
     Some((j.jobs, j.missed, j.budget, j.params.runtime, j.params.period))
 }
 
@@ -883,7 +888,8 @@ fn park(tid: usize, until: u64) {
 /// parks a task that has used up its budget until the period ends (it sleeps; nothing else about
 /// it changes, it resumes exactly where it was).
 fn rt_gate(tid: usize, now: u64) -> bool {
-    let Some(job) = RT_JOB.get()[tid].as_mut() else { return true };
+    let mut slot = RT_JOB.write(tid);
+    let Some(job) = slot.as_mut() else { return true };
     job.advance(now);
     rt_publish(tid, job);
     if job.throttled(now) {
@@ -906,7 +912,7 @@ fn rt_event(core: usize, running: usize, now: u64) -> u64 {
             ev = ev.min(d);
         }
         if i == running {
-            if let Some(Some(j)) = RT_JOB.get().get(i) {
+            if let Some(j) = &*RT_JOB.read(i) {
                 ev = ev.min(now + j.budget);
             }
         }
@@ -1372,21 +1378,21 @@ fn account(cur: usize, core: usize, now: u64) {
     STATS[core].busy.store(STATS[core].busy.load(Ordering::Relaxed) + ran, Ordering::Relaxed);
     // The averages are exact in the trackers; publishing them costs divisions, so not on every switch.
     let refresh = WINDOW.load(Ordering::Relaxed) / 4;
-    let u = &mut TASK_UTIL.get()[cur];
+    let mut u = TASK_UTIL.write(cur);
     u.run(start, now);
     if now.saturating_sub(SLOT[cur].util_at.load(Ordering::Relaxed)) >= refresh {
         SLOT[cur].util.store(u.value(now), Ordering::Relaxed);
         SLOT[cur].util_at.store(now, Ordering::Relaxed);
     }
     SLOT[cur].kind_last.store(kind as u8, Ordering::Relaxed);
-    let c = &mut CORE_TRACK.get()[core];
+    let mut c = CORE_TRACK.write(core);
     c.run(start, now);
     if now.saturating_sub(STATS[core].util_at.load(Ordering::Relaxed)) >= refresh {
         STATS[core].util.store(c.value(now), Ordering::Relaxed);
         STATS[core].util_at.store(now, Ordering::Relaxed);
     }
     if RT_CORE[cur].load(Ordering::Relaxed) as usize == core {
-        if let Some(job) = RT_JOB.get()[cur].as_mut() {
+        if let Some(job) = RT_JOB.write(cur).as_mut() {
             job.charge(ran);
             rt_publish(cur, job);
             if job.throttled(now) {

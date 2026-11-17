@@ -4,7 +4,7 @@
 //! synchronises through the fine-grained locks described in `sync.rs`. A core with nothing
 //! to run sleeps in `wfi` with no lock held; whoever makes work runnable sends it an IPI, and a busy
 //! core that runs something less important than a task that just became runnable gets one too.
-use crate::sync::Global;
+use crate::sync::Slots;
 use crate::trap::TrapFrame;
 use crate::{gic, kprintln, mmu, sched, timer};
 use core::arch::asm;
@@ -80,7 +80,7 @@ extern "C" {
     fn enter_user(tf: *const TrapFrame) -> !;
 }
 
-static BOOT_FRAMES: Global<[TrapFrame; MAX_CPUS]> = Global::new([TrapFrame::ZERO; MAX_CPUS]);
+static BOOT_FRAMES: Slots<TrapFrame, MAX_CPUS> = Slots::new([TrapFrame::ZERO; MAX_CPUS]);
 
 /// PSCI CPU_ON (the platform knows the conduit and how a core is numbered): the core starts at `_secondary_start`, its number as the context id.
 fn psci_cpu_on(core: usize) -> i64 {
@@ -116,17 +116,17 @@ extern "C" fn secondary_main(core: usize) -> ! {
         crate::kprintln!("[kernel] ... {}", crate::overflow_stack(0));
     }
     sched::set_current(core, usize::MAX);
-    let tf = &mut BOOT_FRAMES.get()[core];
-    sched::dispatch(tf, true);
+    let mut tf = BOOT_FRAMES.write(core); // (never released: this core leaves the kernel for good through `enter_user`)
+    sched::dispatch(&mut tf, true);
     kick_idle();
-    unsafe { enter_user(tf) }
+    unsafe { enter_user(&*tf) }
 }
 
 /// Boot core: enter userspace for the first time.
 pub fn boot_core_enter() -> ! {
-    let tf = &mut BOOT_FRAMES.get()[0];
+    let mut tf = BOOT_FRAMES.write(0);
     sched::set_current(0, usize::MAX);
-    sched::dispatch(tf, true);
+    sched::dispatch(&mut tf, true);
     kick_idle();
-    unsafe { enter_user(tf) }
+    unsafe { enter_user(&*tf) }
 }

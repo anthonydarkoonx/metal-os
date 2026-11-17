@@ -67,11 +67,13 @@ pub fn kstack_guard_hit(addr: u64) -> Option<usize> {
 }
 
 pub fn init() {
-    let l1 = &mut KERNEL_L1.get().0;
+    let mut l1_guard = KERNEL_L1.get();
+    let l1 = &mut l1_guard.0;
     crate::platform::map_devices(l1);
     // RAM: 2 MiB blocks, except where the kernel stacks are (4 KiB pages, the guards unmapped)
     let normal = ATTR_NORMAL | SH_INNER | AF | UXN;
-    let (l2, l3s) = (&mut KERNEL_L2.get().0, KERNEL_L3.get());
+    let (mut l2_guard, mut l3s) = (KERNEL_L2.get(), KERNEL_L3.get());
+    let l2 = &mut l2_guard.0;
     // (the 1 GiB of address space that holds the RAM: its first-level slot, and the physical address of its start)
     let gib = crate::platform::RAM_BASE & !0x3FFF_FFFF;
     for (i, e) in l2.iter_mut().enumerate() {
@@ -109,7 +111,7 @@ pub fn enable_this_cpu() {
         | (3 << 12)              // SH0 inner shareable
         | (1 << 23)              // EPD1: TTBR1 walks disabled
         | ((parange & 7) << 32); // IPS
-    let ttbr0 = KERNEL_L1.get() as *mut Table as u64;
+    let ttbr0 = KERNEL_L1.addr() as u64;
     unsafe {
         asm!(
             "msr mair_el1, {mair}",
@@ -142,10 +144,10 @@ pub fn new_space(owner: u8) -> Option<usize> {
     let l1_pa = mem::alloc_kind(owner, mem::FKind::PageTable)?;
     let l2_pa = mem::alloc_kind(owner, mem::FKind::PageTable)?;
     let l1 = table(l1_pa);
-    let kernel = &KERNEL_L1.get().0;
-    l1[0] = kernel[0];
-    l1[1] = kernel[1];
-    l1[3] = kernel[3]; // (empty unless the SoC's peripherals live there: see `init`)
+    let kernel = KERNEL_L1.get();
+    l1[0] = kernel.0[0];
+    l1[1] = kernel.0[1];
+    l1[3] = kernel.0[3]; // (empty unless the SoC's peripherals live there: see `init`)
     l1[2] = l2_pa as u64 | VALID_TABLE;
     Some(l1_pa)
 }
@@ -446,7 +448,7 @@ pub fn migrate_user_page(l1: usize, va: usize, old_pa: usize, new_pa: usize) -> 
 /// freed: the dying task's address space is still this core's active TTBR0 until then, and a
 /// freed table frame can be handed straight back out (and zeroed) by the allocator.
 pub fn use_kernel_tables() {
-    switch_to(KERNEL_L1.get() as *mut Table as usize, 0);
+    switch_to(KERNEL_L1.addr() as usize, 0);
 }
 
 /// Install `l1` with address-space id `asid` (tasks use tid + 1; the kernel's own table is 0).

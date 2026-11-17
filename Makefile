@@ -50,12 +50,31 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
+# A desktop environment can take over the screen task: `make run-window DESKTOP=../metal-os-desktop` builds that repository's
+# `metal-desktop-boot` crate (the contract is docs/DESKTOP-INTERFACE.md) and links it into the user image. Without DESKTOP
+# the image has the built-in terminal console and nothing of any desktop.
+DESKTOP ?=
+ifneq ($(DESKTOP),)
+DESKTOP_DIR := $(abspath $(DESKTOP))
+DESKTOP_OUT := $(DESKTOP_DIR)/target-metal-os/$(TARGET)/release
+DESKTOP_REPO := "https://github.com/anthonydarkoonx/metal-os"
+# (the desktop's dependencies sit in `deps/` or, with newer cargo, in `build/<crate>/<hash>/out/`: every such directory is searched)
+USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metal_desktop_boot=$(DESKTOP_OUT)/libmetal_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
+desktop-lib:
+	cp $(DESKTOP_DIR)/Cargo.lock $(DESKTOP_DIR)/Cargo.lock.metal-os-bak
+	cd $(DESKTOP_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metal-desktop-boot --target-dir target-metal-os --config 'profile.release.lto="fat"' \
+	  --config 'patch.$(DESKTOP_REPO).metal-driver-rt.path="$(CURDIR)/libs/metal-driver-rt"' \
+	  --config 'patch.$(DESKTOP_REPO).metal-gfx.path="$(CURDIR)/libs/metal-gfx"'; rc=$$?; \
+	  mv $(DESKTOP_DIR)/Cargo.lock.metal-os-bak $(DESKTOP_DIR)/Cargo.lock; exit $$rc
+user: desktop-lib
+endif
+
 user:
-	cd user && cargo build --release
+	cd user && $(USER_RUSTFLAGS) cargo build --release
 	mkdir -p user/build
 	cp $(USER_ELF) user/build/user.elf
 

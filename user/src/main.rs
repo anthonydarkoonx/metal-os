@@ -6,6 +6,9 @@
 extern crate alloc;
 #[macro_use]
 extern crate metal_driver_rt;
+// the desktop, when the image is built with one (`make run-window DESKTOP=<path>`; docs/DESKTOP-INTERFACE.md): linked in with --extern
+#[cfg(desktop)]
+extern crate metal_desktop_boot;
 pub use metal_driver_rt::*;
 
 use core::arch::asm;

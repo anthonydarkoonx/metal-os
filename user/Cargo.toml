@@ -33,6 +33,8 @@ panic = "abort"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# `desktop` is set by the Makefile when the image is built with a desktop (DESKTOP=<path>)
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(desktop)'] }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

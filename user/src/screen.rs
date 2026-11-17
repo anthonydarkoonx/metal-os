@@ -49,7 +49,22 @@ fn present(fb: *mut u32, term: &[u32], ox: usize, oy: usize) -> bool {
     true
 }
 
-pub fn run(facts: crate::info::Facts, ctl: u64) -> ! {
+/// Hand the screen to a desktop, if the image was built with one (`make run-window DESKTOP=<path>`, docs/DESKTOP-INTERFACE.md).
+/// `w2` is what `console_session` sends: the display endpoint's slot (bits 0..8), the program manager's task (8..16) and the power
+/// right's slot (16..24). Returns only when there is no desktop in the image or no display endpoint to serve it on.
+#[cfg(desktop)]
+fn desktop(w2: u64) {
+    let display = w2 & 0xFF;
+    if display != 0 {
+        println!("[console] handing the screen to the desktop");
+        metal_desktop_boot::metal_desktop_run(display, 1, 4, 2, FB_VA, ((w2 >> 8) & 0xFF) as u32, (w2 >> 16) & 0xFF)
+    }
+}
+#[cfg(not(desktop))]
+fn desktop(_w2: u64) {}
+
+pub fn run(facts: crate::info::Facts, ctl: u64, w2: u64) -> ! {
+    desktop(w2);
     if mem_map(2, FB_VA, true) != 0 {
         println!("[console] cannot map the framebuffer");
         exit(1)

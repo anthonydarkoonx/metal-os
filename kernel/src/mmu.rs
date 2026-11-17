@@ -68,12 +68,14 @@ pub fn kstack_guard_hit(addr: u64) -> Option<usize> {
 }
 
 pub fn init() {
-    let mut l1_guard = KERNEL_L1.get();
+    // The MMU is off until the end of this function, so no atomic operations (the checked `Global::get` uses them: on the board
+    // they fault on Device memory); only the boot core runs and nothing else touches these tables yet.
+    // SAFETY: boot core only, before secondaries start; each table is borrowed once, here.
+    let (l1_guard, l2_guard, l3s) = unsafe { (KERNEL_L1.boot_get(), KERNEL_L2.boot_get(), KERNEL_L3.boot_get()) };
     let l1 = &mut l1_guard.0;
     crate::platform::map_devices(l1);
     // RAM: 2 MiB blocks, except where the kernel stacks are (4 KiB pages, the guards unmapped)
     let normal = ATTR_NORMAL | SH_INNER | AF | UXN;
-    let (mut l2_guard, mut l3s) = (KERNEL_L2.get(), KERNEL_L3.get());
     let l2 = &mut l2_guard.0;
     // (the 1 GiB of address space that holds the RAM: its first-level slot, and the physical address of its start)
     let gib = crate::platform::RAM_BASE & !0x3FFF_FFFF;

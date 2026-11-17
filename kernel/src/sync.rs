@@ -295,6 +295,19 @@ impl<T> Global<T> {
         acquire_write(&self.state, self.data.get(), "a global", 0)
     }
 
+    /// Plain, unchecked access for the one place that runs before the MMU is on (`mmu::init`).
+    ///
+    /// With the MMU off every data access is Device memory, and atomic read-modify-write (what the checked `get` does) on Device
+    /// memory faults on real hardware (the RK3566 gives a data abort, DFSC 0x35) although QEMU allows it.
+    ///
+    /// # Safety
+    /// Only the boot core runs (no other core is started yet), and no other reference to the value exists or is made while the
+    /// returned one lives.
+    pub unsafe fn boot_get(&self) -> &mut T {
+        // SAFETY: the caller's contract.
+        unsafe { &mut *self.data.get() }
+    }
+
     /// Hand the value out for the rest of the kernel's life, once (an arena a long-lived allocator keeps). `None` the second
     /// time or while a guard from `get` is alive.
     pub fn take(&'static self) -> Option<&'static mut T> {

@@ -30,8 +30,8 @@ const OP_INFO: u64 = 10;
 const OP_SAVED: u64 = 11;
 /// The program's display name (the manifest's `name`), 16 bytes in w1 and w2.
 const OP_NAME: u64 = 12;
-/// The stored permission policy of a program: GET -> (stored | declared << 8, task or MAX); SET (new stored bits in bits 16..21 of the op word) -> (old, new);
-/// GRANT (one permission bit in bits 16..21) gives a running program the capability that permission stands for, in the slot it expects.
+/// The stored permission policy of a program: GET -> (stored | declared << 8, task or MAX); SET (new stored bits in bits 16..22 of the op word) -> (old, new);
+/// GRANT (one permission bit in bits 16..22) gives a running program the capability that permission stands for, in the slot it expects.
 const OP_POLICY_GET: u64 = 13;
 const OP_POLICY_SET: u64 = 14;
 const OP_GRANT: u64 = 15;
@@ -58,6 +58,18 @@ const SHELL_CTL_SLOT: u8 = 3;
 const ADMIN_SLOT: u8 = 7;
 const ADMIN_PROGRAM_SLOT: u8 = 4;
 const R_REVOKE: u16 = 1 << 10;
+/// Rights on the spawn and factory capabilities (`docs/ABI.md`): start programs, with file access, with network; create endpoints.
+const R_SPAWN: u16 = 1 << 12;
+const R_SPAWN_FS: u16 = 1 << 13;
+const R_EP_CREATE: u16 = 1 << 14;
+const R_SPAWN_NET: u16 = 1 << 15;
+/// Where a program with `permission = spawn` finds its endpoint factory and spawn capability: the slots `metal-programs`' `Command` uses.
+const FACTORY_PROGRAM_SLOT: u8 = 5;
+const SPAWN_PROGRAM_SLOT: u8 = 6;
+/// All the permission bits (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin, 6 spawn).
+const PERMISSION_BITS: u8 = 0x7F;
+/// CAP_GRANT's answer when the destination slot is in use (`E_FULL`).
+const E_SLOT_IN_USE: i64 = -3;
 // (the manager used to tell the console about programs coming and going; the new display protocol will bring that back)
 const FACTORY: u64 = 5;
 const SPAWN: u64 = 6;
@@ -79,7 +91,7 @@ struct Inst {
     kill_at: u64,
     restart_at: Option<u64>,
     saved: Option<(u64, u64)>,
-    /// Permissions the program was started without (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin): a launch can only narrow what the manifest declares.
+    /// Permissions the program was started without (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin, 6 spawn): a launch can only narrow what the manifest declares.
     off: u8,
 }
 
@@ -152,7 +164,7 @@ fn is_default(id: &str) -> bool {
     fs::read_to_string("/system/etc/program-defaults").is_ok_and(|t| t.lines().any(|l| l.split('#').next().unwrap_or("").split_whitespace().next() == Some(id)))
 }
 
-/// Where a program's stored policy is kept: one byte of permission bits the user has taken away (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin).
+/// Where a program's stored policy is kept: one byte of permission bits the user has taken away (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin, 6 spawn).
 fn policy_path(id: &str) -> String {
     format!("/data/programs/{id}.pol")
 }
@@ -160,9 +172,15 @@ fn policy_path(id: &str) -> String {
 /// The permissions the user has taken away from a program for good (none if nothing is stored or the file is damaged).
 fn policy_of(id: &str) -> u8 {
     match fs::read(&policy_path(id)) {
-        Ok(b) if b.len() == 1 && b[0] & !0x3F == 0 => b[0],
+        Ok(b) if b.len() == 1 && b[0] & !PERMISSION_BITS == 0 => b[0],
         _ => 0,
     }
+}
+
+/// The rights of the spawn capability a program with `permission = spawn` gets: start programs, with file access only if the program sees
+/// the whole file system, with network only if it has network.
+fn spawn_rights(allfiles: bool, network: bool) -> u16 {
+    R_SPAWN | if allfiles { R_SPAWN_FS } else { 0 } | if network { R_SPAWN_NET } else { 0 }
 }
 
 /// The directory that is `/data` for the program with this id.
@@ -318,9 +336,10 @@ impl Mgr {
         self.insts[ix].state = st;
         // what the manifest declares, less what this start gave up
         // (the user's stored policy joins what this start gave up)
-        let off = (self.insts[ix].off | policy_of(&id)) & 0x3F;
+        let off = (self.insts[ix].off | policy_of(&id)) & PERMISSION_BITS;
         self.insts[ix].off = off;
         let (files, network, display, shell, allfiles, admin) = (m.files && off & 1 == 0, m.network && off & 2 == 0, m.display && off & 4 == 0, m.shell && off & 8 == 0, m.allfiles && off & 16 == 0, m.admin && off & 32 == 0);
+        let spawn = m.spawn && off & 64 == 0;
         let mut cmd = Command::new(&a.name);
         if files && !allfiles {
             // the program's own directory is all of /data to it: made now, entered before the program runs its first instruction
@@ -331,6 +350,13 @@ impl Mgr {
         }
         cmd.arg(&id);
         cmd.image(elf).numeric_arg(entry as u64).heap_pages(m.heap_pages).class(m.class.number()).threads(m.threads).files(files || allfiles).network(network);
+        if spawn {
+            // a program that starts programs (a terminal): an endpoint factory for its children's consoles, and a spawn capability that never
+            // gives a child more than the program has. File access for children only with `allfiles`: a child's file session is a new one, not
+            // confined to the program's directory, so a confined program must not hand one out. Network only with `network`. No grant right:
+            // the children cannot start programs of their own. The pages it may hand down come out of the manager's budget.
+            cmd.give(FACTORY as u8, FACTORY_PROGRAM_SLOT, R_EP_CREATE).give(SPAWN as u8, SPAWN_PROGRAM_SLOT, spawn_rights(allfiles, network)).budget_pages(m.spawn_pages);
+        }
         cmd.give(self.board_slot as u8, BOARD_SLOT as u8, 8 /* map, not write */).give(self.program_ep.0 as u8, PROGRAM_EP_SLOT as u8, 1 /* send */);
         if display {
             cmd.give(DISPLAY.0 as u8, DISPLAY_SLOT, 1 /* send */);
@@ -383,7 +409,7 @@ impl Mgr {
         };
         self.insts[ix].saved = None;
         self.insts[ix].state = ST_STOPPED;
-        self.insts[ix].off = off & 0x3F;
+        self.insts[ix].off = off & PERMISSION_BITS;
         match self.launch(ix) {
             Ok(()) => [OK, self.insts[ix].entry as u64, self.insts[ix].child.as_ref().map_or(0, |c| c.id() as u64)],
             Err(e) => {
@@ -446,8 +472,9 @@ impl Mgr {
             return [E_FAILED, old as u64, 0];
         }
         let changed = old ^ new;
-        // (only what changes in a running program at once follows: the window, shell and revoke capabilities; files and network are sessions made at the start)
-        let live = changed & (4 | 8 | 32);
+        // (only what changes in a running program at once follows: the window, shell, revoke and spawn capabilities; files and network are sessions
+        // made at the start)
+        let live = changed & (4 | 8 | 32 | 64);
         for i in self.insts.iter_mut().filter(|i| i.program == id) {
             i.off = (i.off & !live) | (new & live);
             // a shell program that loses the right stops being one for the compositor, which takes its panels and overlays away
@@ -460,20 +487,38 @@ impl Mgr {
     }
 
     /// Give a running program back the capability a permission stands for (window: the display endpoint, shell: the control endpoint, revoke: the
-    /// revoke authority), in the slot the program expects it. Only what the manifest declares and the stored policy allows.
+    /// revoke authority, spawn: the spawn capability and the endpoint factory), in the slot the program expects it. Only what the manifest declares
+    /// and the stored policy allows.
     fn grant_back(&mut self, id: &str, bit: u8) -> [u64; 3] {
         let Some(m) = self.program(id) else { return [E_NOAPP, 0, 0] };
         let declared = match bit {
             4 => m.display,
             8 => m.shell,
             32 => m.admin,
+            64 => m.spawn,
             _ => false,
         };
+        let (allfiles, network) = (m.allfiles, m.network);
         if !declared || policy_of(id) & bit != 0 {
             return [E_REFUSED, 0, 0];
         }
         let Some(ix) = self.insts.iter().position(|i| i.program == id && i.child.is_some()) else { return [E_STATE, 0, 0] };
         let task = self.insts[ix].child.as_ref().map_or(0, |c| c.id() as u64);
+        if bit == 64 {
+            // two capabilities: the factory first (the spawn capability is what the program checks for), each in its own slot, with what the
+            // running instance has now (a child gets file access or network only if the program does)
+            let off = self.insts[ix].off;
+            let rights = spawn_rights(allfiles && off & 16 == 0, network && off & 2 == 0);
+            for (src, dest, rights) in [(FACTORY, FACTORY_PROGRAM_SLOT, R_EP_CREATE), (SPAWN, SPAWN_PROGRAM_SLOT, rights)] {
+                let r = svc(CAP_GRANT, src, task, rights as u64, dest as u64 + 1, 0)[0] as i64;
+                // (-3: the slot is still in use, so the program never lost that one: go on to the other)
+                if r < 0 && r != E_SLOT_IN_USE {
+                    return [E_FAILED, (-r) as u64, 0];
+                }
+            }
+            self.insts[ix].off &= !bit;
+            return [OK, 0, 0];
+        }
         let (src, dest, rights): (u64, u64, u64) = match bit {
             4 => (DISPLAY.0 as u64, DISPLAY_SLOT as u64, 1),
             8 => (CTL.0 as u64, SHELL_CTL_SLOT as u64, 1),
@@ -496,7 +541,7 @@ impl Mgr {
         match op {
             OP_INSTALL => [self.install(&id), 0, 0],
             OP_UNINSTALL => [self.uninstall(&id), 0, 0],
-            OP_START => self.start(&id, ab, ((w[0] >> 16) & 0x3F) as u8),
+            OP_START => self.start(&id, ab, ((w[0] >> 16) as u8) & PERMISSION_BITS),
             OP_STOP => [self.stop(&id, ab, now), 0, 0],
             OP_FOREGROUND => [self.switch(&id, ab, ST_FOREGROUND), 0, 0],
             OP_BACKGROUND => [self.switch(&id, ab, ST_BACKGROUND), 0, 0],
@@ -520,14 +565,14 @@ impl Mgr {
             }
             OP_POLICY_GET => match self.program(&id) {
                 Some(m) => {
-                    let declared = m.files as u64 | (m.network as u64) << 1 | (m.display as u64) << 2 | (m.shell as u64) << 3 | (m.allfiles as u64) << 4 | (m.admin as u64) << 5;
+                    let declared = m.files as u64 | (m.network as u64) << 1 | (m.display as u64) << 2 | (m.shell as u64) << 3 | (m.allfiles as u64) << 4 | (m.admin as u64) << 5 | (m.spawn as u64) << 6;
                     let task = self.insts.iter().find(|i| i.program == id).and_then(|i| i.child.as_ref()).map_or(u64::MAX, |c| c.id() as u64);
                     [OK, policy_of(&id) as u64 | declared << 8, task]
                 }
                 None => [E_NOAPP, 0, 0],
             },
-            OP_POLICY_SET => self.set_policy(&id, ((w[0] >> 16) & 0x3F) as u8),
-            OP_GRANT => self.grant_back(&id, ((w[0] >> 16) & 0x3F) as u8),
+            OP_POLICY_SET => self.set_policy(&id, ((w[0] >> 16) as u8) & PERMISSION_BITS),
+            OP_GRANT => self.grant_back(&id, ((w[0] >> 16) as u8) & PERMISSION_BITS),
             OP_LIST => match self.programs.get(w[1] as usize) {
                 Some(program) => {
                     let (a, b) = pack(&program.m.id);
@@ -543,7 +588,7 @@ impl Mgr {
                 None => [E_NOAPP, 0, 0],
             },
             OP_INFO => match self.programs.iter().find(|a| a.m.id == id) {
-                Some(Program { m, signer }) => [OK, m.heap_pages as u64 | (m.threads as u64) << 16 | (m.class.number() as u64) << 20 | (m.files as u64) << 24 | (m.network as u64) << 25 | (signer.is_some() as u64) << 27 | (m.display as u64) << 28 | (m.shell as u64) << 29 | (m.allfiles as u64) << 30 | (m.admin as u64) << 31, m.abilities.len() as u64],
+                Some(Program { m, signer }) => [OK, m.heap_pages as u64 | (m.threads as u64) << 16 | (m.class.number() as u64) << 20 | (m.files as u64) << 24 | (m.network as u64) << 25 | (signer.is_some() as u64) << 27 | (m.display as u64) << 28 | (m.shell as u64) << 29 | (m.allfiles as u64) << 30 | (m.admin as u64) << 31 | (m.spawn as u64) << 32 | (m.spawn_pages as u64) << 33, m.abilities.len() as u64],
                 None => [E_NOAPP, 0, 0],
             },
             _ => [E_REFUSED, 0, 0],

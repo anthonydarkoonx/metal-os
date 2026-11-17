@@ -340,9 +340,10 @@ pub fn console_session() -> ! {
         let ctl = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64; // the manager's control endpoint
         let disp = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64; // the display endpoint the console serves and programs call
         // the manager: control endpoint (receive + send) as slot 0, the display endpoint (send, and the right to hand a send-only
-        // copy to the programs that ask for a display) as slot 3, the endpoint factory and the spawn capability as 5 and 6, file access,
-        // and a budget of pages for the programs it starts
-        let mut rq = Req::new().fs().heap(4096).budget(24000).give_masked(5, FACTORY_SLOT as u8, 0xFFFF & !4).give_masked(6, SPAWN_SLOT as u8, 0xFFFF & !4).give_masked(7, ADMIN_SLOT as u8, 0xFFFF & !0x800); // (the revoke authority: the manager hands it to the task manager)
+        // copy to the programs that ask for a display) as slot 3, the endpoint factory and the spawn capability as 5 and 6 (with the right to
+        // hand them on: a program with `permission = spawn` gets a narrowed copy of each, never with that right), file access, and a budget of
+        // pages for the programs it starts
+        let mut rq = Req::new().fs().heap(4096).budget(24000).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF).give_masked(7, ADMIN_SLOT as u8, 0xFFFF & !0x800); // (the revoke authority: the manager hands it to the task manager)
         if ctl >= 0 {
             rq = rq.give_masked(0, ctl as u8, 0b111); // (the right to give copies: shell clients get one)
         }
@@ -1059,9 +1060,9 @@ pub fn tests() {
         let (progmgr, progctl) = (load("progmgr"), load("progctl"));
         let (frames0, nodes0, busy0) = (sysinfo(0)[3], sysinfo(1)[5], live_dynamic());
         let ctl = mk();
-        // the manager: control endpoint (receive + send) as slot 0, the endpoint factory and the spawn capability (without the right to
-        // pass the spawn capability on) as 5 and 6, file access, and a budget of pages for the programs it starts
-        let mgr = Req::new().fs().budget(500).give_masked(0, ctl as u8, 0b11).give_masked(5, FACTORY_SLOT as u8, 0xFFFF & !4).give_masked(6, SPAWN_SLOT as u8, 0xFFFF & !4).go(&progmgr);
+        // the manager: control endpoint (receive + send) as slot 0, the endpoint factory and the spawn capability as 5 and 6 (with the right
+        // to hand a narrowed copy to a program with `permission = spawn`), file access, and a budget of pages for the programs it starts
+        let mgr = Req::new().fs().budget(800).give_masked(0, ctl as u8, 0b11).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF).go(&progmgr);
         // the driver holds only the right to send to the control endpoint (and file access, to look at where the programs keep their data)
         let drv = if mgr > 0 { Req::new().fs().give_masked(0, ctl as u8, 0b01).go(&progctl) } else { -1 };
         let failures = if drv > 0 { wait(drv, false) } else { -1 };

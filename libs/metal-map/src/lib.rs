@@ -26,7 +26,8 @@
 //! threads    = 0                  # extra threads, 0..=8
 //! class      = interactive        # interactive | background | heavy
 //! role = desktop                  # the desktop (taskbar, Start menu): the manager gives the compositor its role; implies shell
-//! permission = files              # files | network | display | shell | allfiles | admin (repeatable)
+//! permission = files              # files | network | display | shell | allfiles | admin | spawn (repeatable)
+//! spawn_pages = 4096               # with `spawn`: pages the program may hand down to the programs it starts (default 4096, max 16384)
 //! ability    = main ui bin/counter.pie     # name, kind (ui | service), entry file in the package
 //! ```
 //! A signed package is accepted if its key is in the system's trust store (`/system/etc/program-keys`, lines `name = <64 hex digits of
@@ -58,6 +59,9 @@ pub const MAX_ID: usize = 16;
 pub const MAX_HEAP_PAGES: u32 = 16384;
 pub const MAX_THREADS: u8 = 8;
 pub const DEFAULT_HEAP_PAGES: u32 = 128;
+/// What a program with `permission = spawn` may hand down to the programs it starts, unless `spawn_pages` says otherwise.
+pub const DEFAULT_SPAWN_PAGES: u32 = 4096;
+pub const MAX_SPAWN_PAGES: u32 = 16384;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -88,6 +92,10 @@ pub enum Permission {
     AllFiles,
     /// May revoke capabilities of other programs (the task manager): gets the program manager's copy of the revoke authority.
     Admin,
+    /// May start programs of its own (a terminal running command-line programs): gets a spawn capability and an endpoint factory.
+    /// The programs it starts never get more than it has: file access only if it has `allfiles`, network only if it has `network`,
+    /// and they cannot start programs themselves.
+    Spawn,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +146,9 @@ pub struct Manifest {
     pub shell: bool,
     pub allfiles: bool,
     pub admin: bool,
+    pub spawn: bool,
+    /// With `spawn`: the pages it may hand down to the programs it starts (0 without `spawn`).
+    pub spawn_pages: u32,
     /// `role = desktop`: the program is the desktop (taskbar, Start menu); the manager tells the compositor so after it starts it.
     pub desktop: bool,
     pub abilities: Vec<Ability>,
@@ -155,6 +166,7 @@ impl Manifest {
             Permission::Shell => self.shell,
             Permission::AllFiles => self.allfiles,
             Permission::Admin => self.admin,
+            Permission::Spawn => self.spawn,
         }
     }
 }
@@ -188,9 +200,12 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
         shell: false,
         allfiles: false,
         admin: false,
+        spawn: false,
+        spawn_pages: 0,
         desktop: false,
         abilities: Vec::new(),
     };
+    let mut spawn_pages: Option<u32> = None;
     let mut seen: Vec<&str> = Vec::new();
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -240,6 +255,13 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
                     return Err(bad("heap_pages out of range"));
                 }
             }
+            "spawn_pages" => {
+                let n: u32 = v.parse().map_err(|_| bad("bad spawn_pages"))?;
+                if n == 0 || n > MAX_SPAWN_PAGES {
+                    return Err(bad("spawn_pages out of range"));
+                }
+                spawn_pages = Some(n);
+            }
             "threads" => {
                 m.threads = v.parse().map_err(|_| bad("bad threads"))?;
                 if m.threads > MAX_THREADS {
@@ -260,6 +282,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
                 "display" => m.display = true,
                 "allfiles" => m.allfiles = true,
                 "admin" => m.admin = true,
+                "spawn" => m.spawn = true,
                 "shell" => {
                     m.shell = true;
                     m.display = true;
@@ -311,6 +334,11 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
     if m.abilities.is_empty() {
         return Err(bad("no ability"));
     }
+    m.spawn_pages = match (m.spawn, spawn_pages) {
+        (true, n) => n.unwrap_or(DEFAULT_SPAWN_PAGES),
+        (false, None) => 0,
+        (false, Some(_)) => return Err(bad("spawn_pages needs permission = spawn")),
+    };
     Ok(m)
 }
 

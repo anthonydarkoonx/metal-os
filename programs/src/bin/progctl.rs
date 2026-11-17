@@ -173,6 +173,9 @@ program!("progctl", |c| {
                 }
                 let class = ["interactive", "background", "heavy"].get(((r[1] >> 20) & 15) as usize).copied().unwrap_or("?");
                 println!("{id}: {} heap pages, {} threads, class {class}, files {}, network {}, {} abilities, {}", r[1] & 0xFFFF, (r[1] >> 16) & 15, (r[1] >> 24) & 1, (r[1] >> 25) & 1, r[2], if (r[1] >> 27) & 1 == 1 { "signed" } else { "unsigned" });
+                if (r[1] >> 32) & 1 == 1 {
+                    println!("{id}: starts programs (permission spawn), may hand them {} pages", r[1] >> 33);
+                }
                 0
             }
             _ => {
@@ -185,7 +188,7 @@ program!("progctl", |c| {
 
     // The data partition outlives a boot (and `make test` boots several times on one disk image): start from nothing, and
     // leave nothing (the programs are uninstalled at the end, which removes their directories).
-    let ids = ["counter", "crasher", "hog", "probefs", "probenofs", "fsa", "fsb"];
+    let ids = ["counter", "crasher", "hog", "probefs", "probenofs", "probespawn", "probespawnall", "fsa", "fsb"];
     for id in ids {
         ask(OP_STOP, 0, id);
     }
@@ -275,7 +278,13 @@ program!("progctl", |c| {
     let pn = ask(OP_START, 0, "probenofs");
     let ended = until(200, || saved("probefs", 0).1 == 0xFEED && saved("probenofs", 0).1 == 0xFEED);
     let (ef, en) = (saved("probefs", 0).0, saved("probenofs", 0).0);
-    check("a program sees files only with the files permission; no program can use the manager's control endpoint or start programs", pf[0] == 0 && pn[0] == 0 && ended && ef == 7 && en == 6, &alloc::format!("(answers {ef} and {en}: bit 0 file, bit 1 control refused, bit 2 no spawn)"));
+    check("a program sees files only with the files permission; no program can use the manager's control endpoint or start programs", pf[0] == 0 && pn[0] == 0 && ended && ef == 15 && en == 14, &alloc::format!("(answers {ef} and {en}: bit 0 file, bit 1 control refused, bit 2 no spawn, bit 3 no spawn with files)"));
+    let ps = ask(OP_START, 0, "probespawn");
+    let pa = ask(OP_START, 0, "probespawnall");
+    let ended = until(200, || saved("probespawn", 0).1 == 0xFEED && saved("probespawnall", 0).1 == 0xFEED);
+    let (es, ea) = (saved("probespawn", 0).0, saved("probespawnall", 0).0);
+    let si = ask(OP_INFO, 0, "probespawn");
+    check("a program starts programs only with the spawn permission, and its children get file access only if it has allfiles", ps[0] == 0 && pa[0] == 0 && ended && es == 11 && ea == 3 && (si[1] >> 32) & 1 == 1 && si[1] >> 33 == 64, &alloc::format!("(answers {es} of 11 and {ea} of 3, info {:#x})", si[1]));
 
     // ---- storage: for a program, /data is its own directory ----
     let sa = ask(OP_START, 0, "fsa");

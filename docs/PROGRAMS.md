@@ -15,7 +15,7 @@ single-byte corruption and every truncation of a package). `tools/mkmap.py` buil
 
 Manifest (`key = value`, `#` comments): `id` (1-16 of `a-z 0-9 _ - .`), `name`, `version`, `unsigned`, `heap_pages`
 (1-4096, default 128), `threads` (0-8), `class` (interactive/background/heavy), `permission` (`files`, `network`,
-repeatable; `display` gives the program the display endpoint (slot 2; no GUI uses it at the moment: the windowing system was removed on 2026-11-16); `allfiles` gives the whole file system instead of the program's own directory (for programs that browse the whole disk); `shell` makes the program a shell client: the program manager gives it its control endpoint as slot 3), `ability = NAME ui|service bin/PROGRAM` (repeatable, up to 8).
+repeatable; `display` gives the program the display endpoint (slot 2; no GUI uses it at the moment: the windowing system was removed on 2026-11-16); `allfiles` gives the whole file system instead of the program's own directory (for programs that browse the whole disk); `shell` makes the program a shell client: the program manager gives it its control endpoint as slot 3; `spawn` lets the program start programs of its own, see *Starting programs* below), `spawn_pages` (with `spawn`: pages it may hand down to the programs it starts, 1-16384, default 4096), `ability = NAME ui|service bin/PROGRAM` (repeatable, up to 8).
 
 ## Signing and trust (`libs/metal-ed25519`)
 A package may carry a signature block (72 bytes at the end: a key id and an Ed25519 signature of every byte before it). The system
@@ -39,9 +39,30 @@ re-reads `/data/programs` when it starts. The package's id must equal its file n
 ## What an ability gets
 Started from the package's bytes with `Command::image`, with: the heap limit, scheduling class and thread count of the
 manifest; file-system access only with `permission = files`, and then confined to the program's own directory (below); network only with `permission = network`; slot 0, a
-read-only *board* page; slot 1, a send capability to the manager's *program endpoint*. No spawn capability, no control
-endpoint. The control endpoint (install/start/stop) is a different endpoint: only its holders can use it, and the program
+read-only *board* page; slot 1, a send capability to the manager's *program endpoint*. No control endpoint, and no spawn
+capability unless the manifest says `permission = spawn` (below). The control endpoint (install/start/stop) is a different endpoint: only its holders can use it, and the program
 endpoint refuses everything except `save`. The `probe` sample checks all of this from inside a program.
+
+## Starting programs (`permission = spawn`)
+A program that runs other programs (a terminal running command-line programs) declares `permission = spawn`. The manager then gives it:
+
+| Slot | Capability | Rights |
+|---|---|---|
+| 5 | endpoint factory | create endpoints (for its children's consoles); not the right to pass it on |
+| 6 | spawn | start programs; **with file access only if the program has `allfiles`**, with network only if it has `network`; not the right to pass it on |
+
+and a budget of `spawn_pages` (default 4096) to hand down, taken from the manager's own. These are the slots `metal-programs`' `Command`
+uses, so `Command::new("ls").spawn()` works in such a program as it is. The rules:
+* **Children never get more than their parent.** File access for a child needs `allfiles`, not `files`: a child started with file access
+  gets a new file session that is *not* confined to the parent's directory (confinement belongs to one session, see `docs/ABI.md`
+  `SCOPE`), so a confined program handing one out would escape its directory. A `files`-only program with `spawn` starts programs without
+  file access. Network for a child needs `network`.
+* **No grandchildren.** Neither capability carries the grant right, so the programs it starts cannot start programs of their own.
+* **They are its children.** It may `WAIT` for and `KILL` them, and they end when it ends (stopped, crashed or uninstalled).
+* A program may have at most 8 programs at a time (`docs/ABI.md`, *Memory limits*).
+
+The OS console (role 13) is not a program and keeps its own spawn capability (slot 8). A desktop's shells should declare `spawn`
+rather than rely on that (`docs/DESKTOP-INTERFACE.md`).
 
 ## Private storage
 A program with `permission = files` has its own directory, `/data/programdata/<id>`, and for the program **that directory is `/data`**: the VFS
@@ -68,7 +89,7 @@ the manager gives up (`ST_FAILED`). An ability that ends with 0, or after `STOP`
 ## Control protocol
 `IPC_CALL` on the control endpoint: `w0 = op | ability << 8`, `w1`,`w2` = the id (16 bytes). Ops: INSTALL 1, UNINSTALL 2,
 START 3, STOP 4, STATE 5 (reply `state | restarts << 8 | running << 24`, last exit code), FOREGROUND 6, BACKGROUND 7,
-LIST 8 (`w1` = index), INFO 10, SAVED 11, NAME 12, POLICY_GET 13, POLICY_SET 14, GRANT 15 (see *Permission policy* below). START carries the permissions this start gives up in bits 16..21 of `w0` (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin), STATE reports them in bits 25..30. Status in the reply's `w0`: 0 ok, 1 no such program (INSTALL: not found), 2 no such
+LIST 8 (`w1` = index), INFO 10, SAVED 11, NAME 12, POLICY_GET 13, POLICY_SET 14, GRANT 15 (see *Permission policy* below). START carries the permissions this start gives up in bits 16..22 of `w0` (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin, 6 spawn), STATE reports them in bits 25..31. INFO reports `spawn` in bit 32 of `w1` and `spawn_pages` from bit 33. Status in the reply's `w0`: 0 ok, 1 no such program (INSTALL: not found), 2 no such
 ability (INSTALL: invalid package), 3 wrong state (INSTALL: id differs from the file name), 4 refused (INSTALL: the program
 runs), 5 failed, 6 not marked unsigned, 7 all 16 board entries in use. `progctl` is the command-line client
 (`progctl install ID`, `start`, `stop`, `state`, `list`) and, started with no arguments, the test scenario.
@@ -96,11 +117,11 @@ checking trusts the system image's key list: nothing yet measures that the image
 What a program may do is the **manifest** (the ceiling, fixed at install), less what the user has taken away. Three layers, each only able to narrow the one above:
 
 1. **Manifest**: `permission = ...` (signed with the package).
-2. **Stored policy**: `/data/programs/<id>.pol`, one byte of permission bits the user took away (same bit order as above). It applies to every start, restarts after a crash included, and goes when the program is uninstalled. Set with `POLICY_SET` (the new bits in bits 16..21 of `w0`; reply: old, new), read with `POLICY_GET` (reply `stored | declared << 8`, and the running task or MAX).
+2. **Stored policy**: `/data/programs/<id>.pol`, one byte of permission bits the user took away (same bit order as above, plus bit 6 spawn). It applies to every start, restarts after a crash included, and goes when the program is uninstalled. Set with `POLICY_SET` (the new bits in bits 16..22 of `w0`; reply: old, new), read with `POLICY_GET` (reply `stored | declared << 8`, and the running task or MAX).
 3. **This start**: the bits in `START` (the New Task box's tick boxes). Not stored.
 
 The program gets `manifest & !stored & !start`. Nothing can add a permission the manifest does not declare.
 
-**Taking away and giving back, live.** The permissions that stand for a capability take effect in a running program at once: *window* is the display endpoint (slot 2), *shell* the control endpoint (slot 3), *revoke* the revoke authority (slot 4). Taking one away is the kernel's `REVOKE_OF` (a privileged program does it); giving it back is `GRANT` (the program manager hands its own copy over with `CAP_GRANT` and a destination slot, so the program finds it where it looks; it refuses unless the manifest declares the permission, the stored policy allows it and the program runs). *Files*, *network* and *all files* are sessions the kernel sets up at spawn: a change is stored and applies at the next start.
+**Taking away and giving back, live.** The permissions that stand for a capability take effect in a running program at once: *window* is the display endpoint (slot 2), *shell* the control endpoint (slot 3), *revoke* the revoke authority (slot 4), *spawn* the spawn capability and endpoint factory (slots 6 and 5). Taking one away is the kernel's `REVOKE_OF` (a privileged program does it); giving it back is `GRANT` (the program manager hands its own copy over with `CAP_GRANT` and a destination slot, so the program finds it where it looks; it refuses unless the manifest declares the permission, the stored policy allows it and the program runs). *Files*, *network* and *all files* are sessions the kernel sets up at spawn: a change is stored and applies at the next start.
 
-There is no graphical front end at the moment (the Capabilities program was removed with the GUI). A revoke of one of the three capabilities above can be **kept off**, which stores the policy bit after the kernel has accepted the revoke. In a running program only the bits that change at once (window, shell, revoke) follow in the program manager's record of what it runs without; the others show *on until restart* / *off until restart* until the next start.
+There is no graphical front end at the moment (the Capabilities program was removed with the GUI). A revoke of one of the three capabilities above can be **kept off**, which stores the policy bit after the kernel has accepted the revoke. In a running program only the bits that change at once (window, shell, revoke, spawn) follow in the program manager's record of what it runs without; the others show *on until restart* / *off until restart* until the next start.

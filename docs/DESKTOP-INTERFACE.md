@@ -52,6 +52,8 @@ A desktop brings its programs as packages, installed by default:
 - `os/defaults` becomes `/system/etc/program-defaults`: one program id a line, `id autostart` to start it too. The program manager installs each
   on first start (a note in `/data/programs`, not a copy) and starts the `autostart` ones. A default program the user uninstalls stays uninstalled
   (a `.gone` note).
+- A desktop's command-line shell (a terminal that runs programs) declares `permission = spawn` (`docs/PROGRAMS.md`, *Starting programs*). The screen task's own
+  capabilities beyond the arguments above (its spawn capability, VFS session, endpoint factory) are the console's and are **not** part of this contract.
 - The manifest key `role = desktop` marks the taskbar program: it implies `permission = shell`, and the manager tells the compositor
   (`MGR_SET_ROLE`) once the program has started. The compositor takes requests for that role only from the manager.
 

@@ -284,3 +284,23 @@ fn role_desktop_makes_a_shell_client_and_only_that_role_exists() {
     assert!(parse_manifest(&std::format!("{base}role = panel\n")).is_err(), "unknown role");
     assert!(parse_manifest(&std::format!("{base}role = desktop\nrole = desktop\n")).is_err(), "role twice");
 }
+
+#[test]
+fn the_spawn_permission_and_its_budget() {
+    let base = "id = term\nname = Terminal\nversion = 1.0.0\nability = main ui bin/term\n";
+    let m = parse_manifest(&std::format!("{base}permission = spawn\n")).unwrap();
+    assert!(m.spawn && m.has(Permission::Spawn));
+    assert_eq!(m.spawn_pages, DEFAULT_SPAWN_PAGES, "spawn without spawn_pages hands down the default");
+    assert!(!m.files && !m.allfiles && !m.network, "spawn implies no other permission");
+    let m = parse_manifest(&std::format!("{base}permission = spawn\nspawn_pages = 8192\n")).unwrap();
+    assert_eq!(m.spawn_pages, 8192);
+    let plain = parse_manifest(base).unwrap();
+    assert!(!plain.spawn && !plain.has(Permission::Spawn));
+    assert_eq!(plain.spawn_pages, 0, "nothing to hand down without spawn");
+    assert_eq!(parse_manifest(&std::format!("{base}spawn_pages = 64\n")), Err(Error::BadManifest("spawn_pages needs permission = spawn")));
+    for bad in ["0", "16385", "lots", "-1"] {
+        assert!(parse_manifest(&std::format!("{base}permission = spawn\nspawn_pages = {bad}\n")).is_err(), "{bad}");
+    }
+    assert!(parse_manifest(&std::format!("{base}permission = spawn\nspawn_pages = 16384\n")).is_ok());
+    assert!(parse_manifest(&std::format!("{base}permission = spawn\nspawn_pages = 1\nspawn_pages = 2\n")).is_err(), "duplicate key");
+}

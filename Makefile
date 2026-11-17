@@ -131,7 +131,7 @@ erofs-check:
 # Independent check: the Rust package parser must accept what tools/mkmap.py builds (and refuse the flawed fixtures).
 map-check: programs
 	python3 tools/mkmap.py
-	@for f in counter crasher hog probefs probenofs fsa fsb nosign mismatch rogue tampered; do cargo run -q --release -p metal-map --example mapinfo -- programs/build/maps/$$f.map | grep -q '^ok ' || { echo "map-check: $$f.map not accepted"; exit 1; }; done
+	@for f in counter crasher hog probefs probenofs probespawn probespawnall fsa fsb nosign mismatch rogue tampered; do cargo run -q --release -p metal-map --example mapinfo -- programs/build/maps/$$f.map | grep -q '^ok ' || { echo "map-check: $$f.map not accepted"; exit 1; }; done
 	@cargo run -q --release -p metal-map --example mapinfo -- programs/build/maps/corrupt.map | grep -q 'refused BadChecksum' || { echo "map-check: corrupt.map not refused"; exit 1; }
 	@echo "== MAP CHECK: ALL PASS =="
 
@@ -261,6 +261,7 @@ qemu-test: kernel disk
 	 grep -q "TEST a program that runs into its memory limit dies alone.*PASS" build.log && \
 	 grep -q "TEST \.\.\. while the others keep running.*PASS" build.log && \
 	 grep -q "TEST a program sees files only with the files permission.*PASS" build.log && \
+	 grep -q "TEST a program starts programs only with the spawn permission.*PASS" build.log && \
 	 grep -q "TEST stopping asks the ability to leave.*PASS" build.log && \
 	 grep -q "TEST stopping what is not running is refused.*PASS" build.log && \
 	 grep -q "TEST a program's storage is private.*PASS" build.log && \

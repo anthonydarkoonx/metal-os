@@ -1,0 +1,8 @@
+id = probespawn
+name = Probe (spawn, files)
+version = 1.0.0
+heap_pages = 48
+permission = files
+permission = spawn
+spawn_pages = 64
+ability = main service bin/probe

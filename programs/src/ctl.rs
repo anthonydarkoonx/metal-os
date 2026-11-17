@@ -52,13 +52,14 @@ const OP_POLICY_GET: u64 = 13;
 const OP_POLICY_SET: u64 = 14;
 
 /// The permissions in the manager's bit order (docs/PROGRAMS.md, "Permission policy"): bit, short name, what it lets a program do.
-pub const PERMISSIONS: [(u8, &str, &str); 6] = [
+pub const PERMISSIONS: [(u8, &str, &str); 7] = [
     (1, "Files", "Its own folder on the data disk"),
     (2, "Network", "Connect to other computers"),
     (4, "Windows", "Open windows on the console"),
     (8, "Shell", "Taskbar, launcher and system controls"),
     (16, "All files", "Every file on the disk"),
     (32, "Admin", "Take rights away from other programs"),
+    (64, "Start programs", "Run other programs (a terminal)"),
 ];
 
 /// What a program may do: what its signed manifest declares (the most it can ever get) and what the user has taken away (stored, from the next
@@ -80,11 +81,11 @@ impl Policy {
 pub fn policy(id: &str) -> Option<Policy> {
     let (a, b) = pack(id);
     let r = ask([OP_POLICY_GET, a, b])?;
-    Some(Policy { declared: (r[1] >> 8) as u8 & 0x3F, off: r[1] as u8 & 0x3F, running: r[2] != u64::MAX })
+    Some(Policy { declared: (r[1] >> 8) as u8 & 0x7F, off: r[1] as u8 & 0x7F, running: r[2] != u64::MAX })
 }
 
 /// Store which permissions are taken away from a program (bits as in [`PERMISSIONS`]). Returns whether the manager accepted it.
 pub fn set_policy(id: &str, off: u8) -> bool {
     let (a, b) = pack(id);
-    ask([OP_POLICY_SET | ((off as u64 & 0x3F) << 16), a, b]).is_some()
+    ask([OP_POLICY_SET | ((off as u64 & 0x7F) << 16), a, b]).is_some()
 }

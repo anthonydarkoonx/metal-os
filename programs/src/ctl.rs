@@ -55,7 +55,7 @@ const OP_POLICY_SET: u64 = 14;
 pub const PERMISSIONS: [(u8, &str, &str); 6] = [
     (1, "Files", "Its own folder on the data disk"),
     (2, "Network", "Connect to other computers"),
-    (4, "Windows", "Open windows on the desktop"),
+    (4, "Windows", "Open windows on the console"),
     (8, "Shell", "Taskbar, launcher and system controls"),
     (16, "All files", "Every file on the disk"),
     (32, "Admin", "Take rights away from other programs"),

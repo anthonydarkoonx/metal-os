@@ -51,7 +51,7 @@ fn present(fb: *mut u32, term: &[u32], ox: usize, oy: usize) -> bool {
 
 pub fn run(facts: crate::info::Facts, ctl: u64) -> ! {
     if mem_map(2, FB_VA, true) != 0 {
-        println!("[desktop] cannot map the framebuffer");
+        println!("[console] cannot map the framebuffer");
         exit(1)
     }
     let fb = va(FB_VA) as *mut u32;
@@ -65,7 +65,7 @@ pub fn run(facts: crate::info::Facts, ctl: u64) -> ! {
     let mut shell = unsafe { Terminal::new(term_buf.as_mut_ptr(), facts, Host { keys: take_keys, idle: || sleep(1) }) };
     shell.progmgr = (ctl != 0).then_some(ctl);
     shell.start();
-    println!("[desktop] up: terminal only, no windowing system");
+    println!("[console] up: terminal only, no windowing system");
     let mut last_active = 0u64;
     loop {
         let shown = present(fb, term_buf, ox, oy);

@@ -49,8 +49,8 @@ pub enum Phase {
     Storage,
     /// The device drivers.
     Drivers,
-    /// The desktop.
-    Desktop,
+    /// The console (the screen task).
+    Console,
     /// The network driver and `netd`, last, so that the tasks before keep their ids.
     Network,
 }
@@ -153,7 +153,7 @@ pub static DRIVERS: [Driver; 6] = [
         dma: &[OBJ_GPU_QUEUE, OBJ_GPU_CMD, OBJ_GPU_FB],
         tasks: &[
         task(12, "gpu-driver", SchedClass::Interactive, true, 1, Phase::Drivers, None),
-        task(13, "desktop", SchedClass::Interactive, true, 1, Phase::Desktop, None), // (the VFS server finds it by its role)
+        task(13, "console", SchedClass::Interactive, true, 1, Phase::Console, None), // (the VFS server finds it by its role)
     ],
         missing_note: Some("[dev] no virtio-gpu device found"),
     },

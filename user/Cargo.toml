@@ -20,7 +20,7 @@ metal-driver-rt = { path = "../libs/metal-driver-rt" }
 [profile.release]
 panic = "abort"
 # the kernel gives every boot task a private copy of this image: small matters (about 26 copies). The drawing crates, where the
-# desktop spends its time, are optimised for speed instead.
+# console spends its time, are optimised for speed instead.
 opt-level = "s"
 lto = true
 codegen-units = 1

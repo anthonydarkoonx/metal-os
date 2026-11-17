@@ -221,8 +221,8 @@ pub const HAS_SMMU: bool = true;
 /// The compressed swap store: bytes of pool, and entries (a platform with memory to spare gives a bigger one; the memory daemon reads it from SYSINFO page 17).
 pub const SWAP_POOL_BYTES: usize = 2 * 1024 * 1024;
 pub const SWAP_SLOTS: usize = 2048;
-/// The most memory the desktop task may hold (pages).
-pub const DESKTOP_HEAP_PAGES: usize = 16000;
+/// The most memory the console task may hold (pages).
+pub const CONSOLE_HEAP_PAGES: usize = 16000;
 
 /// The device windows of the kernel's page tables (the first-level table, 1 GiB entries).
 pub fn map_devices(l1: &mut [u64; 512]) {

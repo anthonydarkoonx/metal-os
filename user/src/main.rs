@@ -27,7 +27,7 @@ mod audiod;
 mod bench;
 mod chaos;
 mod console;
-mod desktop;
+mod screen;
 mod font;
 mod httpc;
 mod blk;
@@ -81,9 +81,9 @@ fn client() -> ! {
     if sysinfo(2)[2] != 0 {
         chaos::run(); // chaos-test mode (make chaos): a different job for the conductor
     }
-    // an interactive session (make run-window): no tests, straight to the desktop
+    // an interactive session (make run-window): no tests, straight to the console
     if sysinfo(2)[1] != 0 && sysinfo(2)[3] == 0 {
-        programs::desktop();
+        programs::console_session();
     }
     // development shortcuts (make quick-bench / quick-sched): just one group of tests
     match sysinfo(2)[3] {
@@ -379,7 +379,7 @@ fn driver() -> ! {
 // role 3: CPU hog, never yields -> proves timer preemption
 // ---------------------------------------------------------------------------
 fn worker() -> ! {
-    // (a desktop session has no tests to prove preemption for: the hog would keep one core at 100% for minutes)
+    // (a console session has no tests to prove preemption for: the hog would keep one core at 100% for minutes)
     if sysinfo(2)[1] != 0 {
         loop {
             sleep(60000);

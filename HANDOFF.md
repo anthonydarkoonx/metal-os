@@ -6,14 +6,13 @@ Metal OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C board po
 metal-theme metal-font metal-prefs metal-files`, the `shell` (taskbar / Start menu) program, `docs/GUI-SPEC.md`, the icon code and the GUI test images. Earlier
 GUI generations (retro blue, flat pastel, SerenityOS-style classic) and the programs that went with them (browser, editor, Control Panel, Files, Task Manager,
 Paint, dialogs, desktop icons) are gone too; none of it is in the tree or in git history (the repository was first committed on 2026-11-16, after the removal).
-**What the screen shows now:** `user/src/desktop.rs` is a stub: a backdrop with the terminal (`user/src/shell.rs`, `console.rs`, drawn with the bitmap font in
+**What the screen shows now:** `user/src/screen.rs` is a stub: a backdrop with the terminal (`user/src/shell.rs`, `console.rs`, drawn with the bitmap font in
 `libs/metal-gfx`) centred on it, keyboard input only. `make run-window` boots to it (checked by screenshot on QEMU, 2026-11-16; the test suites were not run after the removal).
 **Kept:** kernel, drivers (`gpu.rs`, `kbd.rs`, `blk.rs`, `netdrv.rs`, board overlay), `metal-gfx` (only for the terminal's font and a few drawing calls), `metal-input`,
 `metal-edit` (terminal editor), `metal-map`, `metal-ed25519`, the storage, net and compression libs, the program manager and the terminal.
-**Leftover wiring (harmless, can go with a future GUI decision):** the display endpoint that `progmgr` still hands to programs with the `window` permission
-(`docs/PROGRAMS.md`), `INFO_DESKTOP` naming in `user/src/info.rs`, `user/src/programs.rs::desktop()`.
-**Next:** the user decides whether and how a new GUI is started; nothing is planned. Memory-safety review is open: clippy is clean of correctness lints, `unsafe` is
-concentrated in `kernel`, `user`, `programs` and `metal-driver-rt` (few `SAFETY` comments), and Miri has not been run (it is installed: `cargo miri test -p metal-lz4` etc.).
+**Naming (2026-11-17):** the screen task, once "the desktop", is now the **console** (role 13, task name `console`, `kernel/src/devices.rs` `Phase::Console`, `CONSOLE_HEAP_PAGES`, `user/src/screen.rs`, `INFO_CONSOLE`, `programs::console_session()`). The role number 13 and the board's `DESK_*` display constants keep their numbers.
+**Leftover wiring (harmless, can go with a future GUI decision):** the display endpoint that `progmgr` still hands to programs with the `window` permission (`docs/PROGRAMS.md`, `metal-map`'s permission list).
+**Memory safety (2026-11-17):** see `docs/BOARD-SYNC.md` and the git log. Miri passed on the libs' completed tests; the long-running ones (`random_images_never_break_the_invariants`, three `metal-map` fuzz tests, `rfc8032_vectors`) have no verdict yet. Every `unsafe` site has a SAFETY comment; the kernel's lock-free globals are borrow-checked at run time (`kernel/src/sync.rs`); the board runs the new kernel (self-test 88/13/1, same as before).
 **Repository:** https://github.com/anthonydarkoonx/metal-os (private; disk images, `rock 3c test/third_party/` and build output are not in it).
 **Rules from the user:** OS changes only in the general tree, the board folder holds drivers only (`docs/BOARD-SYNC.md` logs every change); say "program", not "app";
 do not add programs nobody asked for; run only fast host tests unless asked.
@@ -28,7 +27,7 @@ The kernel has a *frame* (`kernel/src/frame.rs`: `phys` = bounds-checked physica
 
 ## Programs (phases 1 and 2), see docs/PROGRAMS.md
 - `.map` packages (`libs/metal-map`, `tools/mkmap.py`), the program manager `progmgr` (an ordinary `programs` program, no kernel part), the ability lifecycle (`programs/src/ability.rs`), supervision and restart, rights from the manifest, Ed25519-signed packages with a trust store and policy in `/system/etc` (`libs/metal-ed25519`), and per-program private storage (VFS `SCOPE`, kernel reports a program's parent in SYSINFO page 5, `metal_loader::spawn_with`).
-- `make run-window` skips the tests, starts the manager and gives the screen task to the terminal (`user/src/desktop.rs`, terminal only). Terminal commands: `prog list|available|install|start|stop|fg|bg|state|info|uninstall`.
+- `make run-window` skips the tests, starts the manager and gives the screen task to the terminal (`user/src/screen.rs`, terminal only). Terminal commands: `prog list|available|install|start|stop|fg|bg|state|info|uninstall`.
 - Tests: the scenario in `programs/src/bin/progctl.rs` (run last by `user/src/programs.rs`, deliberately *after* the leak checks: reading packages raises the services' heap high-water marks and ate into the 300-programs check's 64-frame slack), `cargo test -p metal-map -p metal-ed25519`, `make map-check`. Full `make test` passed on 2026-11-12 after the last change.
 - `make test` runs its suites on ONE disk image, so `/data` carries over between them: the scenario cleans up before and after itself.
 - Test signing keys are public (`tools/keys/`). Not done: manager restart, service registry, measured boot of the image.

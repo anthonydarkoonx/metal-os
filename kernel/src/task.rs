@@ -40,8 +40,8 @@ pub const MAX_HEAP_PAGES: usize = 512;
 /// The storage servers (roles 6 and 7: the log-structured store and the file layer) stage a whole write in memory before it is committed, so the
 /// largest file that can be installed is about what their heap holds: 2048 pages (8 MiB) takes a 2.6 MB package (512 pages took 1.3 MB).
 pub const STORAGE_HEAP_PAGES: usize = 2048;
-/// The desktop (role 13): its own heap and the window surfaces of its clients (about 47 MiB in all: the wallpaper and its frosted copy, the shade snapshot, caches, and up to four 3 MiB fullscreen surfaces; a cap, not a reservation).
-pub const DESKTOP_HEAP_PAGES: usize = crate::platform::DESKTOP_HEAP_PAGES;
+/// The console (role 13): its own heap and the window surfaces of its clients (about 47 MiB in all: the wallpaper and its frosted copy, the shade snapshot, caches, and up to four 3 MiB fullscreen surfaces; a cap, not a reservation).
+pub const CONSOLE_HEAP_PAGES: usize = crate::platform::CONSOLE_HEAP_PAGES;
 /// Where this program's stack starts: a random page-aligned top with `STACK_PAGES` pages below it, an unmapped page
 /// below those and an unmapped page at the top and above.
 pub fn random_stack_top() -> usize {
@@ -321,7 +321,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
                 install(t, tid, 26, Kind::Spawn, 0, R_SPAWN | R_SPAWN_FS | R_SPAWN_NET | R_GRANT);
                 install(t, tid, 12, Kind::Factory, 0, R_EP_CREATE | R_GRANT);
                 install(t, tid, 27, Kind::Endpoint, ipc::EP_DRIVER, R_SEND | R_GRANT);
-                install(t, tid, 28, Kind::Admin, 0, R_REVOKE | R_GRANT | R_POWER); // (the desktop session hands a copy to the program manager for the task manager, and one with only `R_POWER` to the desktop)
+                install(t, tid, 28, Kind::Admin, 0, R_REVOKE | R_GRANT | R_POWER); // (the console session hands a copy to the program manager for the task manager, and one with only `R_POWER` to the console)
             }
             if crate::platform::chaos_seed() != 0 {
                 // chaos mode: the conductor drives a workload against every service and starts the monkey
@@ -387,7 +387,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
             install(t, tid, 5, Kind::Endpoint, ipc::EP_VFS, R_SEND);
             install(t, tid, 6, Kind::Memory, obj::OBJ_SHM_VFS_SHELL, R_MAP | R_WRITE);
             // the shell starts programs, with file access and a standard-output endpoint it creates itself
-            install(t, tid, 8, Kind::Spawn, 0, R_SPAWN | R_SPAWN_FS | R_SPAWN_NET | R_GRANT); // (grant: the desktop hands them on to the programs that start programs)
+            install(t, tid, 8, Kind::Spawn, 0, R_SPAWN | R_SPAWN_FS | R_SPAWN_NET | R_GRANT); // (grant: the console hands them on to the programs that start programs)
             install(t, tid, 9, Kind::Factory, 0, R_EP_CREATE | R_GRANT);
             if obj::net_present() {
                 // the shell's own network session (`download`, `play URL`): endpoint in slot 12, session page in slot 13
@@ -548,8 +548,8 @@ pub fn spawn(role: u8, name: &'static str, class: Class, restartable: bool) -> u
         pinned: NOT_PINNED,
         heap_quota: match role {
             0 => CONDUCTOR_HEAP_PAGES,
-            // the desktop holds its clients' window surfaces (shared memory it creates, charged to it) as well as its own heap
-            13 => DESKTOP_HEAP_PAGES,
+            // the console holds its clients' window surfaces (shared memory it creates, charged to it) as well as its own heap
+            13 => CONSOLE_HEAP_PAGES,
             6 | 7 => STORAGE_HEAP_PAGES,
             _ => MAX_HEAP_PAGES,
         },

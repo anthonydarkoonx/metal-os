@@ -77,9 +77,9 @@ pub enum Permission {
     /// Reads and writes the program's own private directory (every program has that) *and* the shared file system.
     Files,
     Network,
-    /// May create windows on the desktop (gets a send capability to the display endpoint).
+    /// May create windows on the console (gets a send capability to the display endpoint).
     Display,
-    /// A shell client: may take the panel and desktop roles, list and raise other programs' windows, and talk to the program manager
+    /// A shell client: may take the panel and console roles, list and raise other programs' windows, and talk to the program manager
     /// (the taskbar and the Start menu). Implies `display`.
     Shell,
     /// May see the whole file system, not just its own directory (a file manager). The widest file permission: the program is trusted like the terminal.

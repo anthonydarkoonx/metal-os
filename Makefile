@@ -5,7 +5,7 @@ KERNEL   := kernel/target/$(TARGET)/release/metal-kernel
 # QEMU loads the kernel as an ELF file (entry point and load address come from the ELF headers).
 KERNEL_BIN := $(KERNEL)
 DISK     ?= disk.img
-# the interactive desktop runs with more memory: every fullscreen program has a 3 MiB surface
+# the interactive console runs with more memory: every fullscreen program has a 3 MiB surface
 UI_RAM_MIB ?= 128
 SMP ?= 4
 RAM_MIB ?= 64
@@ -414,7 +414,7 @@ clean:
 # -no-shutdown keeps the window open after the kernel powers off.
 # an interactive run keeps the data partition of the last one (saved colours and settings, installed programs)
 run-window: export KEEP_DATA = 1
-# (the interactive desktop gets a roomy data partition: a sparse file, the guest uses all of it; the test suites keep the small default)
+# (the interactive console gets a roomy data partition: a sparse file, the guest uses all of it; the test suites keep the small default)
 run-window: export DATA_MIB ?= 1024
 run-window: user disk
 	cd kernel && cargo build --release --features park-on-exit --target-dir target-window

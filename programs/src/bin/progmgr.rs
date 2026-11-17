@@ -48,7 +48,7 @@ const E_BADSIG: u64 = 9; // INSTALL: the signature does not match the package
 const E_NOSLOT: u64 = 7; // all 16 board entries are in use
 
 const CTL: Endpoint = Endpoint(0);
-/// The display endpoint (the desktop's), if the manager was given one: abilities with `permission = display` get a send-only copy.
+/// The display endpoint (the console's), if the manager was given one: abilities with `permission = display` get a send-only copy.
 const DISPLAY: Endpoint = Endpoint(3);
 /// An ability's slot for it.
 const DISPLAY_SLOT: u8 = 2;
@@ -58,7 +58,7 @@ const SHELL_CTL_SLOT: u8 = 3;
 const ADMIN_SLOT: u8 = 7;
 const ADMIN_PROGRAM_SLOT: u8 = 4;
 const R_REVOKE: u16 = 1 << 10;
-// (the manager used to tell the desktop about programs coming and going; the new display protocol will bring that back)
+// (the manager used to tell the console about programs coming and going; the new display protocol will bring that back)
 const FACTORY: u64 = 5;
 const SPAWN: u64 = 6;
 /// Ticks (10 ms) an ability has to leave after on_destroy was requested.
@@ -331,7 +331,7 @@ impl Mgr {
             cmd.give(CTL.0 as u8, SHELL_CTL_SLOT, 1 /* send */);
         }
         if admin {
-            // the revoke authority (the desktop session gave the manager a copy, in slot 7): the task manager's slot 4, without the right to pass it on
+            // the revoke authority (the console session gave the manager a copy, in slot 7): the task manager's slot 4, without the right to pass it on
             cmd.give(ADMIN_SLOT, ADMIN_PROGRAM_SLOT, R_REVOKE);
         }
         match cmd.spawn() {
@@ -411,7 +411,7 @@ impl Mgr {
             return E_STATE;
         }
         if self.insts[ix].state == to {
-            return OK; // (nothing changes: and the desktop must not hear an echo of what it just asked for)
+            return OK; // (nothing changes: and the console must not hear an echo of what it just asked for)
         }
         self.insts[ix].state = to;
         self.set_state(self.insts[ix].entry, to);

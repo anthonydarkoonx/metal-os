@@ -87,7 +87,7 @@ const VA_PROG0: usize = 0x8029_0000;
 const PROG_SESSIONS: usize = 8;
 static SHELL_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(20);
 
-/// The desktop's task id (the one task of role 13; 20 on the QEMU machine, earlier where there is no display or keyboard
+/// The console's task id (the one task of role 13; 20 on the QEMU machine, earlier where there is no display or keyboard
 /// driver before it): looked up when the server starts.
 fn find_shell() {
     for t in 0..64u64 {

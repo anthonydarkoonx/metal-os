@@ -193,7 +193,7 @@ extern "C" fn kmain() -> ! {
     task::spawn(3, "worker", Class::Heavy, false);
     devices::spawn_tasks(devices::Phase::Storage);
     devices::spawn_tasks(devices::Phase::Drivers);
-    devices::spawn_tasks(devices::Phase::Desktop);
+    devices::spawn_tasks(devices::Phase::Console);
     if obj::gpu_present() {
         if platform::chaos_seed() != 0 {
             task::spawn(15, "monkey", Class::Background, false);

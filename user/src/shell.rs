@@ -48,7 +48,7 @@ keys:   Tab completes, Up/Down history, Ctrl-L clears,
         Ctrl-C cancels the line
 ";
 
-/// What the shell needs from whatever hosts it (the desktop): the characters typed since it last asked, and a chance to run
+/// What the shell needs from whatever hosts it (the console): the characters typed since it last asked, and a chance to run
 /// (draw frames, move the pointer) while the shell waits for a program it started.
 pub struct Host {
     pub keys: fn() -> Vec<u8>,
@@ -215,7 +215,7 @@ impl Shell {
         }
     }
 
-    /// (The desktop's status bar shows uptime and memory now.)
+    /// (The console's status bar shows uptime and memory now.)
     fn update_status(&mut self) {}
 
     fn prompt(&mut self) {
@@ -1029,7 +1029,7 @@ impl Shell {
                 self.con.print(&text);
             }
             self.con.flush();
-            (self.host.idle)(); // (the desktop draws a frame and sleeps a tick)
+            (self.host.idle)(); // (the console draws a frame and sleeps a tick)
         };
         let mut text = String::from_utf8_lossy(&out[if tty { shown } else { 0 }..]).into_owned();
         let note = match code {
@@ -1064,7 +1064,7 @@ impl Shell {
         op(&self.vfs, &p).map(|_| String::new()).map_err(|e| format!("{name}: {p}: {}", errno(e)))
     }
 
-    /// One typed character (the desktop delivers what the keyboard produced while this window had the focus).
+    /// One typed character (the console delivers what the keyboard produced while this window had the focus).
     pub fn typed(&mut self, b: u8) {
         self.key(b);
         self.con.flush();

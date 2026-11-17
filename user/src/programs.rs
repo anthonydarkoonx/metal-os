@@ -328,7 +328,7 @@ fn pager_tests(v: &Vfs, pager: &[u8], victim: &[u8]) {
 
 /// An interactive session: the conductor has no tests to run. It starts the program manager, hands the screen task (the shell) a
 /// capability to send to the manager's control endpoint, and then has nothing left to do.
-pub fn desktop() -> ! {
+pub fn console_session() -> ! {
     sleep(30); // (the file-system services are still starting)
     let _ = mem_map(10, 0x8034_0000, true);
     let v = Vfs::new(9, 0x8034_0000);
@@ -338,7 +338,7 @@ pub fn desktop() -> ! {
     let desk = (0..64u64).find(|&t| { let r = sysinfo_at(3, t); r[0] as i64 == 0 && r[3] != 0 && r[5] == 13 });
     if !progmgr.is_empty() {
         let ctl = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64; // the manager's control endpoint
-        let disp = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64; // the display endpoint the desktop serves and programs call
+        let disp = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64; // the display endpoint the console serves and programs call
         // the manager: control endpoint (receive + send) as slot 0, the display endpoint (send, and the right to hand a send-only
         // copy to the programs that ask for a display) as slot 3, the endpoint factory and the spawn capability as 5 and 6, file access,
         // and a budget of pages for the programs it starts
@@ -354,17 +354,17 @@ pub fn desktop() -> ! {
             if let Some(d) = desk {
                 ctl_slot = svc(5, ctl as u64, d, 0b101, 0, 0)[0] as i64; // CAP_GRANT: send, and the right to give a copy to the programs it starts
                 if disp >= 0 {
-                    disp_slot = svc(5, disp as u64, d, 0b011, 0, 0)[0] as i64; // the desktop receives on it (and may send)
+                    disp_slot = svc(5, disp as u64, d, 0b011, 0, 0)[0] as i64; // the console receives on it (and may send)
                 }
                 power_slot = svc(5, ADMIN_SLOT, d, 0x800, 0, 0)[0] as i64; // the right to switch the machine off or restart it (`R_POWER`), and nothing else of the admin capability
             }
         }
-        println!("[client] interactive session: program manager task {mgr}, control endpoint in the desktop's slot {ctl_slot}, display endpoint in {disp_slot}");
-        // (the programs that come with the desktop - dock, launcher, files, task manager - return with the new GUI)
+        println!("[client] interactive session: program manager task {mgr}, control endpoint in the console's slot {ctl_slot}, display endpoint in {disp_slot}");
+        // (the programs that come with the console - dock, launcher, files, task manager - return with the new GUI)
     }
     let w2 = (disp_slot.max(0) as u64 & 0xFF) | (mgr.max(0) as u64) << 8 | (power_slot.max(0) as u64 & 0xFF) << 16;
-    let (st, _) = call(23, [crate::info::INFO_DESKTOP, ctl_slot.max(0) as u64, w2]);
-    println!("[client] interactive session: the desktop has the screen (status {st})");
+    let (st, _) = call(23, [crate::info::INFO_CONSOLE, ctl_slot.max(0) as u64, w2]);
+    println!("[client] interactive session: the console has the screen (status {st})");
     // the second memory tier: the pager writes the coldest pages of the compressed store to a swap file on the data disk (bounded: kernel/src/pager.rs
     // lets at most WRITE_CAP_PER_HOUR pages an hour reach the flash), and reads them back when a program touches one
     let pager = v.read_file("/system/bin/pager").unwrap_or_default();

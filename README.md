@@ -469,7 +469,7 @@ A line is `cmd args | cmd args ... [> file | >> file]`, words may be quoted, and
 text, not regular expressions). `>` / `>>` write files on `/data` (`/system` is read-only and says so).
 `ps` lists the kernel's task table (state, restarts). Keys: **Tab** completes command names, files and
 directories (and lists the choices when there are several), Up/Down history, Backspace, Ctrl-L clears,
-Ctrl-C cancels. `make run-window` opens a QEMU window with the terminal centred on a plain backdrop (`user/src/desktop.rs`); click into the window to give it the keyboard
+Ctrl-C cancels. `make run-window` opens a QEMU window with the terminal centred on a plain backdrop (`user/src/screen.rs`); click into the window to give it the keyboard
 (Ctrl-Alt-G releases it). That session skips the tests and starts the program manager. Output is upper/lower case as typed; there is no mouse support.
 
 *How it is tested.* The display driver's test card, and its restart after the IOMMU kills it, are checked from the guest's log by `make qemu-test` and `make qemu-test-noncoherent`. The screen itself is no longer read back from outside (the QMP screenshot harness went with the desktop).

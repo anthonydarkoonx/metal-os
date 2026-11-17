@@ -1,7 +1,7 @@
-//! A text console in a window: a scrolling character grid drawn into a pixel buffer the desktop shows as the terminal window.
+//! A text console in a window: a scrolling character grid drawn into a pixel buffer the console shows as the terminal window.
 //!
 //! Characters are drawn in IBM Plex Mono (14 px) on a black ground, light grey text (the classic terminal look) (8 x 19 pixel cells, 80 columns by 28 rows).
-//! Drawing only touches the buffer; `take_dirty` says which rows changed since it was last asked, so the desktop repaints just those.
+//! Drawing only touches the buffer; `take_dirty` says which rows changed since it was last asked, so the console repaints just those.
 use crate::{font, *};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering::Relaxed};
@@ -32,7 +32,7 @@ pub fn retheme(buf: *mut u32, new: [u32; 5]) {
     if old == new {
         return;
     }
-    // SAFETY: `buf` is the terminal's pixel buffer of `WIDTH * HEIGHT` words, alive for the life of the desktop.
+    // SAFETY: `buf` is the terminal's pixel buffer of `WIDTH * HEIGHT` words, alive for the life of the console.
     let px = unsafe { core::slice::from_raw_parts_mut(buf, WIDTH * HEIGHT) };
     for p in px.iter_mut() {
         if let Some(i) = old.iter().position(|&o| o == *p) {
@@ -70,7 +70,7 @@ pub struct Console {
     cursor_shown: bool,
 }
 
-/// The rows of the buffer that changed since `take_dirty` was last called (`NONE` = none). Statics, because the desktop reads them
+/// The rows of the buffer that changed since `take_dirty` was last called (`NONE` = none). Statics, because the console reads them
 /// while the shell, which owns the console, is busy waiting for a program.
 static DIRTY_Y0: AtomicUsize = AtomicUsize::new(NONE);
 static DIRTY_Y1: AtomicUsize = AtomicUsize::new(0);
@@ -237,7 +237,7 @@ impl Console {
         self.cy = row.min(ROWS - 1);
     }
 
-    /// Show the cursor. (Nothing is presented here: the desktop asks `take_dirty` and repaints.)
+    /// Show the cursor. (Nothing is presented here: the console asks `take_dirty` and repaints.)
     pub fn flush(&mut self) {
         self.cursor(true);
     }

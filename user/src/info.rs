@@ -1,18 +1,18 @@
 //! The screen task (role 13). It owns the framebuffer mapping and the display driver's client
 //! endpoint. First it can draw the colour-bar test card for the display tests (`INFO_CARD`); when
-//! the conductor says `INFO_START` it has nothing more to draw; an interactive session says `INFO_DESKTOP` and the screen becomes the desktop (`desktop.rs`).
+//! the conductor says `INFO_START` it has nothing more to draw; an interactive session says `INFO_CONSOLE` and the screen becomes the console (`console.rs`).
 use crate::gpu::{H, W};
 use crate::proto::gpu::{GPU_FLUSH, GPU_INFO};
 use crate::*;
 use alloc::format;
 use alloc::string::String;
 
-/// The test conductor is done with the display tests: the screen task has nothing more to draw. (It only answers: the desktop is
+/// The test conductor is done with the display tests: the screen task has nothing more to draw. (It only answers: the console is
 /// not started, so the rest of the test suite runs on a quiet system.)
 pub const INFO_START: u64 = 40;
-/// An interactive session (`make run-window`): the screen task becomes the desktop. w1: my slot for the program manager's control
+/// An interactive session (`make run-window`): the screen task becomes the console. w1: my slot for the program manager's control
 /// endpoint (0: none), w2: my slot for the display endpoint | the manager's task id << 8.
-pub const INFO_DESKTOP: u64 = 42;
+pub const INFO_CONSOLE: u64 = 42;
 /// Draw the colour-bar test card and present it.
 pub const INFO_CARD: u64 = 41;
 
@@ -89,9 +89,9 @@ pub fn info_task() -> ! {
             INFO_START => {
                 reply([0, 0, 0]);
             }
-            INFO_DESKTOP => {
+            INFO_CONSOLE => {
                 reply([0, 0, 0]);
-                crate::desktop::run(gather(), m.w[1])
+                crate::screen::run(gather(), m.w[1])
             }
             _ => {
                 reply([1, 0, 0]);

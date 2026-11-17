@@ -1,5 +1,5 @@
 //! The protocols between drivers and their clients: request numbers, reply layouts and the constants a client needs to talk to a driver. A driver and its
-//! clients (the desktop, the shell, `netd`) both depend on this, so neither has to include the other. (Test-only requests are marked as such.)
+//! clients (the console, the shell, `netd`) both depend on this, so neither has to include the other. (Test-only requests are marked as such.)
 
 /// The block driver (role 4).
 pub mod blk {
@@ -67,7 +67,7 @@ pub mod input {
     pub const K_PGUP: u8 = 0x86;
     pub const K_PGDN: u8 = 0x87;
     pub const K_DELETE: u8 = 0x88;
-    /// Ctrl+Alt+Delete or Ctrl+Shift+Escape: the "attention" key; the desktop shows the task manager instead of passing it to a window.
+    /// Ctrl+Alt+Delete or Ctrl+Shift+Escape: the "attention" key; the console shows the task manager instead of passing it to a window.
     pub const K_ATTENTION: u8 = 0x90;
 }
 

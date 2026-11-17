@@ -81,7 +81,7 @@ by its limit and given up on, rights (files, control endpoint, spawn), stop, uni
 
 ## Boot and the shell
 `make run-window` no longer runs the test suite first: the conductor starts the program manager, gives the screen task a send
-capability to its control endpoint, and the screen task shows the terminal (`user/src/desktop.rs`: terminal only, no windows). In the shell, `prog` runs `progctl` with that capability: `prog available` (the
+capability to its control endpoint, and the screen task shows the terminal (`user/src/screen.rs`: terminal only, no windows). In the shell, `prog` runs `progctl` with that capability: `prog available` (the
 packages of the system image), `prog install ID`, `prog start ID`, `prog list`, `prog state ID` (state, restarts, the two saved words:
 the counter program's first word is its tick count), `program fg ID`, `program bg ID`, `prog stop ID`, `prog info ID`, `prog uninstall ID`.
 `make qemu-test` still runs the whole suite and does not start the manager outside its own test.

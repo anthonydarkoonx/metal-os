@@ -39,18 +39,21 @@ static WEAK: AtomicU64 = AtomicU64::new(2);
 
 fn counter() -> u64 {
     let c: u64;
+    // SAFETY: reads CNTPCT_EL0, always readable at EL1; no memory is accessed.
     unsafe { asm!("mrs {}, cntpct_el0", out(reg) c, options(nomem, nostack)) };
     c
 }
 
 fn rndr() -> Option<u64> {
     let isar0: u64;
+    // SAFETY: reads ID_AA64ISAR0_EL1, a read-only feature register; no memory is accessed.
     unsafe { asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack)) };
     if isar0 >> 60 & 0xF == 0 {
         return None;
     }
     for _ in 0..4 {
         let (v, ok): (u64, u64);
+        // SAFETY: reached only when ISAR0.RNDR != 0 (checked above), so the RNDR register exists; no memory is accessed.
         unsafe { asm!("mrs {v}, s3_3_c2_c4_0", "cset {ok}, ne", v = out(reg) v, ok = out(reg) ok, options(nomem, nostack)) };
         if ok != 0 {
             return Some(v);
@@ -62,7 +65,9 @@ fn rndr() -> Option<u64> {
 /// Called from `boot.S` with the MMU off. The address to move the image to, or 0 to leave it where it is.
 #[no_mangle]
 extern "C" fn kaslr_place() -> usize {
+    // SAFETY: `__kernel_start` is a linker symbol; only its address is taken, it is never read.
     let start = unsafe { &__kernel_start as *const u8 as usize };
+    // SAFETY: `__kernel_end` is a linker symbol; only its address is taken, it is never read.
     let size = (unsafe { &__kernel_end as *const u8 as usize } - start + PAGE - 1) & !(PAGE - 1);
     let Some(ram) = crate::platform::ram_size().filter(|&s| (8 << 20..=1 << 30).contains(&s)) else {
         OUTCOME.store(NO_RAM_SIZE, Ordering::Relaxed);
@@ -110,7 +115,10 @@ pub struct Report {
 }
 
 pub fn report() -> Report {
+    // SAFETY: `kaslr_old_base` is a u64 defined in boot.S (.data, set before the copy); nothing writes it after boot, so the read is
+    // aligned, initialised and race-free.
     let old = unsafe { read_volatile(&kaslr_old_base) } as usize;
+    // SAFETY: both are linker symbols; only their addresses are taken, they are never read.
     let size = unsafe { &__kernel_end as *const u8 as usize - &__kernel_start as *const u8 as usize };
     Report { outcome: OUTCOME.load(Ordering::Relaxed), weak: WEAK.load(Ordering::Relaxed) == 1, old: (old != 0).then_some((old, size)) }
 }

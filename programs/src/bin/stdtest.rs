@@ -43,8 +43,10 @@ fn allocation() -> u64 {
     let big = vec![0xA5u8; 300_000];
     check!(1, 3, big.iter().all(|&b| b == 0xA5));
     let l = Layout::from_size_align(5000, 4096).unwrap();
+    // SAFETY: `l` has non-zero size (5000) and a valid power-of-two alignment (4096).
     let p = unsafe { alloc::alloc::alloc(l) };
     check!(1, 4, !p.is_null() && p as usize % 4096 == 0);
+    // SAFETY: `p` is non-null (`check!` above returned otherwise) and came from `alloc` with this same layout `l`, and is freed once.
     unsafe { alloc::alloc::dealloc(p, l) };
     let b: Box<dyn Fn(u32) -> u32> = Box::new(|x| x + 1);
     check!(1, 5, b(41) == 42);

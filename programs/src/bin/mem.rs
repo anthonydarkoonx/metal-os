@@ -12,10 +12,12 @@ program!("mem", |c| {
     }
     for p in 0..quota as usize {
         let page = (base as usize + p * 4096) as *mut u64;
+        // SAFETY: `base` is the start of `quota` pages just taken with `heap_grow` (checked > 0) and `p < quota`, so `page` is a mapped, writable, page-aligned address of ours.
         unsafe { page.write_volatile(0xA5A5_0000 + p as u64) };
     }
     for p in 0..quota as usize {
         let page = (base as usize + p * 4096) as *const u64;
+        // SAFETY: the same page as written above (`p < quota`), still ours and mapped.
         if unsafe { page.read_volatile() } != 0xA5A5_0000 + p as u64 {
             return 2;
         }

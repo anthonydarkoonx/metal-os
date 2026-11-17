@@ -50,6 +50,7 @@ impl Ring {
 
     pub fn len(&self) -> u32 {
         fence(Ordering::SeqCst);
+        // SAFETY: UNVERIFIED: `Ring` wraps a bare address, so this relies on the constructor convention (a mapped, 4-aligned ring page of >= 0x180 bytes in this task, which netd/netdrv map from their RING_VA window); not enforced by the type, and these methods are safe fns.
         unsafe { read_volatile(self.prod()).wrapping_sub(read_volatile(self.cons())).min(RING_ENTRIES as u32) }
     }
 
@@ -66,6 +67,7 @@ impl Ring {
         if self.is_full() {
             return false;
         }
+        // SAFETY: prod/cons/entry all lie inside the ring page `Ring` was built on (see `len`); entry index is reduced modulo RING_ENTRIES; volatile because the peer task writes the same shared memory.
         unsafe {
             let p = read_volatile(self.prod());
             write_volatile(self.entry(p), v);
@@ -82,6 +84,7 @@ impl Ring {
         }
         // the entry must not be read before the producer's index is seen (a control dependency does not order two loads on Arm)
         fence(Ordering::Acquire);
+        // SAFETY: as in `push`: the consumer index and the entry (index taken modulo RING_ENTRIES, so never outside the ring) are in the shared page; volatile because the peer writes them.
         unsafe {
             let c = read_volatile(self.cons());
             let v = read_volatile(self.entry(c));
@@ -93,6 +96,7 @@ impl Ring {
 
     /// Forget everything (the producer's side restarting).
     pub fn reset(&self) {
+        // SAFETY: same ring page as above; reset is called only by the side that owns the restart, before the peer relies on the indices.
         unsafe {
             write_volatile(self.prod(), 0);
             write_volatile(self.cons(), 0);
@@ -140,6 +144,7 @@ mod tests {
     fn a_hostile_producer_index_cannot_make_the_consumer_read_outside_the_ring() {
         let mem = page();
         let r = Ring(mem.as_ptr() as usize);
+        // SAFETY: test only: `mem` is a live, 8-aligned 4 KiB boxed array and `prod()` is its first word.
         unsafe { write_volatile(r.prod(), u32::MAX) }; // the peer claims four billion entries
         assert_eq!(r.len() as usize, RING_ENTRIES);
         let mut n = 0;

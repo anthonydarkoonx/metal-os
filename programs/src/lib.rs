@@ -55,6 +55,8 @@ pub const EXIT_KILLED: u64 = u64::MAX - 1;
 pub fn svc(id: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> [u64; 6] {
     let (mut r0, mut r1, mut r2, mut r3, mut r4, mut r5) = (id, a1, a2, a3, a4, a5);
     unsafe {
+        // SAFETY: `svc #0` enters the kernel, which per docs/ABI.md changes only x0-x5 (all declared `inout`) and nothing else; it uses no
+        // stack (`nostack`), and the default asm options keep it a memory barrier, so pointers handed over as integers stay covered.
         asm!("svc #0", inout("x0") r0, inout("x1") r1, inout("x2") r2, inout("x3") r3, inout("x4") r4, inout("x5") r5, options(nostack));
     }
     [r0, r1, r2, r3, r4, r5]
@@ -233,6 +235,8 @@ impl Ctx {
         if self.args_len == 0 {
             &[]
         } else {
+            // SAFETY: `Ctx::new`'s contract: `args_ptr..+args_len` is readable memory that stays mapped and unchanged for the whole run of the program;
+            // u8 needs no alignment and `args_len > 0` here.
             unsafe { core::slice::from_raw_parts(self.args_ptr as *const u8, self.args_len as usize) }
         }
     }

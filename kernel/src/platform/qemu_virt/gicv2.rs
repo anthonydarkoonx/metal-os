@@ -6,9 +6,11 @@ const GICD: usize = 0x0800_0000;
 const GICC: usize = 0x0801_0000;
 
 fn w32(addr: usize, v: u32) {
+    // SAFETY: every caller passes a GICD/GICC register (4-aligned) inside the device block `map_devices` maps; volatile MMIO write.
     unsafe { write_volatile(addr as *mut u32, v) };
 }
 fn w8(addr: usize, v: u8) {
+    // SAFETY: callers pass a byte-wide GICD priority/target register inside the mapped device block; volatile MMIO write.
     unsafe { write_volatile(addr as *mut u8, v) };
 }
 
@@ -27,6 +29,7 @@ impl IrqController for GicV2 {
 
     fn send_sgi_to(mask: u32, id: u32) {
         // Whatever the sender wrote for the target (the work it will look for) must be visible before the interrupt is.
+        // SAFETY: barrier only; orders the sender's earlier stores before the SGI write.
         unsafe { core::arch::asm!("dsb ishst", options(nostack)) };
         w32(GICD + 0xF00, (mask & 0xFF) << 16 | id); // GICD_SGIR, TargetListFilter = target list
     }
@@ -51,11 +54,13 @@ impl IrqController for GicV2 {
 
     fn set_edge(id: u32) {
         let reg = GICD + 0xC00 + 4 * (id as usize / 16);
+        // SAFETY: `reg` is a GICD_ICFGR word (4-aligned, 0xC00 + 4*(id/16)) in the mapped device block; volatile MMIO read.
         let v = unsafe { read_volatile(reg as *const u32) };
         w32(reg, v | 2 << (2 * (id % 16))); // GICD_ICFGR: two bits per interrupt, the upper one selects edge
     }
 
     fn ack() -> u32 {
+        // SAFETY: GICC_IAR (GICC+0xC), a 4-aligned register in the mapped device block; the read acknowledges the interrupt, by design.
         unsafe { read_volatile((GICC + 0x00C) as *const u32) }
     }
 

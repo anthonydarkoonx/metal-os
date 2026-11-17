@@ -22,6 +22,7 @@ impl Ability for Crasher {
         self.n += 1;
         save(self.n, if self.restored { 2 } else { 1 });
         if !self.restored && self.n == 10 {
+            // SAFETY: deliberately not sound: address 0x10 is never mapped for a program, so this write must fault and make the manager restart the program; that is the test.
             unsafe { core::ptr::write_volatile(0x10 as *mut u64, 1) };
         }
     }

@@ -22,6 +22,7 @@ static ONLINE: AtomicU32 = AtomicU32::new(1);
 /// read, while `mpidr_el1` is a call into the emulator, and this is asked on every scheduling step.
 pub fn cpu_id() -> usize {
     let m: u64;
+    // SAFETY: reads TPIDR_EL1, which boot code set to this core's number; no memory is accessed.
     unsafe { asm!("mrs {}, tpidr_el1", out(reg) m, options(nomem, nostack)) };
     m as usize
 }
@@ -50,6 +51,8 @@ pub fn idle() {
         IDLE_MASK.fetch_and(!me, Ordering::SeqCst);
         return;
     }
+    // SAFETY: WFI then a momentary IRQ unmask/mask; no lock or kernel borrow is held (see the doc), so a taken interrupt handler cannot
+    // re-enter held state. DAIF I is masked again before returning.
     unsafe {
         // wfi wakes on a *pending* interrupt even while masked, so an IPI sent just before
         // this point cannot be lost. Then unmask just long enough to take it.
@@ -107,6 +110,7 @@ pub fn start_secondaries() -> usize {
 /// Entry for each secondary core, called from boot.S with the MMU off.
 #[no_mangle]
 extern "C" fn secondary_main(core: usize) -> ! {
+    // SAFETY: writes TPIDR_EL1 with this core's number, once at bring-up; only `cpu_id` reads it; no memory is accessed.
     unsafe { asm!("msr tpidr_el1, {}", in(reg) core as u64, options(nomem, nostack)) };
     mmu::enable_this_cpu();
     timer::init_core();
@@ -119,6 +123,8 @@ extern "C" fn secondary_main(core: usize) -> ! {
     let mut tf = BOOT_FRAMES.write(core); // (never released: this core leaves the kernel for good through `enter_user`)
     sched::dispatch(&mut tf, true);
     kick_idle();
+    // SAFETY: `tf` points to this core's BOOT_FRAMES slot, just filled by `dispatch`; the guard is never released, so the frame stays
+    // valid and unaliased while `enter_user` restores it and erets (it never returns).
     unsafe { enter_user(&*tf) }
 }
 
@@ -128,5 +134,6 @@ pub fn boot_core_enter() -> ! {
     sched::set_current(0, usize::MAX);
     sched::dispatch(&mut tf, true);
     kick_idle();
+    // SAFETY: as in `secondary_main`: `tf` is core 0's BOOT_FRAMES slot, filled by `dispatch`, and held for good.
     unsafe { enter_user(&*tf) }
 }

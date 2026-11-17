@@ -72,6 +72,7 @@ pub fn run<A: Ability>(mut a: A, entry: u64) -> u64 {
     // SAFETY: the board is one mapped page and `entry` is below ENTRIES; the words are only read here.
     let word = |o: usize| unsafe { &*(e.add(o) as *const AtomicU32) };
     let (state, seq) = (word(O_STATE), word(O_SEQ));
+    // SAFETY: as above: O_SAVED0/O_SAVED1 (8 and 16) are 8-aligned offsets inside this 32-byte entry of the mapped page, read-only here; progmgr wrote them before releasing O_RESTORED, which was just Acquire-loaded.
     let restored = (word(O_RESTORED).load(Ordering::Acquire) != 0).then(|| unsafe { (*(e.add(O_SAVED0) as *const u64), *(e.add(O_SAVED1) as *const u64)) });
     a.on_create(restored);
     let mut shown = 0u32;

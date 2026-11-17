@@ -22,12 +22,14 @@ impl TrapFrame {
 
 fn esr() -> u64 {
     let v: u64;
+    // SAFETY: reads ESR_EL1, always readable at EL1; no memory is accessed.
     unsafe { asm!("mrs {}, esr_el1", out(reg) v) };
     v
 }
 
 fn far() -> u64 {
     let v: u64;
+    // SAFETY: reads FAR_EL1, always readable at EL1; no memory is accessed.
     unsafe { asm!("mrs {}, far_el1", out(reg) v) };
     v
 }

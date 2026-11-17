@@ -59,6 +59,8 @@ fn zram_selftest() {
 
 fn zram_check(codec: &str, mut z: Zram) {
     let frames: [usize; 3] = core::array::from_fn(|_| mem::alloc(mem::OWNER_KERNEL).expect("frame"));
+    // SAFETY: every `pa` passed is a frame just taken from `mem::alloc` for the kernel: inside RAM, page-aligned, owned by this
+    // function, and each returned reference is used for one statement or call before another is made.
     let page = |pa: usize| unsafe { &mut *(pa as *mut [u8; PAGE]) };
     for i in 0..PAGE {
         page(frames[0])[i] = b"cold anonymous page "[i % 20];
@@ -123,12 +125,14 @@ pub fn overflow_stack_bigframe(seed: u8) -> u8 {
 
 #[no_mangle]
 extern "C" fn kmain() -> ! {
+    // SAFETY: writes TPIDR_EL1 (the core number, 0 for the boot core); only `smp::cpu_id` reads it; no memory is accessed.
     unsafe { core::arch::asm!("msr tpidr_el1, xzr", options(nomem, nostack)) }; // core 0
     // Translation first: the locks behind the very first line printed are exclusive load/store pairs, which real
     // cores only support on cacheable memory (with the MMU off all memory is device memory and they fault).
     mmu::init();
     kprintln!("Metal OS 0.1 (aarch64, microkernel) booting{}", platform::BANNER_SUFFIX);
     platform::early_boot();
+    // SAFETY: `__kernel_end` is a linker symbol; only its address is taken, it is never read.
     let kernel_end = unsafe { &__kernel_end as *const u8 as usize };
     // RAM size from the harness; 128 MiB if it did not say.
     let ram = platform::ram_size().filter(|&s| (8 << 20..=1 << 30).contains(&s)).map_or(128 << 20, |s| s as usize);
@@ -144,11 +148,14 @@ extern "C" fn kmain() -> ! {
         kprintln!("[kernel] stack-overflow test: one frame of 128 KiB");
         kprintln!("[kernel] ... {}", overflow_stack_bigframe(1));
     }
+    // SAFETY: `__kernel_start` is a linker symbol; only its address is taken, it is never read.
     let kernel_start = unsafe { &__kernel_start as *const u8 as usize };
     mem::init(ram, kernel_start..kernel_end);
     let k = kaslr::report();
     if let Some((old, len)) = k.old {
         // the image moved: what it left behind is free memory, and holds a copy of the kernel; clear it
+        // SAFETY: `old..old+len` is the previous image's RAM; `kaslr` placed the copy disjoint from it, `mem::init` just listed it as free,
+        // and the boot core is alone (no allocation or secondary core yet), so nothing else uses it.
         unsafe { core::ptr::write_bytes(old as *mut u8, 0, len) };
     }
     kprintln!(

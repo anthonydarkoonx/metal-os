@@ -31,9 +31,12 @@ impl Func {
         ECAM + ((self.dev as usize) << 15) + off
     }
     pub fn r32(&self, off: usize) -> u32 {
+        // SAFETY: `addr` is ECAM + dev<<15 + off, inside the 1 GiB ECAM device block `map_devices` maps (l1[256]); callers pass a 4-aligned
+        // `off` below 0x1000; volatile because it is device config space.
         unsafe { read_volatile(self.addr(off) as *const u32) }
     }
     pub fn w32(&self, off: usize, v: u32) {
+        // SAFETY: as `r32`: an aligned config-space register inside the mapped ECAM device block; volatile MMIO write.
         unsafe { write_volatile(self.addr(off) as *mut u32, v) }
     }
     fn r16(&self, off: usize) -> u16 {

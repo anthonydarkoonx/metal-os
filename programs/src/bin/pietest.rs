@@ -16,6 +16,7 @@ fn two() -> u64 {
 static FUNCS: [fn() -> u64; 2] = [one, two];
 
 program!("pietest", |c| {
+    // SAFETY (the three reads below): `&PTR`, `&FUNCS[i]` are references to live statics, so the pointers are valid and aligned; volatile only keeps the compiler from folding the relocated values.
     let via_ptr = *unsafe { read_volatile(&PTR) };
     let f = unsafe { read_volatile(&FUNCS[1]) };
     let ok = via_ptr == 0x1234_5678 && f() == 2 && unsafe { read_volatile(&FUNCS[0]) }() == 1;

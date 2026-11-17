@@ -67,6 +67,7 @@ pub fn snapshot<const N: usize>(src: &[u8]) -> [u8; N] {
 fn sum_bytes(p: *const u8, len: usize) -> u64 {
     let mut s = 0u64;
     for i in 0..len {
+        // SAFETY: callers pass a mapped range: CLIENT_SHM (one page, `mem_map` checked by the test) or SERVER_SHM, which is read only after a successful mapping (`shm_mapped`) and clamped to 4096 bytes.
         s = s.wrapping_add(unsafe { read_volatile(p.add(i)) } as u64);
     }
     s
@@ -113,8 +114,13 @@ fn client() -> ! {
 
     // 1. zero-copy shared memory: client fills a page, server sums it in place.
     let r = mem_map(1, CLIENT_SHM, true);
+    if r != 0 {
+        println!("[client] TEST zero-copy shared memory (map={r}): FAIL");
+        exit(1);
+    }
     let p = CLIENT_SHM as *mut u8;
     for i in 0..4096 {
+        // SAFETY: CLIENT_SHM is the one-page mapping made above (checked: the run exits if it failed); i < 4096.
         unsafe { write_volatile(p.add(i), (i * 7 + 3) as u8) };
     }
     let expect = sum_bytes(p, 4096);
@@ -224,6 +230,7 @@ fn pattern_ok(buf: *const u8, first_sector: u64, nsec: u64) -> bool {
     for s in 0..nsec {
         for i in 0..512u64 {
             let want = ((first_sector + s) * 31 + i) as u8;
+            // SAFETY: `buf` is the 4096-byte block-driver buffer mapped (checked) in `blk_tests`; callers read at most 8 sectors, so s*512 + i < 4096.
             if unsafe { read_volatile(buf.add((s * 512 + i) as usize)) } != want {
                 return false;
             }
@@ -243,17 +250,20 @@ fn blk_tests() {
     // read sector 0 of the disk image
     let (st, dev_status) = blk_call(BLK_READ, 0, 1);
     let magic = b"METAL-OS-DISK v1";
+    // SAFETY: `buf` is the mapped 4096-byte buffer (checked in `blk_tests`); i < 16.
     let ok = (0..magic.len()).all(|i| unsafe { read_volatile(buf.add(i)) } == magic[i]);
     println!("[client] TEST virtio-blk read sector 0 (status={st}/{dev_status}): {}", verdict(st == 0 && dev_status == 0 && ok));
 
     // write 8 sectors, clobber the buffer, read them back
     for s in 0..8u64 {
         for i in 0..512u64 {
+            // SAFETY: `buf` is the mapped 4096-byte buffer; s < 8 and i < 512, so the offset is < 4096.
             unsafe { write_volatile(buf.add((s * 512 + i) as usize), ((100 + s) * 31 + i) as u8) };
         }
     }
     let (st1, d1) = blk_call(BLK_WRITE, 100, 8);
     for i in 0..4096 {
+        // SAFETY: `buf` is the mapped 4096-byte buffer; i < 4096.
         unsafe { write_volatile(buf.add(i), 0) };
     }
     let (st2, d2) = blk_call(BLK_READ, 100, 8);
@@ -265,6 +275,7 @@ fn blk_tests() {
     let (st, _) = blk_call(BLK_CRASH, 0, 0);
     println!("[client] TEST blk driver crash surfaces as error (status={st}): {}", verdict(st == E_DEAD));
     for i in 0..4096 {
+        // SAFETY: `buf` is the mapped 4096-byte buffer; i < 4096.
         unsafe { write_volatile(buf.add(i), 0) };
     }
     let (st, d) = blk_call(BLK_READ, 100, 8);
@@ -285,18 +296,22 @@ fn blk_tests() {
     let mapped = mem_map(6, BLK_SECRET_VA, true) == 0;
     if mapped {
         for i in 0..4096 {
+            // SAFETY: `secret` is BLK_SECRET_VA, mapped (`mapped` checked) from capability slot 6, which is one 4096-byte page; i < 4096.
             unsafe { write_volatile(secret.add(i), MARKER[i % MARKER.len()]) };
         }
     }
     let (st, _) = blk_call(BLK_EVIL, 200, 1);
     println!("[client] TEST IOMMU stops a driver whose device DMAs outside its granted pages, driver restarted (status={st}): {}", verdict(mapped && st == E_DEAD));
     for i in 0..4096 {
+        // SAFETY: `buf` is the mapped 4096-byte buffer; i < 4096.
         unsafe { write_volatile(buf.add(i), 0) };
     }
     let (st, d) = blk_call(BLK_READ, 200, 1);
+    // SAFETY: `buf` is the mapped 4096-byte buffer; o + i < 512.
     let leaked = (0..512 - MARKER.len()).any(|o| (0..MARKER.len()).all(|i| unsafe { read_volatile(buf.add(o + i)) } == MARKER[i]));
     println!("[client] TEST the marker page never reached the disk (read back status={st}/{d}): {}", verdict(st == 0 && d == 0 && !leaked));
     for i in 0..4096 {
+        // SAFETY: `buf` is the mapped 4096-byte buffer; i < 4096.
         unsafe { write_volatile(buf.add(i), 0) };
     }
     let (st, d) = blk_call(BLK_READ, 100, 8);
@@ -312,16 +327,18 @@ fn blk_tests() {
 // ---------------------------------------------------------------------------
 fn server() -> ! {
     println!("[server] listening");
+    let mut shm_mapped = false;
     loop {
         let m = recv(0);
         match m.w[0] {
             OP_SUM => {
                 let r = mem_map(m.w[1], SERVER_SHM, false);
-                if r != 0 && r != E_INVAL {
-                    // E_INVAL just means "already mapped by an earlier call"
+                if r != 0 && (r != E_INVAL || !shm_mapped) {
+                    // E_INVAL after a successful mapping just means "already mapped by an earlier call"
                     reply([1, r as u64, 0]);
                     continue;
                 }
+                shm_mapped = true;
                 let s = sum_bytes(SERVER_SHM as *const u8, (m.w[2] as usize).min(4096)) /* one page is mapped */;
                 reply([0, s, 0]);
             }
@@ -348,6 +365,7 @@ fn driver() -> ! {
             }
             OP_CRASH => {
                 println!("[driver] simulated fault: writing to unmapped MMIO");
+                // SAFETY: deliberate fault injection: 0x1000 is below every mapping (images load at 0x8000_0000 or higher), so the store traps and the kernel restarts this driver; that is the test.
                 unsafe { write_volatile(0x1000 as *mut u64, 0xDEAD) };
             }
             _ => {

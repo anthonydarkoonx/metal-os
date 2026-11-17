@@ -56,15 +56,19 @@ const EVTQ_LOG2: u32 = 7; // 128 events
 const MAX_TABLES: usize = 12;
 
 fn r32(off: usize) -> u32 {
+    // SAFETY: `BASE + off` is an SMMUv3 register (4-/8-aligned by the register map) in the device block (l1[0]); volatile MMIO.
     unsafe { read_volatile((BASE + off) as *const u32) }
 }
 fn w32(off: usize, v: u32) {
+    // SAFETY: `BASE + off` is an SMMUv3 register (4-/8-aligned by the register map) in the device block (l1[0]); volatile MMIO.
     unsafe { write_volatile((BASE + off) as *mut u32, v) }
 }
 fn w64(off: usize, v: u64) {
+    // SAFETY: `BASE + off` is an SMMUv3 register (4-/8-aligned by the register map) in the device block (l1[0]); volatile MMIO.
     unsafe { write_volatile((BASE + off) as *mut u64, v) }
 }
 fn dsb() {
+    // SAFETY: barrier only; orders the queue/table writes before the register write that follows.
     unsafe { asm!("dsb sy", options(nostack)) };
 }
 
@@ -106,6 +110,8 @@ impl Smmu {
     fn command(&mut self, dw0: u64, dw1: u64) {
         let idx = (self.cmd_prod & ((1 << CMDQ_LOG2) - 1)) as usize;
         let slot = (self.cmdq + 16 * idx) as *mut u64;
+        // SAFETY: `slot` is entry `prod & 15` of the command queue (16 entries x 16 B in the one page `init` allocated, 8-aligned) and the
+        // SMMU lock is held, so nothing else writes it.
         unsafe {
             write_volatile(slot, dw0);
             write_volatile(slot.add(1), dw1);
@@ -142,6 +148,7 @@ impl Smmu {
     /// Abort the stream and drop its translation tables. If the SMMU cannot confirm it has forgotten
     /// the entry, the tables are *leaked* rather than freed: it might still walk them.
     fn tear_down(&mut self, sid: usize) {
+        // SAFETY: `ste(sid)` is inside the stream-table page (64 entries x 64 B = one page, allocated in `init`); callers have `sid < NSTREAMS`; SMMU lock held.
         unsafe { write_volatile(self.ste(sid), 0) };
         crate::cache::clean(self.ste(sid) as usize, STE_BYTES);
         dsb();
@@ -167,6 +174,7 @@ impl Smmu {
         for level in [1, 2] {
             let idx = (pa >> (12 + 9 * (3 - level))) & 511;
             let e = (table + 8 * idx) as *mut u64;
+            // SAFETY: `e` is entry `idx` of a table page this stream owns (`l1`, or one from `mem::alloc` listed in `tables`); idx < 512; SMMU lock held.
             let mut v = unsafe { read_volatile(e) };
             if v & 1 == 0 {
                 let s = &mut self.streams[sid];
@@ -178,6 +186,7 @@ impl Smmu {
                 s.tables[s.ntables] = t;
                 s.ntables += 1;
                 v = t as u64 | 0b11; // table descriptor
+                // SAFETY: as the read above: `e` is a slot of a table page this stream owns; SMMU lock held.
                 unsafe { write_volatile(e, v) };
                 crate::cache::clean(e as usize, 8);
             }
@@ -186,6 +195,7 @@ impl Smmu {
         // level-3 page: normal write-back memory, read/write, inner shareable, access flag set
         const PAGE: u64 = 0b11 | 0b1111 << 2 | 0b11 << 6 | 0b11 << 8 | 1 << 10;
         let leaf = table + 8 * ((pa >> 12) & 511);
+        // SAFETY: `leaf` is a slot of the stream's level-3 table (`table` came from a descriptor this function wrote, idx < 512); SMMU lock held.
         unsafe { write_volatile(leaf as *mut u64, pa as u64 | PAGE) };
         crate::cache::clean(leaf, 8);
         Ok(())
@@ -316,6 +326,8 @@ pub fn attach(sid: u16, role: u8, objs: &[u8]) {
         | 0b010 << 48         // S2PS: 40-bit output
         | 1 << 51             // S2AA64
         | 1 << 58; // S2R: record faults
+    // SAFETY: `ste` is entry `sid` of the stream-table page (`sid < NSTREAMS` checked in `attach`); the entry is still invalid (V=0) so
+    // the SMMU does not read it while words 1..7 are written; SMMU lock held.
     unsafe {
         write_volatile(ste.add(1), 0);
         write_volatile(ste.add(2), dw2);
@@ -326,6 +338,7 @@ pub fn attach(sid: u16, role: u8, objs: &[u8]) {
     }
     crate::cache::clean(ste as usize, STE_BYTES);
     dsb();
+    // SAFETY: same entry as above, in bounds; this word-0 write is the one that makes it valid, after its other words were cleaned to memory.
     unsafe { write_volatile(ste, 1 | 0b110 << 1) }; // V, Config = stage 2 translate, stage 1 bypass
     crate::cache::clean(ste as usize, STE_BYTES);
     dsb();
@@ -380,6 +393,8 @@ fn drain_events(s: &mut Smmu, act: bool, skip: Option<usize>) {
         }
         let rec = (s.evtq + 32 * (cons & ((1 << EVTQ_LOG2) - 1)) as usize) as *const u64;
         crate::cache::invalidate(rec as usize, 32); // the SMMU wrote the record; do not read a stale cached copy
+        // SAFETY: `rec` is event `cons & 127` of the event-queue page (128 x 32 B, 8-aligned, from `init`); reads dw0 and dw2 inside that
+        // entry, after `cache::invalidate`, and the SMMU lock is held (`s: &mut Smmu`).
         let (dw0, addr) = unsafe { (read_volatile(rec), read_volatile(rec.add(2))) };
         let (id, sid) = (dw0 & 0xff, (dw0 >> 32) as usize);
         if act && Some(sid) != skip {
@@ -398,6 +413,7 @@ fn drain_events(s: &mut Smmu, act: bool, skip: Option<usize>) {
                 if !s.streams[sid].cut_off {
                     // stop the device now; the stream stays unusable until a new driver is attached
                     s.streams[sid].cut_off = true;
+                    // SAFETY: `sid` came from `s.streams.get(sid)` above, so it is < NSTREAMS and `ste(sid)` is inside the stream-table page; SMMU lock held.
                     unsafe { write_volatile(s.ste(sid), 0) };
                     crate::cache::clean(s.ste(sid) as usize, STE_BYTES);
                     dsb();

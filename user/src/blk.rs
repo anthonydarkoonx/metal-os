@@ -29,6 +29,7 @@ impl Blk {
     /// Like `io`, with the data buffer at an arbitrary physical address (`data_va` = where this task maps it, 0 if it
     /// does not: the cache maintenance is then skipped, which only the deliberately misbehaving test does).
     fn io_at(&mut self, write: bool, data_pa: u64, data_va: usize, sector: u64, nsec: u64) -> u8 {
+        // SAFETY: the request header and status live at OFF_HDR/OFF_STATUS inside the queue page at RING_VA (mapped read-write in blk_init), above the rings (avail 0x100, used 0x200) so they overlap nothing; the device reads/writes them only after `submit`.
         unsafe {
             let hdr = (va(RING_VA) + OFF_HDR) as *mut u8;
             write_volatile(hdr as *mut u32, write as u32); // VIRTIO_BLK_T_IN=0 / OUT=1
@@ -43,6 +44,7 @@ impl Blk {
             virtio::Buf { pa: ring_pa + OFF_STATUS as u64, va: va(RING_VA) + OFF_STATUS, len: 1, dev_writes: true },
         ]);
         self.wait_done(BLK_WATCHDOG_TICKS);
+        // SAFETY: OFF_STATUS is inside the mapped queue page; volatile because the device wrote the byte (the used ring flush in `done` covered the cache).
         unsafe { read_volatile((va(RING_VA) + OFF_STATUS) as *const u8) }
     }
 
@@ -102,6 +104,7 @@ fn blk_init() -> Result<Blk, &'static str> {
     pci.start()?; // resets the device: also discards any state a crashed predecessor left behind
     // The DMA page outlives a crashed driver: wipe stale avail/used indices so the
     // device cannot replay the previous instance's requests.
+    // SAFETY: RING_VA is the 4096-byte queue page mapped read-write just above; nothing (device included) uses it yet because `pci.queue` has not run.
     unsafe { core::ptr::write_bytes(va(RING_VA) as *mut u8, 0, 4096) };
     let q = pci.queue(0, QN, va(RING_VA), ring_pa)?;
     pci.driver_ok();
@@ -172,6 +175,7 @@ pub fn blk_driver() -> ! {
             }
             BLK_CRASH => {
                 println!("[blk] simulated fault while a request is in flight");
+                // SAFETY: deliberate fault injection: 0x2000 is below every mapping (images load at 0x8000_0000 or higher), so the store traps and the kernel restarts the driver; that is the test.
                 unsafe { write_volatile(0x2000 as *mut u64, 0xBAD) };
             }
             _ => {

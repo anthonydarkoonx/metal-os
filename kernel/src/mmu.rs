@@ -59,6 +59,7 @@ extern "C" {
 
 /// If `addr` is in the guard of a core's kernel stack: which core.
 pub fn kstack_guard_hit(addr: u64) -> Option<usize> {
+    // SAFETY: `__stack_top` is a linker symbol; only its address is taken, it is never read.
     let top = unsafe { &__stack_top as *const u8 as usize };
     (0..crate::smp::MAX_CPUS).find(|&n| {
         let t = top - n * KSTACK_STRIDE;
@@ -80,6 +81,7 @@ pub fn init() {
         let pa = gib + i * (2 << 20);
         *e = if pa < crate::platform::RAM_UNMAPPED_BELOW { 0 } else { pa as u64 | VALID_BLOCK | normal };
     }
+    // SAFETY: `__stack_top` is a linker symbol; only its address is taken, it is never read.
     let top = unsafe { &__stack_top as *const u8 as usize };
     let bottom = top - crate::smp::MAX_CPUS * KSTACK_STRIDE;
     let mut used = 0;
@@ -105,6 +107,7 @@ pub fn init() {
 pub fn enable_this_cpu() {
     let mair: u64 = 0x00FF; // attr0 = normal write-back, attr1 = device-nGnRnE
     let parange: u64;
+    // SAFETY: reads ID_AA64MMFR0_EL1, a read-only feature register; no memory is accessed.
     unsafe { asm!("mrs {}, id_aa64mmfr0_el1", out(reg) parange) };
     let tcr: u64 = 25            // T0SZ: 39-bit VA
         | (1 << 8) | (1 << 10)   // IRGN0/ORGN0 write-back
@@ -112,6 +115,8 @@ pub fn enable_this_cpu() {
         | (1 << 23)              // EPD1: TTBR1 walks disabled
         | ((parange & 7) << 32); // IPS
     let ttbr0 = KERNEL_L1.addr() as u64;
+    // SAFETY: KERNEL_L1 (device block + RAM identity map, built by `init`) maps this very code and stack, so execution continues
+    // after the M bit is set; the cache/TLB maintenance first makes the tables visible. Run once per core, interrupts masked.
     unsafe {
         asm!(
             // the tables were written by the boot core (or with the MMU off): finish those writes before this core's walker
@@ -142,6 +147,9 @@ pub fn enable_this_cpu() {
 }
 
 fn table(pa: usize) -> &'static mut [u64; 512] {
+    assert!(crate::frame::phys::is_ram_page(pa), "mmu::table: {pa:#x} is not a RAM frame");
+    // SAFETY: `pa` is a whole RAM frame (checked). A table is only reached while the owning task's lock (or boot, single core)
+    // is held, which is what keeps two live `&mut` to one table from existing; callers use the reference within one operation.
     unsafe { &mut *(pa as *mut [u64; 512]) }
 }
 
@@ -279,6 +287,7 @@ pub fn touch(l1: usize, va: usize) -> bool {
     match leaf(l1, va & !(mem::PAGE - 1), None) {
         Some(slot) if *slot & 1 != 0 && *slot & AF == 0 => {
             *slot |= AF;
+            // SAFETY: barrier only; publishes the descriptor store above to the table walkers and synchronises the context.
             unsafe { asm!("dsb ishst", "isb") };
             true
         }
@@ -301,6 +310,7 @@ pub fn evict_begin(l1: usize, va: usize, pa: usize) -> Option<u64> {
 pub fn evict_abort(l1: usize, va: usize, old: u64) {
     if let Some(slot) = leaf(l1, va, None) {
         *slot = old;
+        // SAFETY: barrier only; publishes the descriptor store above to the table walkers and synchronises the context.
         unsafe { asm!("dsb ishst", "isb") };
     }
 }
@@ -308,6 +318,7 @@ pub fn evict_abort(l1: usize, va: usize, old: u64) {
 pub fn evict_commit(l1: usize, va: usize, old: u64, handle: u32) {
     if let Some(slot) = leaf(l1, va, None) {
         *slot = (old & !ADDR_MASK & !1) | SWAPPED | (handle as u64) << 12;
+        // SAFETY: barrier only; publishes the descriptor store above to the table walkers and synchronises the context.
         unsafe { asm!("dsb ishst", "isb") };
     }
 }
@@ -323,6 +334,7 @@ pub fn install_resident(l1: usize, va: usize, pa: usize) -> bool {
         sync_icache(pa, mem::PAGE); // freshly written bytes must be visible to instruction fetch
     }
     *slot = (*slot & !ADDR_MASK & !SWAPPED & !ON_DISK) | pa as u64 | VALID_TABLE | AF;
+    // SAFETY: barrier only; publishes the descriptor store above to the table walkers and synchronises the context.
     unsafe { asm!("dsb ishst", "isb") };
     true
 }
@@ -347,6 +359,7 @@ pub fn swapped_to_disk(l1: usize, va: usize, handle: u32, slot_no: u32) -> bool 
         return false;
     }
     *slot = (*slot & !ADDR_MASK) | ON_DISK | (slot_no as u64) << 12;
+    // SAFETY: barrier only; publishes the descriptor store above to the table walkers and synchronises the context.
     unsafe { asm!("dsb ishst", "isb") };
     true
 }
@@ -441,11 +454,14 @@ pub fn migrate_user_page(l1: usize, va: usize, old_pa: usize, new_pa: usize) -> 
     }
     *slot = 0;
     flush_tlb();
+    // SAFETY: sole caller (`compact::migrate`) passes a Movable frame and a Free frame re-validated under the mem lock, so both are
+    // distinct whole RAM frames; the mapping was just broken and TLBs flushed, so no core is using `old_pa`. Not itself range-checked.
     unsafe { core::ptr::copy(old_pa as *const u8, new_pa as *mut u8, mem::PAGE) };
     if old & UXN == 0 {
         sync_icache(new_pa, mem::PAGE); // executable page: fresh bytes must be visible to fetch
     }
     *slot = (old & !ADDR_MASK) | new_pa as u64;
+    // SAFETY: barrier only; publishes the descriptor store above to the table walkers and synchronises the context.
     unsafe { asm!("dsb ishst", "isb") };
     true
 }
@@ -462,10 +478,15 @@ pub fn use_kernel_tables() {
 /// away and back: no TLB flush on the hot path. (Reusing an ASID for a new address space is made
 /// safe by the broadcast flush in `task::die`.)
 pub fn switch_to(l1: usize, asid: u16) {
+    // A task with no address space has l1 == 0; running on it would unmap the kernel (it runs from TTBR0 too), so refuse.
+    assert!(l1 != 0 && l1 % mem::PAGE == 0, "switch_to: bad page-table root {l1:#x}");
+    // SAFETY: `l1` is a page-aligned root that is the kernel table or a task table (copy of the kernel mappings); only the
+    // ASID/base register is written, followed by an isb.
     unsafe { asm!("msr ttbr0_el1, {}", "isb", in(reg) l1 as u64 | (asid as u64) << 48) };
 }
 
 pub fn flush_tlb() {
+    // SAFETY: TLB invalidate (inner-shareable) bracketed by barriers; it only drops cached translations, so nothing stale remains.
     unsafe { asm!("dsb ishst", "tlbi vmalle1is", "dsb ish", "isb") };
 }
 
@@ -474,8 +495,11 @@ pub fn sync_icache(pa: usize, len: usize) {
     let step = crate::cache::line();
     let mut a = pa & !(step - 1);
     while a < pa + len {
+        // SAFETY: `dc cvau` cleans one line inside `pa..pa+len` (RAM the caller just wrote); it only writes back, never alters data.
         unsafe { asm!("dc cvau, {}", in(reg) a) };
         a += step;
     }
+    // SAFETY: barriers plus an instruction-cache invalidate to the point of unification; drops cached instructions only, so fetch
+    // sees the cleaned bytes.
     unsafe { asm!("dsb ish", "ic ialluis", "dsb ish", "isb") };
 }

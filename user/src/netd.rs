@@ -141,11 +141,13 @@ impl Netd {
     }
 
     fn page(&self, k: usize) -> &'static mut [u8; 4096] {
+        // SAFETY: `k < NSESS`; SESS_VA + k*0x1000 is session page k, mapped read-write in `netd()` before any request is handled. Only one such reference is live at a time (see its single use); the client program may write the page too, so the contents are treated as untrusted bytes.
         unsafe { &mut *((va(SESS_VA + k * 0x1000)) as *mut [u8; 4096]) }
     }
 
     /// Frames the driver received.
     fn drain_rx(&mut self, now: u64) {
+        // SAFETY: RING_VA is the ring page mapped (checked) in `netd()`; EPOCH is inside it; volatile because the driver task writes it.
         let epoch = unsafe { core::ptr::read_volatile((va(RING_VA) + EPOCH) as *const u32) };
         if epoch != self.epoch {
             // the driver restarted: the rings are new, every transmit slot is free again
@@ -158,6 +160,7 @@ impl Netd {
             let Some(v) = rxq.pop() else { break };
             let (slot, len) = unpack(v);
             if slot < NRX && len > HDR && len <= SLOT {
+                // SAFETY: slot < NRX and len <= SLOT were checked, so the range lies inside the BUFS_VA area mapped in `netd()`; the driver gave this slot away via RXQ and gets it back only through RXFREE, so nothing writes it meanwhile.
                 let f = unsafe { core::slice::from_raw_parts((va(BUFS_VA) + slot * SLOT + HDR) as *const u8, len - HDR) };
                 self.stack.rx(f, now);
                 self.rx_frames += 1;
@@ -198,6 +201,7 @@ impl Netd {
             let Some(slot) = self.tx_free.pop() else { break };
             let f = self.tx_pending.pop_front().unwrap();
             let n = f.len().min(SLOT - HDR);
+            // SAFETY: `slot` came from `tx_free`, which only holds values < NTX, so the transmit slot (NRX + slot) lies in the BUFS_VA area; n <= SLOT - HDR; the slot is netd's until pushed to TXQ; `f` is a separate Vec.
             unsafe { core::ptr::copy_nonoverlapping(f.as_ptr(), (va(BUFS_VA) + (NRX + slot) * SLOT + HDR) as *mut u8, n) };
             txq.push(entry(slot, n));
             pushed = true;
@@ -284,6 +288,7 @@ impl Netd {
     /// Add one to session `k`'s event word and wake the program(s) sleeping on it.
     fn bump(&self, k: usize) {
         let w = (va(SESS_VA + k * 0x1000)) as *mut u32;
+        // SAFETY: `k < NSESS`; word 0 of session page k, mapped read-write in `netd()`; volatile because the client program shares the page (a racing client write can only lose one count).
         unsafe { core::ptr::write_volatile(w, core::ptr::read_volatile(w).wrapping_add(1)) };
         svc(WAKE_WORD, w as u64, usize::MAX as u64, 0, 0, 0);
     }
@@ -577,6 +582,7 @@ impl Netd {
             }
             N_CRASH => {
                 let p = 0x10 as *mut u8;
+                // SAFETY: deliberate fault injection: 0x10 is unmapped in every task (images are at 0x8000_0000 or higher), so the store traps and the kernel restarts netd; that is the test.
                 unsafe { core::ptr::write_volatile(p, 1) };
                 [S_OK, 0, 0]
             }
@@ -598,11 +604,13 @@ pub fn netd() -> ! {
         }
     }
     // the driver publishes the device's MAC when it is up
+    // SAFETY: RING_VA mapped (checked) at the top of `netd()`; READY is inside the ring page; volatile because the driver writes it.
     while unsafe { core::ptr::read_volatile((va(RING_VA) + READY) as *const u32) } == 0 {
         sleep(1);
     }
     let mut mac = [0u8; 6];
     for (i, b) in mac.iter_mut().enumerate() {
+        // SAFETY: same ring page; INFO + i with i < 6 is the MAC the driver published.
         *b = unsafe { core::ptr::read_volatile((va(RING_VA) + INFO + i) as *const u8) };
     }
     let now = now_ms();
@@ -611,6 +619,7 @@ pub fn netd() -> ! {
         stack: Stack::new(mac, seed),
         tx_free: (0..NTX).collect(),
         tx_pending: VecDeque::new(),
+        // SAFETY: same mapped ring page; EPOCH is inside it.
         epoch: unsafe { core::ptr::read_volatile((va(RING_VA) + EPOCH) as *const u32) },
         sessions: core::array::from_fn(|_| None),
         tcp: Vec::new(),
@@ -654,6 +663,7 @@ pub fn netd() -> ! {
         n.notify();
         // tell the driver when to wake us next: at the stack's next timer, soon if frames wait for a transmit slot
         let wait = if !n.tx_pending.is_empty() { 1 } else { n.stack.next_timer().map_or(100, |t| (t.saturating_sub(now) + 9) / 10).clamp(1, 100) };
+        // SAFETY: same mapped ring page; POLL is inside it (0x814 < 4096); the driver only reads it.
         unsafe { core::ptr::write_volatile((va(RING_VA) + POLL) as *mut u32, wait as u32) };
         if !announced {
             if let Some(c) = n.stack.config() {

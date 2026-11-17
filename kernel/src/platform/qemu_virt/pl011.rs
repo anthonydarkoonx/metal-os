@@ -8,6 +8,8 @@ pub struct Pl011;
 
 impl Console for Pl011 {
     fn putc(c: u8) {
+        // SAFETY: UART0 is the PL011 at 0x0900_0000 in the device block (l1[0]); offset 6 (FR) is read, offset 0 (DR) is written, both
+        // 4-aligned; volatile MMIO.
         unsafe {
             while read_volatile(UART0.add(6)) & (1 << 5) != 0 {} // FR.TXFF
             write_volatile(UART0, c as u32);

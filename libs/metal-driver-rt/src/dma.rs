@@ -26,16 +26,20 @@ mod hw {
     use core::arch::asm;
     pub fn ctr_el0() -> u64 {
         let ctr: u64;
+        // SAFETY: reading CTR_EL0 is allowed at EL0 (kernel sets SCTLR_EL1.UCT); the asm touches only the output register.
         unsafe { asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
         ctr
     }
     pub fn clean_line(a: usize) {
+        // SAFETY: DC CVAC is EL0-legal (SCTLR_EL1.UCI) and only writes a line back, changing no value; callers pass mapped task addresses (clean() skips 0).
         unsafe { asm!("dc cvac, {}", in(reg) a, options(nostack)) };
     }
     pub fn flush_line(a: usize) {
+        // SAFETY: DC CIVAC is EL0-legal (SCTLR_EL1.UCI) and writes back before dropping, so no data is lost; callers pass mapped task addresses (flush() skips 0).
         unsafe { asm!("dc civac, {}", in(reg) a, options(nostack)) };
     }
     pub fn barrier() {
+        // SAFETY: DSB SY is a pure barrier with no operands, memory effects or register clobbers.
         unsafe { asm!("dsb sy", options(nostack)) };
     }
 }

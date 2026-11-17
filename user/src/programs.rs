@@ -592,6 +592,7 @@ pub fn tests() {
         let s = svc(37, 2, 0, 0, 0, 0)[0] as i64;
         let mapped = s >= 0 && svc(4, s as u64, BIG as u64, 1, 0, 0)[0] == 0;
         if mapped {
+            // SAFETY: `mapped` is true, so BIG is a writable 2-page shared object mapped here; the shmtest program writes only page 1 while this test is blocked in `wait`, and `mem` is not used after the object is revoked.
             let mem = unsafe { core::slice::from_raw_parts_mut(BIG as *mut u8, 2 * PAGE) };
             for i in 0..PAGE {
                 mem[i] = pat(i, 7);
@@ -607,6 +608,7 @@ pub fn tests() {
             // a holder that goes away leaves the object alone
             let t = Req::new().arg(8).heap(50).give_masked(0, s as u8, 0xFFFF & !4).go(&shmtest);
             let code = if t > 0 { wait(t, false) } else { t };
+            // SAFETY: BIG is still mapped (the object is revoked only in the next step); offset 8 is inside page 0 and the holder has already exited.
             let marker = unsafe { core::ptr::read_volatile((BIG + 8) as *const u32) };
             let still = (0..PAGE).all(|i| i < 12 || mem[i] == pat(i, 7));
             println!("[client] TEST a holder of shared memory exiting does not free it or disturb it (exit code {code}, marker {marker:#x}, data intact {still}): {}", verdict(code == 0 && marker == 0x600D && still));
@@ -624,6 +626,7 @@ pub fn tests() {
         if s2 >= 0 && svc(4, s2 as u64, BIG as u64, 1, 0, 0)[0] == 0 {
             let t = Req::new().arg(2).heap(50).give_masked(0, s2 as u8, 0xFFFF & !4).go(&shmtest);
             sleep(30);
+            // SAFETY: guarded by the `svc(4, s2, BIG, 1) == 0` check: BIG is a writable one-page shared object; the other program sleeps on this word.
             unsafe { core::ptr::write_volatile(BIG as *mut u32, 1) };
             let woken = svc(33, BIG as u64, 4, 0, 0, 0)[0];
             let code = if t > 0 { wait(t, false) } else { t };
@@ -644,6 +647,7 @@ pub fn tests() {
         let during = sysinfo(0)[3];
         let (mapped, intact, info) = if (0..32).contains(&slot) {
             let m = svc(4, slot as u64, BIG as u64 + 0x40_0000, 0, 0, 0)[0] == 0;
+            // SAFETY: UNVERIFIED: this slice is built before `m` (the mapping result) is known to be true, although it is only read when `m` holds; when mapped, `slot` is an 8-page object mapped read-only at BIG + 0x40_0000.
             let mem = unsafe { core::slice::from_raw_parts((BIG + 0x40_0000) as *const u8, 8 * PAGE) };
             (m, m && (0..8 * PAGE).all(|i| mem[i] == pat(i, 9)), svc(38, slot as u64, 0, 0, 0, 0)[0])
         } else {

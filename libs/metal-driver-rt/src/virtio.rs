@@ -40,9 +40,11 @@ pub fn packed_layout(size: u16) -> Option<(usize, usize)> {
 }
 
 fn rd32(a: usize) -> u32 {
+    // SAFETY: UNVERIFIED: safe fn dereferencing a raw address; every caller passes an address inside the BAR / config-space mappings given to `Pci::open` (bounds were checked there), but `rd32` itself does not enforce that. Volatile because it is device MMIO.
     unsafe { read_volatile(a as *const u32) }
 }
 fn wr32(a: usize, v: u32) {
+    // SAFETY: UNVERIFIED: as `rd32` - address is by convention inside the mapped BAR (offsets from `Pci::open`, checked against `bar_bytes`); volatile device MMIO write.
     unsafe { write_volatile(a as *mut u32, v) }
 }
 fn wr64(a: usize, v: u64) {
@@ -50,9 +52,11 @@ fn wr64(a: usize, v: u64) {
     wr32(a + 4, (v >> 32) as u32);
 }
 fn rd16(a: usize) -> u16 {
+    // SAFETY: UNVERIFIED: as `rd32` - address is by convention inside the mapped BAR; volatile device MMIO read.
     unsafe { read_volatile(a as *const u16) }
 }
 fn wr16(a: usize, v: u16) {
+    // SAFETY: UNVERIFIED: as `rd32` - address is by convention inside the mapped BAR; volatile device MMIO write.
     unsafe { write_volatile(a as *mut u16, v) }
 }
 pub fn fence() {
@@ -80,6 +84,7 @@ impl Pci {
         if rd32(cfg_va) != (device as u32) << 16 | 0x1af4 {
             return Err("not the expected virtio device");
         }
+        // SAFETY: `cfg_va` is the kernel-provided read-only config-space copy (256 bytes, page mapped); every `o` used is < 256 (ptr + 20 <= 256 is checked before capability reads).
         let b = |o: usize| unsafe { read_volatile((cfg_va + o) as *const u8) } as usize;
         let w = |o: usize| rd32(cfg_va + o) as usize;
         if b(0x06) & 0x10 == 0 {
@@ -125,9 +130,11 @@ impl Pci {
     }
 
     fn status(&self) -> u8 {
+        // SAFETY: `common` = bar_va + a capability offset checked in `open` to lie inside the mapped BAR with len >= COMMON_LEN (0x38), which covers C_STATUS; volatile device MMIO.
         unsafe { read_volatile((self.common + C_STATUS) as *const u8) }
     }
     fn set_status(&self, v: u8) {
+        // SAFETY: as `status`: C_STATUS is inside the bounds-checked common structure; volatile device MMIO write.
         unsafe { write_volatile((self.common + C_STATUS) as *mut u8, v) }
     }
 
@@ -220,17 +227,20 @@ impl Pci {
 
     /// Reading the ISR status acknowledges the interrupt.
     pub fn ack_isr(&self) {
+        // SAFETY: `isr` is inside the BAR (checked in `open`, len >= 1); the read has the side effect of acknowledging the interrupt, which is intended.
         unsafe { read_volatile(self.isr as *const u8) };
     }
 
     /// A byte of the device-specific configuration.
     pub fn config8(&self, off: usize) -> u8 {
         assert!(off < self.devcfg_len);
+        // SAFETY: `off < devcfg_len` is asserted above and the device-config structure was checked to lie inside the BAR in `open`; volatile MMIO.
         unsafe { read_volatile((self.devcfg + off) as *const u8) }
     }
 
     pub fn set_config8(&self, off: usize, v: u8) {
         assert!(off < self.devcfg_len);
+        // SAFETY: `off < devcfg_len` is asserted above and the device-config structure lies inside the BAR (checked in `open`); volatile MMIO.
         unsafe { write_volatile((self.devcfg + off) as *mut u8, v) }
     }
 
@@ -288,6 +298,7 @@ impl Queue {
     pub fn submit_quiet(&mut self, chain: &[Buf]) {
         const NEXT: u16 = 1;
         const WRITE: u16 = 2;
+        assert!(chain.len() <= self.size as usize, "descriptor chain longer than the queue");
         self.ninflight = 0;
         for b in chain {
             // what the device reads must be in memory; where it writes, no dirty line may survive to overwrite it
@@ -304,6 +315,7 @@ impl Queue {
         for (i, b) in chain.iter().enumerate() {
             let last = i + 1 == chain.len();
             let d = (self.va + OFF_DESC + 16 * i) as *mut u8;
+            // SAFETY: descriptors sit at `va + 16*i` inside the queue page the caller gave to `queue`/`queue_sized`; `chain.len() <= size` is asserted above, and the descriptor table (16 bytes per entry, `size` entries) lies inside the page.
             unsafe {
                 write_volatile(d as *mut u64, b.pa);
                 write_volatile(d.add(8) as *mut u32, b.len);
@@ -312,6 +324,7 @@ impl Queue {
             }
         }
         dma::clean(self.va + OFF_DESC, 16 * chain.len());
+        // SAFETY: the available ring is inside the queue page (layout fits one page: fixed offsets for small queues, `packed_layout` otherwise); the slot index is reduced modulo `size`; the device only reads this ring.
         unsafe {
             let avail = (self.va + self.off_avail) as *mut u16;
             write_volatile(avail.add(2 + (self.avail_idx % self.size) as usize), 0); // head = descriptor 0
@@ -326,6 +339,7 @@ impl Queue {
     pub fn done(&mut self) -> bool {
         fence();
         dma::flush(self.va + self.off_used, 4 + 8 * self.size as usize); // the device wrote the used ring
+        // SAFETY: the used ring (idx at +2) is inside the queue page that `va` points at; the device wrote it, hence volatile after the `dma::flush` above.
         let used = unsafe { read_volatile((self.va + self.off_used + 2) as *const u16) };
         if used != self.used_seen {
             fence(); // the device's data is read only after its index is seen
@@ -348,6 +362,7 @@ impl Queue {
     /// Hand the device one standalone buffer (descriptor `desc`), for queues the *device* fills
     /// on its own schedule, such as an input device's event queue. Call `kick` after a batch.
     pub fn post(&mut self, desc: u16, b: Buf) {
+        assert!(desc < self.size, "descriptor id outside the queue");
         if b.dev_writes {
             dma::flush(b.va, b.len as usize);
             if let Some(p) = self.posted.get_mut(desc as usize) {
@@ -357,6 +372,7 @@ impl Queue {
             dma::clean(b.va, b.len as usize);
         }
         let d = (self.va + OFF_DESC + 16 * desc as usize) as *mut u8;
+        // SAFETY: `desc < size` is asserted above, so `va + 16*desc` is inside the descriptor table in the queue page.
         unsafe {
             write_volatile(d as *mut u64, b.pa);
             write_volatile(d.add(8) as *mut u32, b.len);
@@ -364,6 +380,7 @@ impl Queue {
             write_volatile(d.add(14) as *mut u16, 0);
         }
         dma::clean(self.va + OFF_DESC + 16 * desc as usize, 16);
+        // SAFETY: the available ring is inside the queue page (see `submit_quiet`); index reduced modulo `size`; device reads only.
         unsafe {
             let avail = (self.va + self.off_avail) as *mut u16;
             write_volatile(avail.add(2 + (self.avail_idx % self.size) as usize), desc);
@@ -383,6 +400,7 @@ impl Queue {
     pub fn next_used(&mut self) -> Option<(u16, u32)> {
         fence();
         dma::flush(self.va + self.off_used, 4 + 8 * self.size as usize); // the device wrote the used ring
+        // SAFETY: the used ring idx is inside the queue page; the device wrote it, volatile after the flush above.
         let idx = unsafe { read_volatile((self.va + self.off_used + 2) as *const u16) };
         if idx == self.used_seen {
             return None;
@@ -390,6 +408,7 @@ impl Queue {
         fence(); // the element is read only after its index is seen ...
         let e = (self.va + self.off_used + 4 + 8 * (self.used_seen % self.size) as usize) as *const u32;
         dma::flush(e as usize, 8); // ... and from memory, not from a line fetched before the device wrote it
+        // SAFETY: `e` is the used-ring element for `used_seen % size`, inside the queue page (the layout reserves 8 bytes per entry), 4-aligned, and was just flushed so the device's data is read.
         let (id, len) = unsafe { (read_volatile(e), read_volatile(e.add(1))) };
         self.used_seen = self.used_seen.wrapping_add(1);
         if let Some(&(va, n)) = self.posted.get(id as usize) {
@@ -408,6 +427,7 @@ mod tests {
     /// A fake device: a 4 KiB BAR and a config-space copy with one virtio capability per `(type, offset, length, notify mult)`.
     fn fake(caps: &[(u8, u32, u32, u32)], qnotify: u16) -> (std::vec::Vec<u64>, std::vec::Vec<u64>) {
         let mut cfg = std::vec![0u64; 32]; // 256 bytes, aligned
+        // SAFETY: test only: `cfg` is a live 256-byte (32 x u64) vector, 8-aligned, and no other reference exists.
         let c = unsafe { core::slice::from_raw_parts_mut(cfg.as_mut_ptr() as *mut u8, 256) };
         c[0..4].copy_from_slice(&(0x1042u32 << 16 | 0x1af4).to_le_bytes());
         c[6] = 0x10; // capability list
@@ -422,6 +442,7 @@ mod tests {
             c[at + 16..at + 20].copy_from_slice(&mult.to_le_bytes());
         }
         let mut bar = std::vec![0u64; 512];
+        // SAFETY: test only: `bar` is a live 4096-byte (512 x u64) vector, 8-aligned, and no other reference exists.
         let b = unsafe { core::slice::from_raw_parts_mut(bar.as_mut_ptr() as *mut u8, 4096) };
         b[C_QSIZE..C_QSIZE + 2].copy_from_slice(&256u16.to_le_bytes());
         b[C_QNOTIFY_OFF..C_QNOTIFY_OFF + 2].copy_from_slice(&qnotify.to_le_bytes());

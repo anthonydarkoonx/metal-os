@@ -32,6 +32,8 @@ pub struct Heap {
     inner: UnsafeCell<Inner>,
 }
 
+// SAFETY: `inner` (and every `Free` block the list reaches) is only touched with `lock` held (alloc, dealloc, free_bytes), so access from
+// several threads is serialised; the blocks are the program's own heap memory.
 unsafe impl Sync for Heap {}
 
 #[global_allocator]
@@ -43,6 +45,10 @@ fn round(size: usize) -> usize {
 
 impl Inner {
     /// Take `size` bytes (a multiple of 16) aligned to `align` (a power of two, at least 16) from the first block that fits.
+    ///
+    /// # Safety
+    /// The heap lock must be held, and every block on the list must be a valid free block (16-aligned, size a multiple of 16, at least
+    /// 16) inside heap memory this program owns, with `size` and `next` intact.
     unsafe fn take(&mut self, size: usize, align: usize) -> *mut u8 {
         let mut link: *mut *mut Free = &mut self.head;
         let mut cur = self.head;
@@ -76,6 +82,10 @@ impl Inner {
     }
 
     /// Put the block back in its place in the list, joining it with its neighbours.
+    ///
+    /// # Safety
+    /// The heap lock must be held; `addr..addr + size` must be 16-aligned memory this program owns (`size` a multiple of 16, at least 16)
+    /// that is neither in use nor already on the list.
     unsafe fn give(&mut self, addr: usize, size: usize) {
         let mut prev: *mut Free = null_mut();
         let mut cur = self.head;
@@ -100,6 +110,8 @@ impl Inner {
         }
     }
 
+    /// # Safety
+    /// The heap lock must be held and the list intact (see `take`); `l.size()` must be non-zero, as `GlobalAlloc` requires.
     unsafe fn alloc(&mut self, l: Layout) -> *mut u8 {
         let size = round(l.size());
         let align = l.align().max(MIN);
@@ -119,9 +131,12 @@ impl Inner {
     }
 }
 
+// SAFETY: blocks handed out are disjoint pieces of memory taken from the kernel with `HEAP_GROW`, aligned as asked (at least 16) and
+// never touched again by the allocator until `dealloc` takes them back; all list work happens under the lock.
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         self.lock.lock();
+        // SAFETY: the lock is held, so this is the only access to `inner`; `GlobalAlloc` guarantees a non-zero size.
         let p = (*self.inner.get()).alloc(l);
         self.lock.unlock();
         p
@@ -129,6 +144,8 @@ unsafe impl GlobalAlloc for Heap {
 
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         self.lock.lock();
+        // SAFETY: the lock is held; by the `GlobalAlloc` contract `p`/`l` come from `alloc` of this heap, so the block is ours, 16-aligned, was
+        // rounded the same way and is not on the list.
         (*self.inner.get()).give(p as usize, round(l.size()));
         self.lock.unlock();
     }
@@ -138,6 +155,7 @@ unsafe impl GlobalAlloc for Heap {
 pub fn free_bytes() -> usize {
     HEAP.lock.lock();
     let mut n = 0;
+    // SAFETY: the lock is held and the list is intact (every node is a free block this heap owns), so walking it reads valid nodes.
     unsafe {
         let mut cur = (*HEAP.inner.get()).head;
         while !cur.is_null() {

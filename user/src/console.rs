@@ -126,6 +126,7 @@ impl Console {
             return;
         }
         // scroll the text area up by one line
+        // SAFETY: `fb` is the WIDTH x HEIGHT buffer; source rows MARGIN+CELL_H.. and destination rows MARGIN.. both end inside it ((ROWS-1)*CELL_H rows from row MARGIN+CELL_H <= HEIGHT-MARGIN); `copy` handles the overlap.
         unsafe { core::ptr::copy(self.fb.add((MARGIN + CELL_H) * WIDTH), self.fb.add(MARGIN * WIDTH), (ROWS - 1) * CELL_H * WIDTH) };
         font::fill_rect(self.fb, WIDTH, 0, MARGIN + (ROWS - 1) * CELL_H, WIDTH, CELL_H, themed(BG));
         self.mark(MARGIN, MARGIN + ROWS * CELL_H);

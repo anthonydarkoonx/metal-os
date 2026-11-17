@@ -31,6 +31,11 @@ pub mod phys {
         pa % align == 0 && pa >= RAM_BASE && pa.checked_add(len).is_some_and(|end| end <= RAM_END.load(Ordering::Relaxed))
     }
 
+    /// Is `pa` the start of a whole, aligned frame of RAM?
+    pub fn is_ram_page(pa: usize) -> bool {
+        in_ram(pa, PAGE, PAGE)
+    }
+
     #[inline]
     fn check(pa: usize, len: usize, align: usize) {
         let ok = in_ram(pa, len, align);
@@ -39,26 +44,36 @@ pub mod phys {
 
     pub fn read_u8(pa: usize) -> u8 {
         check(pa, 1, 1);
+        // SAFETY: `check` above made `pa..pa+1` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // because a user program or device may share the frame; no reference to it is created.
         unsafe { read_volatile(pa as *const u8) }
     }
 
     pub fn read_u32(pa: usize) -> u32 {
         check(pa, 4, 4);
+        // SAFETY: `check` above made `pa..pa+4` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // because a user program or device may share the frame; no reference to it is created.
         unsafe { read_volatile(pa as *const u32) }
     }
 
     pub fn read_u64(pa: usize) -> u64 {
         check(pa, 8, 8);
+        // SAFETY: `check` above made `pa..pa+8` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // because a user program or device may share the frame; no reference to it is created.
         unsafe { read_volatile(pa as *const u64) }
     }
 
     pub fn write_u32(pa: usize, v: u32) {
         check(pa, 4, 4);
+        // SAFETY: `check` above made `pa..pa+4` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // because a user program or device may share the frame; no reference to it is created.
         unsafe { write_volatile(pa as *mut u32, v) }
     }
 
     pub fn write_u64(pa: usize, v: u64) {
         check(pa, 8, 8);
+        // SAFETY: `check` above made `pa..pa+8` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // because a user program or device may share the frame; no reference to it is created.
         unsafe { write_volatile(pa as *mut u64, v) }
     }
 
@@ -96,18 +111,22 @@ pub mod phys {
     /// A 32-bit word in RAM shared with user space (the rings), used with atomic orderings.
     pub fn atomic_u32(pa: usize) -> &'static AtomicU32 {
         check(pa, 4, 4);
+        // SAFETY: `check` made the word in RAM and 4-aligned (valid for `AtomicU32`), and RAM stays mapped for the kernel's life, so
+        // `'static` holds. Mixing these with non-atomic `copy_*` on the same word would be a race; callers use it for ring words only.
         unsafe { AtomicU32::from_ptr(pa as *mut u32) }
     }
 
     /// Copy `src` into RAM at `pa`.
     pub fn copy_to(pa: usize, src: &[u8]) {
         check(pa, src.len(), 1);
+        // SAFETY: `check` covered `pa..pa+len` in RAM; `src` is a live slice and `ptr::copy` allows overlap; raw pointers only.
         unsafe { core::ptr::copy(src.as_ptr(), pa as *mut u8, src.len()) }
     }
 
     /// Copy RAM at `pa` into `dst`.
     pub fn copy_from(pa: usize, dst: &mut [u8]) {
         check(pa, dst.len(), 1);
+        // SAFETY: `check` covered `pa..pa+len` in RAM; `dst` is a live exclusive slice and `ptr::copy` allows overlap; raw pointers only.
         unsafe { core::ptr::copy(pa as *const u8, dst.as_mut_ptr(), dst.len()) }
     }
 
@@ -115,17 +134,20 @@ pub mod phys {
     pub fn copy_page(dst: usize, src: usize) {
         check(dst, PAGE, PAGE);
         check(src, PAGE, PAGE);
+        // SAFETY: both frames were `check`ed whole, page-aligned and inside RAM; `ptr::copy` is correct even if they were the same frame.
         unsafe { core::ptr::copy(src as *const u8, dst as *mut u8, PAGE) }
     }
 
     #[allow(dead_code)]
     pub fn zero(pa: usize, len: usize) {
         check(pa, len, 1);
+        // SAFETY: `check` covered `pa..pa+len` in RAM; byte writes need no alignment; no reference to the range exists here.
         unsafe { core::ptr::write_bytes(pa as *mut u8, 0, len) }
     }
 
     pub fn zero_page(pa: usize) {
         check(pa, PAGE, PAGE);
+        // SAFETY: `check` covered the whole frame in RAM; byte writes, no reference to the frame is created.
         unsafe { core::ptr::write_bytes(pa as *mut u8, 0, PAGE) }
     }
 
@@ -185,6 +207,7 @@ pub mod cpu {
     /// The free-running system counter.
     pub fn counter() -> u64 {
         let c: u64;
+        // SAFETY: reads CNTPCT_EL0 (EL1 may always read it); no memory is accessed.
         unsafe { asm!("mrs {}, cntpct_el0", out(reg) c, options(nomem, nostack)) };
         c
     }
@@ -192,6 +215,7 @@ pub mod cpu {
     /// The CPU's identification register.
     pub fn midr() -> u64 {
         let m: u64;
+        // SAFETY: reads MIDR_EL1, a read-only identification register; no memory is accessed.
         unsafe { asm!("mrs {}, midr_el1", out(reg) m, options(nomem, nostack)) };
         m
     }
@@ -199,6 +223,7 @@ pub mod cpu {
     /// Does the CPU have the hardware random number instruction (RNDR)?
     pub fn has_rndr() -> bool {
         let isar0: u64;
+        // SAFETY: reads ID_AA64ISAR0_EL1, a read-only feature register; no memory is accessed.
         unsafe { asm!("mrs {}, id_aa64isar0_el1", out(reg) isar0, options(nomem, nostack)) };
         isar0 >> 60 & 0xF != 0
     }
@@ -206,6 +231,8 @@ pub mod cpu {
     /// One word from RNDR (only call when `has_rndr`); `None` if it did not answer this time.
     pub fn rndr() -> Option<u64> {
         let (v, ok): (u64, u64);
+        // SAFETY: RNDR is read only after `has_rndr` said it exists (every caller checks; `rand::rndr` via HAS_RNDR); the read has no
+        // memory effect, and a failed read is reported through the Z flag (`ok`), not by trapping.
         unsafe { asm!("mrs {v}, s3_3_c2_c4_0", "cset {ok}, ne", v = out(reg) v, ok = out(reg) ok, options(nomem, nostack)) };
         (ok != 0).then_some(v)
     }
@@ -217,6 +244,7 @@ pub mod cpu {
 
     /// Sleep until an event or interrupt.
     pub fn wait_for_event() {
+        // SAFETY: WFE only pauses the core until an event or interrupt; it changes no state the compiler tracks.
         unsafe { asm!("wfe") };
     }
 

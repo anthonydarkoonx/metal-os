@@ -55,5 +55,6 @@ impl<E: core::fmt::Debug> Termination for Result<(), E> {
 #[doc(hidden)]
 pub unsafe fn start<R: Termination>(main: fn(&crate::Ctx) -> R, arg: u64, parent: u64, args_ptr: u64, args_len: u64) -> ! {
     init(arg, parent, args_ptr, args_len);
+    // SAFETY: `start`'s own contract is that these are the values the kernel passed to `_start`, which is what `Ctx::new` requires.
     crate::exit(main(&unsafe { crate::Ctx::new(arg, parent, args_ptr, args_len) }).report())
 }

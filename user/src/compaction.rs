@@ -159,12 +159,14 @@ pub fn compactd() -> ! {
 fn stamp(page: usize, id: u64) {
     let p = (heap_base() as usize + page * PAGE) as *mut u64;
     for j in 0..PAGE / 8 {
+        // SAFETY: `p` is page `page` of this task's heap window (pages obtained from HEAP_GROW by the callers); j < PAGE/8 keeps the u64 write inside it.
         unsafe { write_volatile(p.add(j), (id.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ (j as u64).wrapping_mul(0x0100_0000_01B3)) };
     }
 }
 
 fn check(page: usize, id: u64) -> bool {
     let p = (heap_base() as usize + page * PAGE) as *const u64;
+    // SAFETY: same heap page as `stamp`, 8-aligned, j < PAGE/8; volatile so the compactor's migration is really observed.
     (0..PAGE / 8).all(|j| unsafe { read_volatile(p.add(j)) } == (id.wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ (j as u64).wrapping_mul(0x0100_0000_01B3))
 }
 
@@ -252,8 +254,10 @@ pub fn compaction_tests() {
     let mapped = sh >= 0 && svc(4, sh as u64, base as u64, 1, 0, 0)[0] == 0;
     let intact = mapped && {
         for p in 0..want as usize {
+            // SAFETY: `base` is the object mapped (checked via `mapped`) at 0xA000_0000 with `want` pages; p < want, so the u32 lies in the object.
             unsafe { core::ptr::write_volatile((base + p * PAGE) as *mut u32, p as u32 ^ 0x5A5A) };
         }
+        // SAFETY: same mapped `want`-page object as the writes above.
         (0..want as usize).all(|p| unsafe { core::ptr::read_volatile((base + p * PAGE) as *const u32) } == p as u32 ^ 0x5A5A)
     };
     println!("[client] TEST shared memory needs no contiguous run: {want} pages made while the largest free run is {} ({} created, mapped {mapped}): {}", s2.largest,
@@ -308,8 +312,10 @@ pub fn compaction_tests() {
         if good {
             let p = va(MAP_VA) as *mut u64;
             for i in 0..(WANT as usize * PAGE / 8) {
+                // SAFETY: `p` is MAP_VA, mapped (checked) over a WANT-page capability (info[2] == WANT); i < WANT*PAGE/8 keeps the u64 in it.
                 unsafe { write_volatile(p.add(i), i as u64 ^ 0xA5A5) };
             }
+            // SAFETY: same mapped WANT-page region as the writes just above.
             good &= (0..(WANT as usize * PAGE / 8)).all(|i| unsafe { read_volatile(p.add(i)) } == i as u64 ^ 0xA5A5);
         }
         svc(MEMCTL, 11, MC_FREE, slot as u64, 0, 0);
@@ -367,9 +373,11 @@ fn fill_page(page: usize, id: u64) {
             }
             _ => ((i / 8) as u8).wrapping_add(id as u8), // slowly changing bytes
         };
+        // SAFETY: `p` is heap page `page` (from HEAP_GROW in `swap_tests` / the pressure test), i < PAGE. The pressure test asserts its first HEAP_GROW succeeded.
         unsafe { write_volatile(p.add(i), b) };
     }
     // a unique mark at a position that differs per page, so a page restored in the wrong place is noticed
+    // SAFETY: same heap page; id % 4000 < PAGE.
     unsafe { write_volatile(p.add(id as usize % 4000), 0xEE ^ id as u8) };
 }
 
@@ -389,6 +397,7 @@ fn page_ok(page: usize, id: u64) -> bool {
             _ => ((i / 8) as u8).wrapping_add(id as u8),
         };
         let want = if i == id as usize % 4000 { 0xEE ^ id as u8 } else { want };
+        // SAFETY: same heap page as `fill_page`; i < PAGE; the kernel swaps the page back in on a fault, so the read sees the stored data.
         if unsafe { read_volatile(p.add(i)) } != want {
             return false;
         }
@@ -426,6 +435,7 @@ pub fn swap_tests() {
     let msg = b"[client] (this line was read from a page that had been swapped out)\n";
     let pg = (heap_base() as usize + first * PAGE) as *mut u8;
     for (i, &b) in msg.iter().enumerate() {
+        // SAFETY: `pg` is the first heap page of this test's HEAP_GROW block; 3000 + i < 3068 < PAGE.
         unsafe { write_volatile(pg.add(3000 + i), b) };
     }
     let n = swap_out(11, 1024, MCS_FORCE | MCS_SELF | MCS_HEAP);
@@ -448,6 +458,7 @@ pub fn swap_tests() {
     let first2;
     {
         let b = svc(HEAP_GROW, 1, 0, 0, 0, 0)[0] as i64;
+        assert!(b >= 0, "first heap grow failed: {b}");
         first2 = (b as u64 - heap_base()) as usize / PAGE;
         fill_page(first2, 1000);
         held += 1;
@@ -520,12 +531,14 @@ pub fn swap_stress() {
             if next() % 3 == 0 {
                 gen[p] = round;
                 for i in 0..PAGE / 8 {
+                    // SAFETY: `word(p, i)` is inside page p of this test's HEAP_GROW block of N pages (p < N, i < PAGE/8).
                     unsafe { write_volatile(word(p, i), pat(p, round, i)) };
                 }
             } else {
                 // a partial update: the model only tracks full-page patterns, so rewrite the rest too
                 gen[p] = round;
                 for i in 0..PAGE / 8 {
+                    // SAFETY: same page and bounds as the full-page write above.
                     unsafe { write_volatile(word(p, i), pat(p, round, i)) };
                 }
             }
@@ -537,6 +550,7 @@ pub fn swap_stress() {
             let p = (next() % N as u64) as usize;
             for i in 0..PAGE / 8 {
                 let want = if gen[p] == 0 { 0 } else { pat(p, gen[p], i) };
+                // SAFETY: in bounds as for the writes (p < N, i < PAGE/8); a swapped-out page is faulted back in by the kernel.
                 let got = unsafe { read_volatile(word(p, i)) };
                 if got != want {
                     bad += 1;
@@ -552,9 +566,11 @@ pub fn swap_stress() {
     for p in 0..N {
         for i in 0..PAGE / 8 {
             let want = if gen[p] == 0 { 0 } else { pat(p, gen[p], i) };
+            // SAFETY: in bounds as for the writes (p < N, i < PAGE/8).
             if unsafe { read_volatile(word(p, i)) } != want {
                 bad += 1;
                 if first_bad.is_none() {
+                    // SAFETY: in bounds as for the writes (p < N, i < PAGE/8).
                     first_bad = Some((0, p, i, gen[p], unsafe { read_volatile(word(p, i)) }, want));
                 }
                 break;

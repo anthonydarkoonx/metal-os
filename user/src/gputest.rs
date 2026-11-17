@@ -19,6 +19,7 @@ pub fn draw_test_card(fb: *mut u32) {
             } else {
                 0x000040
             };
+            // SAFETY: `fb` is the W x H framebuffer mapped by `info_task` (FB_BYTES = W*H*4, checked by the gpu driver's grant); x < W, y < H.
             unsafe { write_volatile(fb.add(y * W + x), c) };
         }
     }

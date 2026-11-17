@@ -72,6 +72,7 @@ extern "C" fn waiter(_: u64) -> ! {
 }
 
 extern "C" fn crasher(_: u64) -> ! {
+    // SAFETY: deliberately not sound: address 8 is never mapped, so this write must fault and the thread's fault must end the program; that is the test.
     unsafe { core::ptr::write_volatile(8 as *mut u32, 1) };
     loop {}
 }
@@ -116,6 +117,7 @@ extern "C" fn ro_exit(word: u64) -> ! {
 extern "C" fn heaper(id: u64) -> ! {
     let p = heap_grow(1);
     if p > 0 {
+        // SAFETY: `p > 0` is the base of the page `heap_grow(1)` just gave this program: mapped, writable, page-aligned.
         unsafe { core::ptr::write_volatile(p as *mut u64, 0xABCD_0000 + id) };
     }
     PAGES[id as usize % 4].store(p as u32, SeqCst);
@@ -126,6 +128,7 @@ extern "C" fn heaper(id: u64) -> ! {
 extern "C" fn reader(_: u64) -> ! {
     LOCK.lock();
     let r = (|| -> u64 {
+        // SAFETY: `FS` is set once by the main task (scenario 7) before any thread starts and not changed while threads run; read under LOCK, through `addr_of!` so no `&static mut` is made.
         let fs = unsafe { (*core::ptr::addr_of!(FS)).as_ref() }.unwrap();
         let fd = match fs.open_file("/system/hello.txt", O_READ) {
             Ok(fd) => fd,
@@ -260,6 +263,7 @@ program!("threads", |c| {
         // threads use the file system through the program's own session
         7 => {
             match Fs::open() {
+                // SAFETY: no thread has been started yet in this scenario, so nothing else can access `FS`; `addr_of_mut!` makes no reference.
                 Ok(fs) => unsafe { *core::ptr::addr_of_mut!(FS) = Some(fs) },
                 Err(e) => return 1000 + (-e) as u64,
             }
@@ -271,6 +275,7 @@ program!("threads", |c| {
             let theirs = RESULT.load(SeqCst);
             // ... and this task still can, with the descriptor numbering the thread's activity left behind
             LOCK.lock();
+            // SAFETY: the reader thread has ended (joined above) and `LOCK` is held; nothing writes `FS` any more.
             let fs = unsafe { (*core::ptr::addr_of!(FS)).as_ref() }.unwrap();
             let mine = fs.open_file("/system/hello.txt", O_READ).and_then(|fd| {
                 let mut buf = [0u8; 100];
@@ -302,6 +307,7 @@ program!("threads", |c| {
             let mut ok = true;
             for i in 0..150u32 {
                 DONE[2].store(0, SeqCst);
+                // SAFETY: `stack` is a fresh heap stack from `stack()`, used by one `quick` thread at a time: the previous one was joined through DONE[2] before this create.
                 if unsafe { thread::create(quick, stack, 0, 0) } < 0 {
                     ok = false;
                     break;
@@ -327,12 +333,15 @@ program!("threads", |c| {
             let mine = heap_grow(1);
             let pages: [u32; 4] = core::array::from_fn(|i| PAGES[i].load(SeqCst));
             let distinct = (0..4).all(|i| (0..4).all(|j| i == j || pages[i] != pages[j]) && pages[i] as i64 != mine);
+            // SAFETY: each `pages[i]` is the page a `heaper` thread got from `heap_grow` (page-aligned, below 4 GiB so it survives the u32 round trip) and wrote to. UNVERIFIED on the failure path:
+            // if a thread's `heap_grow` failed, the stored value is not an address and this read faults (it is evaluated before the SHARED == 4 check); that still fails the test.
             let seen = (0..4).all(|i| unsafe { core::ptr::read_volatile(pages[i] as *const u64) } == 0xABCD_0000 + i as u64);
             if SHARED.load(SeqCst) == 4 && mine > 0 && distinct && seen { 0 } else { 2 }
         }
         // a thread that ends naming a read-only page as its exit word cannot make the kernel write there
         11 => {
             let word = ro_exit as extern "C" fn(u64) -> ! as usize;
+            // SAFETY: `word` is the address of `ro_exit`'s first instruction in this program's own mapped, readable text; A64 code is 4-aligned.
             let before = unsafe { core::ptr::read_volatile(word as *const u32) };
             if start(ro_exit, word as u64) < 0 {
                 return 1;
@@ -341,6 +350,7 @@ program!("threads", |c| {
                 sleep(1);
             }
             sleep(30); // (the thread is gone by now; the kernel would have stored its 1 on the way out)
+            // SAFETY: same address as `before`.
             let after = unsafe { core::ptr::read_volatile(word as *const u32) };
             if before == after { 0 } else { 2 }
         }

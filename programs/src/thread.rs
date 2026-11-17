@@ -97,7 +97,10 @@ struct Packet<T> {
     result: UnsafeCell<Option<T>>,
 }
 
+// SAFETY: `result` is written once, by the one thread that runs the job, before that thread ends, and is read only by the joiner after it
+// has seen `done != 0` (Acquire); there is never concurrent access, and `T: Send` because the value moves between threads.
 unsafe impl<T: Send> Sync for Packet<T> {}
+// SAFETY: as for `Sync`: the packet only carries a `T` from the thread that ran the job to the joiner, which is what `T: Send` allows.
 unsafe impl<T: Send> Send for Packet<T> {}
 
 pub struct JoinHandle<T> {
@@ -115,6 +118,7 @@ impl<T> JoinHandle<T> {
     pub fn join(mut self) -> T {
         let p = self.packet.take().unwrap();
         join(&p.done);
+        // SAFETY: `join` above returned, so the thread has ended (and written `result`); the joiner is the only reader.
         unsafe { (*p.result.get()).take().expect("a thread ends only by returning") }
     }
 
@@ -139,8 +143,10 @@ struct Start {
 }
 
 extern "C" fn trampoline(arg: u64) -> ! {
+    // SAFETY: `arg` is the `Box<Start>` that `start` leaked with `Box::into_raw`; the kernel passes it through unchanged and a thread is entered once, so this takes it back exactly once.
     let Start { job, done } = *unsafe { Box::from_raw(arg as *mut Start) };
     job();
+    // SAFETY: `done` points into the packet, which stays alive until the thread has been joined (the joiner or the scope holds an Arc; a dropped JoinHandle leaks its share).
     exit(unsafe { &*done })
 }
 
@@ -171,6 +177,7 @@ impl Builder {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
+        // SAFETY: `F` and `T` are `'static` here, so they outlive the thread, which is all `spawn_unchecked` asks.
         unsafe { self.spawn_unchecked(f) }
     }
 
@@ -181,10 +188,14 @@ impl Builder {
         F: FnOnce() -> T + Send,
         T: Send,
     {
+        // SAFETY: `start` needs `f` and `T` to outlive the thread; that is this function's own contract.
         let (packet, id) = unsafe { self.start(f)? };
         Ok(JoinHandle { packet: Some(packet), id })
     }
 
+    /// # Safety
+    /// `f` and `T` must stay valid until the thread has ended: the closure's lifetime is erased below, so the caller must join the thread
+    /// (through the returned packet's `done`) before they end, or make sure they are `'static`.
     unsafe fn start<F, T>(self, f: F) -> crate::io::Result<(Arc<Packet<T>>, i64)>
     where
         F: FnOnce() -> T + Send,
@@ -194,13 +205,16 @@ impl Builder {
         let p2 = packet.clone();
         let job: Box<dyn FnOnce() + '_> = Box::new(move || {
             let r = f();
+            // SAFETY: only this thread writes `result`, once; the joiner reads it only after `done` is set, i.e. after this thread has ended.
             unsafe { *p2.result.get() = Some(r) };
             // (dropping our share cannot free the packet: whoever started the thread keeps one until it has been joined)
         });
+        // SAFETY: only the lifetime bound of the trait object changes (same layout); `start`'s contract is that the closure's captures outlive the thread.
         let job: Box<dyn FnOnce()> = unsafe { core::mem::transmute(job) };
         let start = Box::into_raw(Box::new(Start { job, done: &packet.done }));
         let id = create_with_kernel_stack(trampoline, start as u64, self.caps, self.stack_size);
         if id < 0 {
+            // SAFETY: `start` was just made by `Box::into_raw` and no thread was created (id < 0), so nothing else owns it.
             drop(unsafe { Box::from_raw(start) });
             return Err(crate::io::Error::from_kernel(id));
         }
@@ -249,6 +263,7 @@ pub struct ScopedJoinHandle<'scope, T> {
 impl<T: Send> ScopedJoinHandle<'_, T> {
     pub fn join(self) -> T {
         join(&self.packet.done);
+        // SAFETY: `join` above returned, so the thread has ended (and written `result`); this handle is the only reader.
         unsafe { (*self.packet.result.get()).take().expect("a thread ends only by returning") }
     }
 }
@@ -259,8 +274,10 @@ impl<'scope, 'env> Scope<'scope, 'env> {
         F: FnOnce() -> T + Send + 'scope,
         T: Send + 'scope,
     {
+        // SAFETY: `F` and `T` live for `'scope`, and `scope` joins every thread started on it (all of `ends`) before it returns.
         match unsafe { Builder::new().start(f) } {
             Ok((packet, _)) => {
+                // SAFETY: only the lifetime bound changes; the Arc goes into `ends`, which `scope` drains and drops before `'scope` can end.
                 let ended: Arc<dyn Ended> = unsafe { core::mem::transmute::<Arc<dyn Ended + '_>, Arc<dyn Ended>>(packet.clone() as Arc<dyn Ended + '_>) };
                 self.ends.lock().push(ended);
                 ScopedJoinHandle { packet, _marker: core::marker::PhantomData }

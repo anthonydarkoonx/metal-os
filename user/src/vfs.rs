@@ -99,6 +99,7 @@ fn find_shell() {
 }
 
 fn page(va: usize) -> &'static mut [u8; BS] {
+    // SAFETY: callers pass the address of a page `vfs_server` mapped (VA_ROFS, VA_LFS, the client sessions) or a client's own mapped session page; the peer writes it only while we are blocked in a call. UNVERIFIED: that no two `&mut` from this function are live at once was checked only for `flush` (lfs_put does not touch `page`), not for every caller.
     unsafe { &mut *(va as *mut [u8; BS]) }
 }
 
@@ -1150,6 +1151,7 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], sco
         }
         V_CRASH => {
             println!("[vfs] simulated fault: fd tables and unflushed metadata are lost");
+            // SAFETY: deliberate fault injection: 0x4000 is below every mapping (images are at 0x8000_0000 or higher), so the store traps and the kernel restarts the VFS; that is the test.
             unsafe { write_volatile(0x4000 as *mut u64, 1) };
             err(EIO)
         }

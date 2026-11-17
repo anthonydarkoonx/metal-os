@@ -69,10 +69,12 @@ impl BlkDev {
     }
     fn read_block(&self, blk: u64, out: &mut [u8; 4096]) -> Result<(), ()> {
         self.xfer(BLK_READ, blk)?;
+        // SAFETY: `self.buf` is this server's 4096-byte block-driver buffer (SERVER_BUF_VA, mapped by `map_server_memory` before any `BlkDev` exists); `out` is a separate 4096-byte array; the transfer finished in `xfer`.
         unsafe { core::ptr::copy_nonoverlapping(self.buf as *const u8, out.as_mut_ptr(), 4096) };
         Ok(())
     }
     fn write_block(&self, blk: u64, data: &[u8; 4096]) -> Result<(), ()> {
+        // SAFETY: as in `read_block`: `self.buf` is the mapped 4096-byte driver buffer and `data` a separate array; the driver reads it only after `xfer`.
         unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), self.buf as *mut u8, 4096) };
         self.xfer(BLK_WRITE, blk)
     }
@@ -123,6 +125,7 @@ fn shm_for(sender: u64) -> Option<&'static mut [u8; 4096]> {
         7 => 1,
         _ => return None,
     };
+    // SAFETY: i is 0 or 1; SERVER_SHM_VA and the page after it were mapped read-write by `map_server_memory` before the server loop; the client may write the page concurrently, so its contents are untrusted bytes.
     Some(unsafe { &mut *((va(SERVER_SHM_VA + i * 0x1000)) as *mut [u8; 4096]) })
 }
 
@@ -283,6 +286,7 @@ pub fn lfs_server() -> ! {
             }
             LFS_CRASH => {
                 println!("[lfs] simulated fault with unsynced data in RAM");
+                // SAFETY: deliberate fault injection: 0x3000 is below every mapping (images are at 0x8000_0000 or higher), so the store traps and the kernel restarts lfs; that is the test.
                 unsafe { write_volatile(0x3000 as *mut u64, 1) };
             }
             _ => {
@@ -299,6 +303,7 @@ const C_ROFS_SHM: usize = 0x8032_0000;
 const C_LFS_SHM: usize = 0x8033_0000;
 
 fn cshm(base: usize) -> &'static mut [u8; 4096] {
+    // SAFETY: `base` is C_ROFS_SHM or C_LFS_SHM, mapped (checked) at the top of `storage_tests` before any `cshm` call; the server writes the page only while we are blocked in `call`.
     unsafe { &mut *(base as *mut [u8; 4096]) }
 }
 

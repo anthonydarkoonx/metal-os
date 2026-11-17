@@ -34,12 +34,15 @@ extern "C" fn worker(_: u64) -> ! {
     SEEN_SP.store(top as u64, SeqCst);
     SEEN_HELD.store(quota().held, SeqCst);
     match ACTION.load(SeqCst) {
+        // UNVERIFIED: the first write is the lowest byte of the thread's own stack (mapped, unused), but the second is its topmost byte (`top - 1`), which may be a live slot of `worker`'s own frame; harmless only if it is a dead saved register, which the code does not establish.
         0 => unsafe {
             core::ptr::write_volatile((top - TSTACK_PAGES * PAGE) as *mut u8, 1);
             core::ptr::write_volatile((top - 1) as *mut u8, 2);
         },
+        // SAFETY: deliberately not sound: this is just below the thread's stack, in its guard page, so the write must fault and end the program; that is the test.
         1 => unsafe { core::ptr::write_volatile((top - TSTACK_PAGES * PAGE - 8) as *mut u64, 1) },
         2 => {
+            // SAFETY: deliberately not sound: `top` is the first byte above the thread's stack (its guard page), so the read must fault; that is the test.
             let v = unsafe { core::ptr::read_volatile(top as *const u64) };
             println!("guardtest: the page above a thread's stack is readable ({v})");
         }
@@ -73,11 +76,13 @@ program!("guardtest", |c| -> u64 {
             0
         }
         1 => {
+            // SAFETY: deliberately not sound: this is the 8 bytes just below the main stack, in its guard page, so the write must fault; that is the test.
             unsafe { core::ptr::write_volatile((stack_top - (STACK_PAGES + 1) * PAGE + PAGE - 8) as *mut u64, 1) };
             println!("guardtest 1: the page below the stack is writable");
             0
         }
         2 => {
+            // SAFETY: deliberately not sound: `stack_top` is the first byte above the main stack (its guard page), so the read must fault; that is the test.
             let v = unsafe { core::ptr::read_volatile(stack_top as *const u64) };
             println!("guardtest 2: the page at the top of the stack is readable ({v})");
             0
@@ -88,6 +93,7 @@ program!("guardtest", |c| -> u64 {
             0
         }
         4 => {
+            // UNVERIFIED: the first write is the lowest byte of the main stack (mapped, unused), but the second is its topmost byte (`stack_top - 1`), which may be a live slot of the start-up frame; harmless only if it is dead, which the code does not establish.
             unsafe {
                 core::ptr::write_volatile((stack_top - STACK_PAGES * PAGE) as *mut u8, 1);
                 core::ptr::write_volatile((stack_top - 1) as *mut u8, 2);
@@ -100,7 +106,9 @@ program!("guardtest", |c| -> u64 {
                 println!("guardtest 5: heap_grow gave {p:#x}, heap base {heap_base:#x}");
                 return 1;
             }
+            // SAFETY: `p` is the page `heap_grow(1)` just gave us (checked >= heap base and page-aligned), so it is mapped and writable.
             unsafe { core::ptr::write_volatile(p as *mut u8, 1) };
+            // SAFETY: deliberately not sound: the page after the last heap page is unmapped (docs/ABI.md, HEAP_GROW), so this read must fault; that is the test.
             let v = unsafe { core::ptr::read_volatile((p as usize + PAGE) as *const u8) };
             println!("guardtest 5: the page after the heap is readable ({v})");
             0

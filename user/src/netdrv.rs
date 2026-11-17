@@ -45,6 +45,7 @@ fn init() -> Result<Dev, &'static str> {
     }
     let pci = virtio::Pci::open(va(MMIO_VA), bar_pages as usize * 4096, va(CFG_VA), 0x1041)?;
     pci.start_with(F_MAC)?;
+    // SAFETY: QUEUES_VA is the two-page queue area mapped (checked) from capability 2 just above; the device has not been given the queues yet.
     unsafe { core::ptr::write_bytes(va(QUEUES_VA) as *mut u8, 0, 8192) }; // forget a crashed predecessor's ring state
     let rx = pci.queue_sized(0, NRX as u16, va(QUEUES_VA), queues_pa)?;
     let tx = pci.queue_sized(1, NTX as u16, va(QUEUES_VA) + 4096, queues_pa + 4096)?;
@@ -56,6 +57,7 @@ fn init() -> Result<Dev, &'static str> {
     for r in [RXQ, RXFREE, TXQ, TXDONE] {
         Ring(ring + r).reset();
     }
+    // SAFETY: RING_VA is the ring page mapped (checked) from capability 5; INFO..POLL are inside its first 0x820 bytes; netd waits for READY, which is written last, behind the fence.
     unsafe {
         let m = (ring + INFO) as *mut u8;
         for i in 0..4 {
@@ -86,12 +88,14 @@ pub fn net_driver() -> ! {
             exit(1)
         }
     };
+    // SAFETY: the ring page is mapped and the MAC bytes at INFO..INFO+6 were written by this task in `init`; netd only reads them.
     let mac = unsafe { core::slice::from_raw_parts((va(RING_VA) + INFO) as *const u8, 6) };
     println!("[net] virtio-net ready, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, {NRX} receive and {NTX} transmit buffers", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     let (rxq, rxfree, txq, txdone) = (Ring(va(RING_VA) + RXQ), Ring(va(RING_VA) + RXFREE), Ring(va(RING_VA) + TXQ), Ring(va(RING_VA) + TXDONE));
     let mut last_event = 0u64;
     loop {
         // an interrupt, a kick from netd, or a tick
+        // SAFETY: the ring page is mapped; POLL is inside it; volatile because netd writes it.
         let poll = unsafe { core::ptr::read_volatile((va(RING_VA) + POLL) as *const u32) }.clamp(1, 100) as u64;
         let r = irq_wait_timeout(6, poll);
         if r == 0 {
@@ -134,6 +138,7 @@ pub fn net_driver() -> ! {
                 continue;
             }
             let off = (NRX + slot) * SLOT;
+            // SAFETY: slot < NTX and len + HDR <= SLOT were checked, so HDR bytes at the start of transmit slot (NRX + slot) lie inside the mapped BUFS_VA area; the device is not using this slot (netd owns it until it is posted below).
             unsafe { core::ptr::write_bytes((va(BUFS_VA) + off) as *mut u8, 0, HDR) }; // the virtio header: no offloads
             d.tx.post(slot as u16, virtio::Buf { pa: d.bufs_pa + off as u64, va: va(BUFS_VA) + off, len: (len + HDR) as u32, dev_writes: false });
             sent = true;

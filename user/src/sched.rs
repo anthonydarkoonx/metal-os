@@ -25,7 +25,9 @@ pub fn spinner(tid: u64) -> ! {
     let flag = SPIN_VA as *const u64;
     let mut x = 1u64;
     loop {
+        // SAFETY: SPIN_VA is the flag page mapped read-only (checked) at the top of `spinner`; volatile because the conductor changes it.
         let f = unsafe { read_volatile(flag) };
+        // SAFETY: same mapped flag page; word 1 is inside it.
         if f != 1 && !(f == 3 && unsafe { read_volatile(flag.add(1)) } == tid) {
             sleep(8); // 12 polls a second: idle burners cost next to nothing
             continue;
@@ -46,6 +48,7 @@ pub fn interactive_hog() -> ! {
     let flag = SPIN_VA as *const u64;
     let mut x = 1u64;
     loop {
+        // SAFETY: SPIN_VA mapped (checked) at the top of `interactive_hog`; volatile because the conductor changes it.
         if unsafe { read_volatile(flag) } != 2 {
             sleep(8);
             continue;
@@ -60,6 +63,7 @@ pub fn interactive_hog() -> ! {
 /// A real-time task calling a Background server on a core that an Interactive hog never leaves: the server only
 /// runs at all if it takes over the caller's urgency (one core only: with more the server would simply use another).
 fn inheritance_test(freq: u64) {
+    // SAFETY: SPIN_VA is mapped writable by `sched_tests` (checked), the only caller; the burners read it.
     unsafe { write_volatile(SPIN_VA as *mut u64, 2) };
     sleep(25); // the hog starts
     let core = rt_set(3_000, 20_000, 0);
@@ -78,6 +82,7 @@ fn inheritance_test(freq: u64) {
         }
         rt_clear();
     }
+    // SAFETY: same writable flag page mapped by `sched_tests`.
     unsafe { write_volatile(SPIN_VA as *mut u64, 0) };
     println!("[client] SCHED real-time task calling a Background server while an Interactive task hogs the only core: worst {worst} us, mean {} us over {jobs} calls", sum / jobs);
     println!("[client] TEST a real-time caller's urgency reaches the server it calls (worst call {worst} us, limit 2000): {}", verdict(core >= 0 && worst < 2000));
@@ -102,6 +107,7 @@ fn stats(which: u64, arg: u64) -> [u64; 5] {
 }
 
 fn set_burners(on: bool) {
+    // SAFETY: same writable flag page mapped by `sched_tests`, which calls `set_burners`.
     unsafe { write_volatile(SPIN_VA as *mut u64, on as u64) };
 }
 
@@ -229,7 +235,9 @@ pub fn sched_tests() {
                     break;
                 }
             }
+            // SAFETY: same writable flag page; word 1 (offset 8) is inside it.
             unsafe { write_volatile((SPIN_VA + 8) as *mut u64, burners[pick] as u64) };
+            // SAFETY: same writable flag page.
             unsafe { write_volatile(SPIN_VA as *mut u64, 3) };
             let (l0, b0) = cpu_us(burners[pick], freq);
             sleep(10);

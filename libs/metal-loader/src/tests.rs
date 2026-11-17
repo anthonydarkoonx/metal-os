@@ -227,6 +227,7 @@ fn spawn_drives_the_three_calls_in_order() {
         match id {
             SPAWN => 30,
             TASK_LOAD => {
+                // SAFETY: for TASK_LOAD `a2` is `lr.as_ptr()` of the 24-byte launch record that `spawn` keeps alive on its stack for the whole call.
                 let lr = unsafe { core::slice::from_raw_parts(a2 as *const u8, 24) };
                 assert_eq!(u32::from_le_bytes(lr[16..20].try_into().unwrap()), 1);
                 0

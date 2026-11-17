@@ -24,11 +24,13 @@ const KEY_FILE_DIR: u16 = 0x0019;
 const RAM_FILE: &[u8] = b"opt/metal/ram-bytes";
 
 fn select(key: u16) {
+    // SAFETY: FW_CFG+8 is the fw_cfg selector register (2 bytes) in the device block (l1[0] of `map_devices`); volatile MMIO write.
     unsafe { write_volatile((FW_CFG + 8) as *mut u16, key.to_be()) };
 }
 
 fn read_bytes(buf: &mut [u8]) {
     for b in buf.iter_mut() {
+        // SAFETY: FW_CFG+0 is the fw_cfg data register (byte-wide) in the mapped device block; volatile MMIO read.
         *b = unsafe { read_volatile(FW_CFG as *const u8) };
     }
 }
@@ -114,6 +116,7 @@ impl Rtc for Pl031 {
         if !present() {
             return None;
         }
+        // SAFETY: RTC is the PL031 data register (4-aligned) in the mapped device block; `present()` was checked above; volatile MMIO read.
         match unsafe { read_volatile(RTC as *const u32) } {
             0 => None,
             s => Some(s as u64),
@@ -243,6 +246,8 @@ pub unsafe fn psci_cpu_on(core: usize, entry: u64) -> i64 {
 /// End the run with `code` where the machine can (QEMU: semihosting); returns if it cannot.
 pub fn exit_machine(code: u32) {
     let block = [0x20026u64, code as u64]; // ADP_Stopped_ApplicationExit
+    // SAFETY: ARM semihosting SYS_EXIT (op 0x18) under QEMU: x1 points to `block`, a live stack array of two
+    // u64s for the duration of the call; the host reads it. Memory may be touched, so no `nomem`.
     unsafe { core::arch::asm!("hlt #0xf000", in("x0") 0x18u64, in("x1") block.as_ptr(), options(nostack)) };
 }
 

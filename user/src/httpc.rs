@@ -12,6 +12,7 @@ const NET_PAGE: u64 = 13;
 const SESSION_VA: usize = 0x8039_0000;
 
 fn page() -> &'static mut [u8; 4096] {
+    // SAFETY: SESSION_VA is the 4096-byte session page mapped by `get` before any `page()` call; callers use the reference only transiently (no two live at once); netd writes it only while we are blocked in `call`.
     unsafe { &mut *(va(SESSION_VA) as *mut [u8; 4096]) }
 }
 

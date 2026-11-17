@@ -20,6 +20,7 @@ struct Inner {
 
 pub struct Heap(UnsafeCell<Inner>);
 
+// SAFETY: a task's programs are single-threaded (this image never creates threads, and `THREAD_CREATE` allowance defaults to 0), so the allocator is never entered concurrently.
 unsafe impl Sync for Heap {}
 
 #[global_allocator]
@@ -31,6 +32,8 @@ fn round(n: usize) -> usize {
 
 impl Inner {
     /// Insert a free region, keeping the list address-ordered and merged.
+    /// # Safety
+    /// `addr..addr + size` must be a free, 16-byte-aligned region of at least 16 bytes owned by this heap (fresh HEAP_GROW pages or a block returned to `dealloc`) and not already on the list.
     unsafe fn insert(&mut self, addr: usize, size: usize) {
         let mut prev: *mut Node = null_mut();
         let mut cur = self.head;
@@ -55,6 +58,8 @@ impl Inner {
         }
     }
 
+    /// # Safety
+    /// Must be called with exclusive access to the allocator (single-threaded task); it hands the new kernel-mapped pages to `insert`.
     unsafe fn grow(&mut self, need: usize) -> bool {
         let pages = need.div_ceil(PAGE).max(MIN_GROW_PAGES);
         let r: i64;
@@ -68,7 +73,10 @@ impl Inner {
     }
 }
 
+// SAFETY: `alloc` returns 16-aligned blocks cut from kernel-granted heap pages (align > 16 is refused) and removes them from the free list; `dealloc` takes them back with the same rounding, so blocks never overlap.
 unsafe impl GlobalAlloc for Heap {
+    /// # Safety
+    /// Trait contract of `GlobalAlloc::alloc`; the free list is only touched here, with the task being single-threaded.
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
         if l.align() > 16 {
             return null_mut();
@@ -100,6 +108,8 @@ unsafe impl GlobalAlloc for Heap {
         }
     }
 
+    /// # Safety
+    /// `p` must come from `alloc` with the same `l`; the block is re-inserted with the same rounded size.
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         (*self.0.get()).insert(p as usize, round(l.size()));
     }

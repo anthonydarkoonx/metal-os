@@ -9,12 +9,14 @@ const SHM_VA: usize = 0x803A_0000;
 
 pub fn counter() -> u64 {
     let v: u64;
+    // SAFETY: ISB and the EL0-readable virtual counter (the kernel enables EL0 access); only the output register is written.
     unsafe { asm!("isb", "mrs {}, cntvct_el0", out(reg) v) };
     v
 }
 
 pub fn frequency() -> u64 {
     let v: u64;
+    // SAFETY: CNTFRQ_EL0 is readable at EL0; only the output register is written.
     unsafe { asm!("mrs {}, cntfrq_el0", out(reg) v) };
     v
 }
@@ -47,6 +49,7 @@ pub fn bench_client(tid: u64) -> ! {
             }
         }
         let t1 = counter();
+        // SAFETY: `slot` is this pair's 32-byte slot (k <= 3, so within 128 bytes) of the result page mapped writable at SHM_VA above; the conductor reads it, hence volatile.
         unsafe {
             write_volatile(slot, t1 - t0);
             write_volatile(slot.add(1), errors);
@@ -79,6 +82,7 @@ pub fn bench_tests() {
         }
         let mut waited = 0;
         loop {
+            // SAFETY: SHM_VA is the result page mapped (checked) by `mem_map(20, ..)` above; k < 4 keeps the read inside the 128 bytes of slots; the clients write it, hence volatile.
             let done = (0..pairs).all(|k| unsafe { read_volatile((SHM_VA + k * 32 + 16) as *const u64) } == generation);
             if done {
                 break;
@@ -93,6 +97,7 @@ pub fn bench_tests() {
         let wall = counter() - t0;
         let mut errors = 0;
         for k in 0..pairs {
+            // SAFETY: same mapped result page as above (offset k*32 + 8 < 128); volatile because the client tasks wrote it.
             errors += unsafe { read_volatile((SHM_VA + k * 32 + 8) as *const u64) };
         }
         all_ok &= errors == 0;

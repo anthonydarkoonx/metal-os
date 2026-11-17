@@ -217,6 +217,7 @@ pub fn fuzzer() -> ! {
                     if ring > 0 && ring < (1 << 48) {
                         let p = ring as *mut u32;
                         for _ in 0..(next(&mut rng) % 6) {
+                            // SAFETY: `ring` is the page returned by RING_SETUP (checked > 0 and < 1<<48, so not an error code); the index is < 1024 words = 4096 bytes, one page. The kernel is the other party, so the deliberate scribbling is the test.
                             unsafe { write_volatile(p.add((next(&mut rng) % 1024) as usize), next(&mut rng) as u32) };
                         }
                     }

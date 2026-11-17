@@ -30,9 +30,11 @@ pub(crate) fn ctl(ring: usize, word: usize) -> *mut u32 {
     (ring + word * 4) as *mut u32
 }
 pub(crate) fn cget(ring: usize, word: usize) -> u32 {
+    // SAFETY: `ring` is the audio ring mapping (RING_VA, 64 data pages + control page) made by `Player::open` or the service; `ctl` stays inside the control block; volatile because the other task shares it.
     unsafe { read_volatile(ctl(ring, word)) }
 }
 pub(crate) fn cset(ring: usize, word: usize, v: u32) {
+    // SAFETY: as `cget`: control word inside the mapped ring page, shared with the other task, so volatile.
     unsafe { write_volatile(ctl(ring, word), v) }
 }
 pub(crate) fn slot_ptr(ring: usize, idx: u32) -> *mut u32 {
@@ -78,6 +80,7 @@ impl Player {
             }
             let n = (free as usize).min(frames.len() - i);
             for k in 0..n {
+                // SAFETY: `slot_ptr` reduces the index modulo RING_FRAMES, so it stays inside the 64 data pages of the mapped ring; the `free` computation above means the service has finished reading this slot.
                 unsafe { write_volatile(slot_ptr(self.ring, w.wrapping_add(k as u32)), frames[i + k]) };
             }
             fence(Ordering::SeqCst);

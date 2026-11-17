@@ -35,6 +35,7 @@ impl Ring {
     }
 
     fn at(&self, off: usize) -> &AtomicU32 {
+        // SAFETY: `base` is the ring page the kernel mapped for RING_SETUP (non-zero, page-aligned, so 4-aligned); every offset used (< 1600 + 32 * 48 = 3136) is inside it; atomics because the kernel updates the indices concurrently.
         unsafe { AtomicU32::from_ptr((self.base + off) as *mut u32) }
     }
 
@@ -45,6 +46,7 @@ impl Ring {
             return false;
         }
         let e = self.base + SQ_OFF + (tail % SQ_N) as usize * ENT;
+        // SAFETY: entry `tail % SQ_N` of the submission array (SQ_OFF + 32 * 48 = 1600) lies in the ring page; the kernel does not read it until the tail is published below.
         unsafe {
             write_volatile(e as *mut u32, op);
             write_volatile((e + 4) as *mut u32, slot);
@@ -70,6 +72,7 @@ impl Ring {
             return None;
         }
         let e = self.base + CQ_OFF + (head % CQ_N) as usize * ENT;
+        // SAFETY: entry `head % CQ_N` of the completion array (CQ_OFF + 32 * 48 = 3136 < 4096) is in the ring page; the kernel published it before the tail we acquired above.
         let c = unsafe {
             Cqe {
                 user_data: read_volatile(e as *const u64),

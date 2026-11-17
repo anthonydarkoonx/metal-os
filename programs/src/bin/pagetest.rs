@@ -15,11 +15,13 @@ fn word(p: usize, w: usize, gen: u64) -> u64 {
 
 fn fill(base: usize, p: usize, gen: u64) {
     for w in 0..PAGE / 8 {
+        // UNVERIFIED: `fill` is a safe fn that writes through a caller-supplied integer address; it is sound only because every caller passes `base` from `heap_grow(N)` and `p < N` (w < PAGE / 8 keeps the 8-aligned word inside the page).
         unsafe { core::ptr::write_volatile((base + p * PAGE + w * 8) as *mut u64, word(p, w, gen)) };
     }
 }
 
 fn check(base: usize, p: usize, gen: u64) -> bool {
+    // UNVERIFIED: `check` is a safe fn that reads through a caller-supplied integer address; sound only because every caller passes `base` from `heap_grow(N)` and `p < N`.
     (0..PAGE / 8).all(|w| unsafe { core::ptr::read_volatile((base + p * PAGE + w * 8) as *const u64) } == word(p, w, gen))
 }
 
@@ -37,6 +39,7 @@ program!("pagetest", |c| -> u64 {
     let at = base + 3 * PAGE + 100;
     // (the message sits in page 3, after its pattern is written: keep the pattern valid by writing it past the words)
     for (i, &b) in msg.iter().enumerate() {
+        // SAFETY: `at + i` is inside page 3 of the `N` pages from `heap_grow` (`at` = base + 3 pages + 100, and the message is under 100 bytes).
         unsafe { core::ptr::write_volatile((at + i) as *mut u8, b) };
     }
     match c.arg {
@@ -58,6 +61,7 @@ program!("pagetest", |c| -> u64 {
             }
             let bad = (0..N).filter(|&p| p != 3 && !check(base, p, 0)).count();
             // page 3 holds the message in the middle of its pattern: compare around it
+            // SAFETY: page 3 is one of the `N` pages from `heap_grow` and `w < PAGE / 8`, so each 8-aligned word read is inside it.
             let page3 = (0..PAGE / 8).filter(|&w| (w * 8 + 8 <= 100 || w * 8 >= 100 + msg.len() + 7) && unsafe { core::ptr::read_volatile((base + 3 * PAGE + w * 8) as *const u64) } != word(3, w, 0)).count();
             println!("[pagetest] checked: {bad} pages wrong, {page3} words wrong in the page with the message");
             (bad + page3).min(99) as u64

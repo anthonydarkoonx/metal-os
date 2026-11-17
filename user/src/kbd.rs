@@ -189,6 +189,7 @@ impl Kbd {
                     continue;
                 }
                 let e = (d.queue_va + BUF_OFF + 8 * id as usize) as *const u8;
+                // SAFETY: `e` points at event buffer `id` (id < NBUF checked above) at BUF_OFF + 8*id, inside the queue page (0x400 + 16*8 <= 4096); 8-aligned; the device wrote it and `next_used` flushed it.
                 let (ty, code, value) = unsafe { (read_volatile(e as *const u16), read_volatile(e.add(2) as *const u16), read_volatile(e.add(4) as *const u32)) };
                 let (pa, va, pointer) = (d.queue_pa + (BUF_OFF + 8 * id as usize) as u64, d.queue_va + BUF_OFF + 8 * id as usize, d.pointer);
                 d.q.post(id, virtio::Buf { pa, va, len: 8, dev_writes: true });
@@ -251,6 +252,7 @@ fn dev_init(which: usize, base: u64) -> Result<Dev, &'static str> {
     pci.set_config8(1, EV_ABS as u8);
     let pointer = pci.config8(2) != 0;
     pci.start()?;
+    // SAFETY: `queue_va` is the queue page just mapped (checked) read-write; the device has not been given a queue yet.
     unsafe { core::ptr::write_bytes(queue_va as *mut u8, 0, 4096) }; // forget a crashed predecessor's ring state
     let q = pci.queue(0, NBUF, queue_va, queue_pa)?; // queue 0 is the event queue
     pci.driver_ok();

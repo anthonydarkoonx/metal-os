@@ -49,12 +49,15 @@ struct Held {
 }
 
 struct PerCpu(UnsafeCell<Held>);
+// SAFETY: each entry is used only by the core whose id indexes it (see `held`), so no entry is shared between cores.
 unsafe impl Sync for PerCpu {}
 
 static HELD: [PerCpu; MAX_CPUS] = [const { PerCpu(UnsafeCell::new(Held { depth: 0, rank: [0; MAX_HELD] })) }; MAX_CPUS];
 
 fn held() -> &'static mut Held {
     // Only the owning core touches its own entry, with interrupts masked.
+    // SAFETY: entry `cpu_id()` belongs to this core alone and interrupts are masked in the kernel, so no handler can hold a second `&mut` to it;
+    // callers use the reference briefly and never across another `held()` call.
     unsafe { &mut *HELD[crate::smp::cpu_id()].0.get() }
 }
 
@@ -109,7 +112,9 @@ pub struct SpinLock<T> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: the `locked` flag gives exclusive access to the `UnsafeCell`, so sharing a lock between cores is fine when `T: Send`.
 unsafe impl<T: Send> Sync for SpinLock<T> {}
+// SAFETY: the lock only owns a `T`; moving it to another core moves a `T: Send`.
 unsafe impl<T: Send> Send for SpinLock<T> {}
 
 pub struct Guard<'a, T> {
@@ -137,6 +142,7 @@ impl<T> SpinLock<T> {
         if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             bump(&counts.waits[c]);
             while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
+                // SAFETY: WFE only pauses until the holder's SEV (or any event); it changes no state the compiler tracks.
                 unsafe { asm!("wfe", options(nomem, nostack)) };
             }
         }
@@ -149,12 +155,14 @@ impl<T> SpinLock<T> {
 impl<T> Deref for Guard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: a `Guard` exists only while `locked` is set by this guard, so no other reference to the data exists.
         unsafe { &*self.lock.data.get() }
     }
 }
 
 impl<T> DerefMut for Guard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`, and `&mut self` makes this the only reference through the guard.
         unsafe { &mut *self.lock.data.get() }
     }
 }
@@ -168,6 +176,7 @@ impl<T> Drop for Guard<'_, T> {
             h.depth -= 1;
         }
         self.lock.locked.store(false, Ordering::Release);
+        // SAFETY: SEV only wakes cores waiting in WFE; it changes no state the compiler tracks.
         unsafe { asm!("sev", options(nomem, nostack)) };
     }
 }
@@ -216,12 +225,13 @@ fn acquire_write<'a, T>(state: &'a AtomicI32, data: *mut T, what: &str, spins: u
     RefMut { state, data, _p: core::marker::PhantomData }
 }
 
-fn acquire_read<'a, T>(state: &'a AtomicI32, data: &'a T, what: &str, spins: u32) -> Ref<'a, T> {
+fn acquire_read<'a, T>(state: &'a AtomicI32, data: *const T, what: &str, spins: u32) -> Ref<'a, T> {
     let mut left = spins;
     loop {
         let s = state.load(Ordering::Relaxed);
         if s >= 0 && state.compare_exchange(s, s + 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-            return Ref { state, data };
+            // SAFETY: this reader is registered in `state`, so no `&mut` to the value exists; `data` points at a live value.
+            return Ref { state, data: unsafe { &*data } };
         }
         if left == 0 {
             borrow_violation(what);
@@ -330,9 +340,10 @@ impl<T, const N: usize> Slots<T, N> {
     /// Shared access to entry `i` (panics if it is being written).
     pub fn read(&self, i: usize) -> Ref<'_, T> {
         let st = &self.state[i];
-        // SAFETY: as in `write`; while a read guard lives no writer gets in.
-        let r = unsafe { &*(self.data.get() as *const T).add(i) };
-        acquire_read(st, r, "a table entry", SPINS)
+        // SAFETY: `i` is in range (indexed above). The pointer is only turned into a reference after `acquire_read` has
+        // registered this reader (no writer can be active then).
+        let p = unsafe { (self.data.get() as *const T).add(i) };
+        acquire_read(st, p, "a table entry", SPINS)
     }
 
     /// Exclusive access to the whole table (boot-time set-up; panics if any entry is borrowed).

@@ -29,6 +29,7 @@ static ARMED: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 #[inline]
 pub fn counter() -> u64 {
     let v: u64;
+    // SAFETY: reads CNTPCT_EL0, always readable at EL1; no memory is accessed.
     unsafe { asm!("mrs {}, cntpct_el0", out(reg) v, options(nomem, nostack)) };
     v
 }
@@ -76,6 +77,7 @@ pub fn wall_ns() -> Option<u64> {
 pub fn init() {
     crate::gic::init_dist();
     let freq: u64;
+    // SAFETY: reads CNTFRQ_EL0, a read-only register at EL1; no memory is accessed.
     unsafe { asm!("mrs {}, cntfrq_el0", out(reg) freq) };
     FREQ.store(freq, Ordering::Relaxed);
     INTERVAL.store(freq / HZ, Ordering::Relaxed);
@@ -90,18 +92,21 @@ pub fn init() {
 pub fn init_core() {
     crate::gic::init_cpu();
     // let EL0 read the physical/virtual counter (user-space benchmarks time themselves with it)
+    // SAFETY: CNTKCTL_EL1 bits 0..1 only let EL0 read the counters; no memory is touched.
     unsafe { asm!("msr cntkctl_el1, {}", in(reg) 3u64) };
     let core = crate::smp::cpu_id();
     let (base, iv) = (BASE.load(Ordering::Relaxed), interval());
     let phase = iv / MAX_CPUS as u64 * core as u64;
     let k = (counter() - base) / iv + 1;
     NEXT_JIFFY[core].store(base + k * iv + phase, Ordering::Relaxed);
+    // SAFETY: enables this core's physical timer (ENABLE=1, IMASK=0); no memory is accessed.
     unsafe { asm!("msr cntp_ctl_el0, {}", in(reg) 1u64, options(nomem, nostack)) };
     program(core, NEXT_JIFFY[core].load(Ordering::Relaxed));
 }
 
 fn program(core: usize, at: u64) {
     ARMED[core].store(at, Ordering::Relaxed);
+    // SAFETY: programs this core's own comparator; no memory is accessed.
     unsafe { asm!("msr cntp_cval_el0, {}", in(reg) at, options(nomem, nostack)) };
 }
 

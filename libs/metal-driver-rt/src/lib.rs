@@ -61,6 +61,7 @@ pub const CONSOLE: u64 = 15; // cap slot holding the console capability
 #[inline(always)]
 pub fn svc(id: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> [u64; 6] {
     let (mut r0, mut r1, mut r2, mut r3, mut r4, mut r5) = (id, a1, a2, a3, a4, a5);
+    // SAFETY: SVC #0 traps to the kernel, which preserves every register except x0-x5 (the declared inout results); no stack is used; pointer args are validated by the kernel.
     unsafe {
         asm!("svc #0",
             inout("x0") r0, inout("x1") r1, inout("x2") r2,

@@ -173,6 +173,7 @@ fn rpc<T>(op: u64, a: u64, b: u64, fill: impl FnOnce(&mut [u8; 4096]), take: imp
         // `fill` gets one before, `take` gets a new one after.
         fill(unsafe { &mut *(va() as *mut [u8; 4096]) });
         match crate::call(EP, [op, a, b]) {
+            // SAFETY: as above (page mapped, lock held); `call` has returned, so the service is no longer writing the page, and this shared reference ends when `take` does.
             (0, r) if r[0] == S_OK => Ok(take(&r, unsafe { &*(va() as *const [u8; 4096]) })),
             (0, r) => Err(status_error(r[0], r[1])),
             (e, _) => Err(Error::from_kernel(e)),
@@ -219,6 +220,8 @@ fn mapped() -> bool {
 /// answer was waiting for may have happened. Read it *before* the call that may say "would block".
 fn event() -> u32 {
     if mapped() {
+        // SAFETY: `mapped()` is true, so `va()` is the mapped session page and offset 0 is a 4-aligned word; volatile because the service updates it.
+        // UNVERIFIED: this runs without the lock, so another thread inside `rpc` may hold a `&mut [u8; 4096]` over the same word (aliasing) and the service's write is not atomic as Rust sees it.
         unsafe { core::ptr::read_volatile(va() as *const u32) }
     } else {
         0

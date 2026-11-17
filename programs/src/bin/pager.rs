@@ -24,6 +24,7 @@ static mut BUF: Buf = Buf([0; PAGE]);
 static WORD: AtomicU32 = AtomicU32::new(0);
 
 fn buf() -> *mut u8 {
+    // SAFETY: `addr_of_mut!` makes a raw pointer to the static without creating a reference; this does not read or write it.
     unsafe { core::ptr::addr_of_mut!(BUF) as *mut u8 }
 }
 
@@ -49,6 +50,7 @@ fn io_slot(slot: u64, write: bool) -> bool {
     if f.seek(SeekFrom::Start(slot * PAGE as u64)).is_err() {
         return false;
     }
+    // SAFETY: `buf()` is the page-sized static BUF; the pager is single-threaded and the kernel touches the buffer only inside the MC_NEXT/MC_DONE calls (docs/ABI.md), never while this slice is in use.
     let data = unsafe { core::slice::from_raw_parts_mut(buf(), PAGE) };
     let ok = if write {
         f.write_all(data).is_ok()

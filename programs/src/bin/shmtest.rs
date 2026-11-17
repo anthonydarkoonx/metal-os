@@ -12,6 +12,7 @@ const BIG: usize = 0xA000_0000;
 const PAGE: usize = 4096;
 
 fn word(va: usize) -> &'static AtomicU32 {
+    // UNVERIFIED: `word` is a safe fn that turns any integer into a `&'static AtomicU32`; sound only because every caller passes a 4-aligned address inside an object it has just mapped (and, in scenario 4, the object may be revoked underneath it on purpose).
     unsafe { &*(va as *const AtomicU32) }
 }
 
@@ -56,6 +57,7 @@ program!("shmtest", |c| {
             if map(s, BIG, true) != 0 {
                 return 4;
             }
+            // SAFETY: the 3-page object was just mapped writable at BIG (`map` returned 0), so BIG..BIG + 3 pages is mapped, writable and exclusively ours here.
             let mem = unsafe { core::slice::from_raw_parts_mut(BIG as *mut u8, 3 * PAGE) };
             if mem.iter().any(|&b| b != 0) {
                 return 5;
@@ -139,8 +141,10 @@ program!("shmtest", |c| {
                 }
                 *a = va as usize;
                 // usable, and each object is its own memory
+                // SAFETY: `*a` was just returned by `map_anywhere` for a 3-page writable object and checked page-aligned and inside a window.
                 unsafe { core::ptr::write_volatile(*a as *mut u32, 0xA0 + i as u32) };
             }
+            // SAFETY: every `a` is a mapped, page-aligned object start from the loop above (nothing was unmapped in between).
             if at.iter().enumerate().any(|(i, &a)| unsafe { core::ptr::read_volatile(a as *const u32) } != 0xA0 + i as u32) {
                 return 2;
             }
@@ -155,6 +159,7 @@ program!("shmtest", |c| {
             if va < 0 || !(0xA000_0000..0xC000_0000).contains(&(va as usize)) || va as usize % PAGE != 0 {
                 return 4;
             }
+            // SAFETY: `va` maps a 200-page writable object (checked page-aligned, in the large window); page 199 is its last page.
             unsafe { core::ptr::write_volatile((va as usize + 199 * PAGE) as *mut u8, 1) };
             println!("automap first={:#x} large={:#x}", at[0], va);
             0
@@ -166,8 +171,10 @@ program!("shmtest", |c| {
                 return 1;
             }
             // (the object is usable, so a fault below is the neighbour's)
+            // SAFETY: `va` is the start of a freshly mapped writable 3-page object (`va >= 0` checked).
             unsafe { core::ptr::write_volatile(va as *mut u8, 1) };
             let at = if c.arg == 11 { va as usize + 3 * PAGE } else { va as usize - PAGE };
+            // SAFETY: deliberately not sound: `at` is the unmapped guard page just after (scenario 11) or before (12) the object, so this read must fault and kill the program; that is the test.
             let v = unsafe { core::ptr::read_volatile(at as *const u8) };
             println!("shmtest {}: the neighbouring page is readable ({v})", c.arg);
             0
@@ -184,6 +191,7 @@ program!("shmtest", |c| {
                 if va < 0 || !(0xA000_0000..0xC000_0000).contains(&(va as usize)) {
                     return 2;
                 }
+                // SAFETY: `va` maps a 3-page writable object (checked in the window); page 2 is its last page.
                 unsafe { core::ptr::write_volatile((va as usize + 2 * PAGE) as *mut u8, 1) };
             }
             0
@@ -209,6 +217,7 @@ program!("shmtest", |c| {
             if va < 0 {
                 return 2;
             }
+            // SAFETY: `va` is the start of the 1-page writable object just mapped (`va >= 0` checked).
             unsafe { core::ptr::write_volatile(va as *mut u8, 1) };
             0
         }
@@ -216,6 +225,7 @@ program!("shmtest", |c| {
             if map(0, BIG, true) != 0 {
                 return 1;
             }
+            // SAFETY: slot 0 is the parent's 2-page object (user/src/programs.rs) and `map` returned 0, so BIG..+2 pages is mapped and writable.
             let mem = unsafe { core::slice::from_raw_parts_mut(BIG as *mut u8, 2 * PAGE) };
             if (0..PAGE).any(|i| mem[i] != pattern(i, 7)) {
                 return 2;
@@ -248,6 +258,7 @@ program!("shmtest", |c| {
             if map(0, BIG, false) != 0 {
                 return 2;
             }
+            // SAFETY: the read-only mapping of slot 0 (at least one page) succeeded (`map` returned 0), so BIG..+PAGE is mapped and readable.
             let mem = unsafe { core::slice::from_raw_parts(BIG as *const u8, PAGE) };
             if (0..PAGE).any(|i| mem[i] != pattern(i, 7)) {
                 return 3;
@@ -268,6 +279,7 @@ program!("shmtest", |c| {
             if s < 0 || map(s as u64, BIG, true) != 0 {
                 return 1;
             }
+            // SAFETY: the 64-page object was just mapped writable at BIG (`map` returned 0), so the whole range is ours to write.
             unsafe { core::ptr::write_bytes(BIG as *mut u8, 0x5A, 64 * PAGE) };
             0
         }
@@ -322,6 +334,7 @@ program!("shmtest", |c| {
             if s < 0 || map(s as u64, BIG, true) != 0 {
                 return 100;
             }
+            // SAFETY: the 8-page object was just mapped writable at BIG (`map` returned 0).
             let mem = unsafe { core::slice::from_raw_parts_mut(BIG as *mut u8, 8 * PAGE) };
             for (i, b) in mem.iter_mut().enumerate() {
                 *b = pattern(i, 9);

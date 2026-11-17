@@ -37,12 +37,15 @@ const FORMAT_B8G8R8X8: u32 = 2;
 const RESOURCE: u32 = 1;
 
 fn put32(off: usize, v: u32) {
+    // SAFETY: CMD_VA is the command page mapped read-write (mem_map in gpu_init); callers use offsets < RESP + response size, well inside 4096 bytes.
     unsafe { write_volatile((va(CMD_VA) + off) as *mut u32, v) }
 }
 fn put64(off: usize, v: u64) {
+    // SAFETY: same mapped command page; callers pass 8-aligned offsets inside it.
     unsafe { write_volatile((va(CMD_VA) + off) as *mut u64, v) }
 }
 fn get32(off: usize) -> u32 {
+    // SAFETY: same mapped command page; the device wrote the response (volatile, after submit's cache maintenance).
     unsafe { read_volatile((va(CMD_VA) + off) as *const u32) }
 }
 
@@ -65,6 +68,7 @@ impl Gpu {
 
     /// Send the request in the command page (`req` bytes) and wait for the response (`resp` bytes).
     fn send(&mut self, req: usize, resp: usize) -> u32 {
+        // SAFETY: CMD_VA is the mapped command page and `resp` (a response size of at most 24 + 16*24 bytes) fits after RESP; the device does not touch it before `submit`.
         unsafe { core::ptr::write_bytes((va(CMD_VA) + RESP) as *mut u8, 0, resp) };
         self.q.submit(&[
             virtio::Buf { pa: self.cmd_pa, va: va(CMD_VA), len: req as u32, dev_writes: false },
@@ -178,6 +182,7 @@ fn gpu_init() -> Result<Gpu, &'static str> {
     let pci = virtio::Pci::open(va(MMIO_VA), bar_pages as usize * 4096, va(CFG_VA), 0x1050)?;
     pci.start()?;
     // the DMA pages outlive a crashed driver: forget stale queue and command state
+    // SAFETY: QUEUE_VA and CMD_VA are the two pages mapped (checked) above; the device has not been given the queue yet.
     unsafe {
         core::ptr::write_bytes(va(QUEUE_VA) as *mut u8, 0, 4096);
         core::ptr::write_bytes(va(CMD_VA) as *mut u8, 0, 4096);

@@ -16,7 +16,9 @@ pub struct Mutex<T: ?Sized> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: the data is reachable only through a `MutexGuard`, which exists only while `raw` is held, so moving the mutex moves a `T: Send`.
 unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
+// SAFETY: the lock gives one thread at a time access to `data`, so sharing the mutex needs only `T: Send`.
 unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}
 
 /// Not `Send` (the raw mutex is released by the thread that took it) and `Sync` only when `T` is, like std's.
@@ -25,6 +27,7 @@ pub struct MutexGuard<'a, T: ?Sized> {
     _not_send: core::marker::PhantomData<*mut ()>,
 }
 
+// SAFETY: a `&MutexGuard` can only hand out `&T`, so sharing the guard between threads is sharing a `&T`, which `T: Sync` allows.
 unsafe impl<T: ?Sized + Sync> Sync for MutexGuard<'_, T> {}
 
 impl<T> Mutex<T> {
@@ -51,12 +54,14 @@ impl<T: ?Sized> Mutex<T> {
 impl<T: ?Sized> Deref for MutexGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: a guard exists only while this thread holds `raw`, so no other reference to `data` exists.
         unsafe { &*self.lock.data.get() }
     }
 }
 
 impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`, and `&mut self` makes this the guard's only access.
         unsafe { &mut *self.lock.data.get() }
     }
 }
@@ -120,7 +125,9 @@ pub struct RwLock<T> {
     data: UnsafeCell<T>,
 }
 
+// SAFETY: moving the lock moves its `T`, which `T: Send` allows.
 unsafe impl<T: Send> Send for RwLock<T> {}
+// SAFETY: readers on several threads share `&T` (`T: Sync`) and a writer on any thread gets `&mut T` (`T: Send`); `state` keeps the two apart.
 unsafe impl<T: Send + Sync> Sync for RwLock<T> {}
 
 pub struct RwLockReadGuard<'a, T>(&'a RwLock<T>);
@@ -147,6 +154,7 @@ impl<T> RwLock<T> {
 impl<T> Deref for RwLockReadGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: a read guard exists only while `state.0 > 0` was counted in `read`, and a writer cannot be active then, so only shared references exist.
         unsafe { &*self.0.data.get() }
     }
 }
@@ -154,12 +162,14 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
 impl<T> Deref for RwLockWriteGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
+        // SAFETY: a write guard exists only while `state.1` is set, which excludes every reader and any other writer.
         unsafe { &*self.0.data.get() }
     }
 }
 
 impl<T> DerefMut for RwLockWriteGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`: the write guard is the only access, and `&mut self` makes it exclusive.
         unsafe { &mut *self.0.data.get() }
     }
 }
@@ -219,7 +229,9 @@ pub struct OnceLock<T> {
     value: UnsafeCell<MaybeUninit<T>>,
 }
 
+// SAFETY: `value` is written once, inside `call_once`, and is read only after `once` is complete (Release/Acquire); from then on it is only shared, so `T: Sync`, and `T: Send` because any thread may create it.
 unsafe impl<T: Send + Sync> Sync for OnceLock<T> {}
+// SAFETY: moving the lock moves the (possibly set) `T`, which `T: Send` allows.
 unsafe impl<T: Send> Send for OnceLock<T> {}
 
 impl<T> OnceLock<T> {
@@ -228,10 +240,12 @@ impl<T> OnceLock<T> {
     }
 
     pub fn get(&self) -> Option<&T> {
+        // SAFETY: `is_completed()` (Acquire) is true only after `call_once` wrote `value` and stored 2 (Release), so it is initialised and no longer written.
         self.once.is_completed().then(|| unsafe { (*self.value.get()).assume_init_ref() })
     }
 
     pub fn get_or_init(&self, f: impl FnOnce() -> T) -> &T {
+        // SAFETY: `call_once` runs this at most once and no reader looks at `value` before it completes, so the write to the uninitialised slot is exclusive.
         self.once.call_once(|| unsafe {
             (*self.value.get()).write(f());
         });
@@ -242,6 +256,7 @@ impl<T> OnceLock<T> {
 impl<T> Drop for OnceLock<T> {
     fn drop(&mut self) {
         if self.once.is_completed() {
+            // SAFETY: `&mut self` rules out other references; `is_completed()` says `value` was initialised, and this drops it exactly once.
             unsafe { (*self.value.get()).assume_init_drop() };
         }
     }

@@ -11,6 +11,7 @@ fn glyph(c: u8) -> Option<&'static [u8; 9]> {
 pub fn fill_rect(fb: *mut u32, width: usize, x: usize, y: usize, w: usize, h: usize, color: u32) {
     for row in y..y + h {
         for col in x..x + w {
+            // SAFETY: UNVERIFIED: safe fn writing `fb[row*width+col]` with no bounds check; sound only if callers (console, `draw_char`, gputest) keep the rectangle inside a buffer of `width` x height pixels, which holds for the existing callers but is not enforced here.
             unsafe { write_volatile(fb.add(row * width + col), color) };
         }
     }

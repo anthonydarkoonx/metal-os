@@ -40,12 +40,24 @@ Notes for a desktop's author:
 - The screen task is a boot task: the kernel refuses fixed mapping addresses. A crate that has its own copy of `metal-driver-rt` (the usual case)
   must call `metal_driver_rt::auto_maps()` first, because that copy has its own statics.
 - The desktop crate is built with `-C relocation-model=pic -Zembed-metadata=yes` and fat LTO so the user image's own LTO can use it.
-- The desktop's programs (taskbar, files, ...) are ordinary `.map` packages for `progmgr`; they are not part of this interface.
-  Today the image gets no packages from a desktop: with `DESKTOP` set you get the compositor, the desktop surface and the pointer, and
-  the programs still have to be built, signed and installed.
+
+## The desktop's programs
+
+A desktop brings its programs as packages, installed by default:
+
+- The desktop repository has an `os/` directory: a Cargo workspace of `no_std` programs (`os/src/bin/<program>.rs`, using the `metal-programs` crate),
+  `os/packages/<id>.manifest` for each package, and `os/defaults`.
+- `make disk DESKTOP=<path>` builds them as position-independent programs (`METAL_OS_DIR` names this checkout, for the linker script), and
+  `tools/mkmap.py` signs the packages with the dev key and puts them in `/system/usr/programs` (`METAL_EXTRA_PACKAGES`).
+- `os/defaults` becomes `/system/etc/program-defaults`: one program id a line, `id autostart` to start it too. The program manager installs each
+  on first start (a note in `/data/programs`, not a copy) and starts the `autostart` ones. A default program the user uninstalls stays uninstalled
+  (a `.gone` note).
+- The manifest key `role = desktop` marks the taskbar program: it implies `permission = shell`, and the manager tells the compositor
+  (`MGR_SET_ROLE`) once the program has started. The compositor takes requests for that role only from the manager.
 
 ## Status (2026-11-17)
 
-Boots in QEMU (`make run-window DESKTOP=../metal-os-desktop`): the compositor runs on the real system calls and draws the desktop surface and
-the pointer. Not done: building and installing the desktop's programs, and the OS-side features the desktop's design lists (`docs/DESKTOP.md` in the
-desktop repository, §14: `KILL_OF`, start with an argument, `opens`). The test suites were not run with a desktop linked in.
+Boots in QEMU (`make run-window DESKTOP=../metal-os-desktop`): the compositor and the `desktop` program (taskbar, Start menu, clock, installed-programs list)
+run on the real system calls, installed and started by default. Not done: the desktop's other programs (terminal, files, settings, task manager,
+capabilities manager: each needs a program and an OS-side `Env`), and the OS-side features the desktop's design lists (`docs/DESKTOP.md` in the desktop
+repository, §14: `KILL_OF`, start with an argument, `opens`). The test suites were not run with a desktop linked in.

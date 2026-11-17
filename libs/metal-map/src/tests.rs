@@ -274,3 +274,13 @@ fn the_allfiles_permission_is_its_own() {
     let plain = parse_manifest("id = fm\nname = Files\nversion = 1.0.0\nclass = interactive\nability = main ui bin/fm\n").unwrap();
     assert!(!plain.allfiles, "not given unless asked for");
 }
+
+#[test]
+fn role_desktop_makes_a_shell_client_and_only_that_role_exists() {
+    let base = "id = desktop\nname = Desktop\nversion = 1.0.0\nclass = interactive\nability = main ui bin/desktop\n";
+    let m = parse_manifest(&std::format!("{base}role = desktop\n")).unwrap();
+    assert!(m.desktop && m.shell && m.display, "a desktop is a shell client with the display");
+    assert!(!parse_manifest(base).unwrap().desktop, "no role, no desktop");
+    assert!(parse_manifest(&std::format!("{base}role = panel\n")).is_err(), "unknown role");
+    assert!(parse_manifest(&std::format!("{base}role = desktop\nrole = desktop\n")).is_err(), "role twice");
+}

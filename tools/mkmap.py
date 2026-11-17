@@ -23,6 +23,15 @@ from cryptography.hazmat.primitives import serialization
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
+# A desktop (or anything else built outside this tree) can bring packages: METAL_EXTRA_PACKAGES is a directory with
+# packages/<id>.manifest, bin/<program>.pie and an optional `defaults` file (see docs/DESKTOP-INTERFACE.md). They are signed with the dev key.
+EXTRA = os.environ.get("METAL_EXTRA_PACKAGES")
+
+
+def extra_defaults():
+    """The text of /etc/program-defaults: the programs the image installs (and starts) by default; empty without a desktop."""
+    p = os.path.join(EXTRA, "defaults") if EXTRA else None
+    return open(p).read() if p and os.path.exists(p) else ""
 MAGIC = b"METALMAP"
 
 
@@ -77,11 +86,16 @@ def entries(manifest: str):
 
 
 def package(pid: str):
-    manifest = open(os.path.join(ROOT, "programs", "packages", pid + ".manifest")).read()
+    own = os.path.join(ROOT, "programs", "packages", pid + ".manifest")
+    ext = os.path.join(EXTRA, "packages", pid + ".manifest") if EXTRA else None
+    manifest = open(own if os.path.exists(own) else ext).read()
     files = []
     for path in entries(manifest):
         prog = os.path.basename(path)
-        files.append((path, open(os.path.join(ROOT, "programs", "build", prog + ".pie"), "rb").read()))
+        pie = os.path.join(ROOT, "programs", "build", prog + ".pie")
+        if not os.path.exists(pie) and EXTRA:
+            pie = os.path.join(EXTRA, "bin", prog + ".pie")
+        files.append((path, open(pie, "rb").read()))
     signer = None if pid == "nosign" else load_key("rogue" if pid == "rogue" else "dev")
     img = build(manifest, files, signer)
     if pid == "corrupt":
@@ -99,8 +113,11 @@ def package(pid: str):
 
 
 def all_ids():
-    d = os.path.join(ROOT, "programs", "packages")
-    return sorted(f[:-9] for f in os.listdir(d) if f.endswith(".manifest")) if os.path.isdir(d) else []
+    ids = set()
+    for d in (os.path.join(ROOT, "programs", "packages"), os.path.join(EXTRA, "packages") if EXTRA else None):
+        if d and os.path.isdir(d):
+            ids |= {f[:-9] for f in os.listdir(d) if f.endswith(".manifest")}
+    return sorted(ids)
 
 
 def packages():

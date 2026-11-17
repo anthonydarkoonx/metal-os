@@ -108,5 +108,7 @@ def system_tree():
     import mkmap
     tree["etc"]["program-keys"] = mkmap.program_keys().encode()
     tree["etc"]["program-policy"] = mkmap.program_policy().encode()
+    if mkmap.extra_defaults():
+        tree["etc"]["program-defaults"] = mkmap.extra_defaults().encode()  # what a desktop installs and starts by default
     tree["usr"]["programs"] = mkmap.packages()  # Metal Program Packages for the program manager (see docs/PROGRAMS.md)
     return tree

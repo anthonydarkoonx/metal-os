@@ -50,7 +50,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -64,6 +64,24 @@ DESKTOP_OUT := $(DESKTOP_DIR)/target-metal-os/$(TARGET)/release
 DESKTOP_REPO := "https://github.com/anthonydarkoonx/metal-os"
 # (the desktop's dependencies sit in `deps/` or, with newer cargo, in `build/<crate>/<hash>/out/`: every such directory is searched)
 USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metal_desktop_boot=$(DESKTOP_OUT)/libmetal_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
+# The desktop's programs: its `os/` workspace builds them as position-independent programs; they are signed and put in the system image by
+# tools/mkmap.py (METAL_EXTRA_PACKAGES) and installed by default through `/etc/program-defaults`.
+DESKTOP_PKG := $(DESKTOP_DIR)/target-metal-os/pkg
+export METAL_EXTRA_PACKAGES := $(DESKTOP_PKG)
+DESKTOP_PIE := -C relocation-model=pic -C link-arg=-pie -C link-arg=--no-dynamic-linker -C link-arg=-znorelro
+desktop-programs:
+	cp $(DESKTOP_DIR)/os/Cargo.lock $(DESKTOP_DIR)/os/Cargo.lock.metal-os-bak 2>/dev/null || true
+	cd $(DESKTOP_DIR)/os && METAL_OS_DIR=$(CURDIR) RUSTFLAGS='$(DESKTOP_PIE) -Zembed-metadata=yes' cargo build --release --target $(TARGET) --target-dir ../target-metal-os-programs \
+	  --config 'patch.$(DESKTOP_REPO).metal-driver-rt.path="$(CURDIR)/libs/metal-driver-rt"' \
+	  --config 'patch.$(DESKTOP_REPO).metal-gfx.path="$(CURDIR)/libs/metal-gfx"' \
+	  --config 'patch.$(DESKTOP_REPO).metal-programs.path="$(CURDIR)/programs"'; rc=$$?; \
+	  if [ -f $(DESKTOP_DIR)/os/Cargo.lock.metal-os-bak ]; then mv $(DESKTOP_DIR)/os/Cargo.lock.metal-os-bak $(DESKTOP_DIR)/os/Cargo.lock; fi; test $$rc = 0
+	rm -rf $(DESKTOP_PKG); mkdir -p $(DESKTOP_PKG)/bin $(DESKTOP_PKG)/packages
+	for f in $(DESKTOP_DIR)/os/src/bin/*.rs; do n=$$(basename $$f .rs); cp $(DESKTOP_DIR)/target-metal-os-programs/$(TARGET)/release/$$n $(DESKTOP_PKG)/bin/$$n.pie; done
+	cp $(DESKTOP_DIR)/os/packages/*.manifest $(DESKTOP_PKG)/packages/
+	cp $(DESKTOP_DIR)/os/defaults $(DESKTOP_PKG)/defaults
+disk: desktop-programs
+
 desktop-lib:
 	cp $(DESKTOP_DIR)/Cargo.lock $(DESKTOP_DIR)/Cargo.lock.metal-os-bak
 	cd $(DESKTOP_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metal-desktop-boot --target-dir target-metal-os --config 'profile.release.lto="fat"' \

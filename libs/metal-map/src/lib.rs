@@ -25,6 +25,7 @@
 //! heap_pages = 128                # memory limit, 1..=16384 (default 128)
 //! threads    = 0                  # extra threads, 0..=8
 //! class      = interactive        # interactive | background | heavy
+//! role = desktop                  # the desktop (taskbar, Start menu): the manager gives the compositor its role; implies shell
 //! permission = files              # files | network | display | shell | allfiles | admin (repeatable)
 //! ability    = main ui bin/counter.pie     # name, kind (ui | service), entry file in the package
 //! ```
@@ -137,6 +138,8 @@ pub struct Manifest {
     pub shell: bool,
     pub allfiles: bool,
     pub admin: bool,
+    /// `role = desktop`: the program is the desktop (taskbar, Start menu); the manager tells the compositor so after it starts it.
+    pub desktop: bool,
     pub abilities: Vec<Ability>,
 }
 
@@ -185,6 +188,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
         shell: false,
         allfiles: false,
         admin: false,
+        desktop: false,
         abilities: Vec::new(),
     };
     let mut seen: Vec<&str> = Vec::new();
@@ -261,6 +265,15 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
                     m.display = true;
                 }
                 _ => return Err(bad("unknown permission")),
+            },
+            // (a desktop is a shell client: it needs the display and the control endpoint)
+            "role" => match v {
+                "desktop" => {
+                    m.desktop = true;
+                    m.shell = true;
+                    m.display = true;
+                }
+                _ => return Err(bad("unknown role")),
             },
             "ability" => {
                 let mut it = v.split_whitespace();

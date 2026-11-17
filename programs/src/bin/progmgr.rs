@@ -147,6 +147,11 @@ fn pkg_path(id: &str) -> String {
     format!("/data/programs/{id}.map")
 }
 
+/// Whether the system image installs this program by default (`/system/etc/program-defaults`).
+fn is_default(id: &str) -> bool {
+    fs::read_to_string("/system/etc/program-defaults").is_ok_and(|t| t.lines().any(|l| l.split('#').next().unwrap_or("").split_whitespace().next() == Some(id)))
+}
+
 /// Where a program's stored policy is kept: one byte of permission bits the user has taken away (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin).
 fn policy_path(id: &str) -> String {
     format!("/data/programs/{id}.pol")
@@ -240,6 +245,7 @@ impl Mgr {
             return e;
         }
         let _ = fs::create_dir("/data/programs");
+        let _ = fs::remove_file(&format!("/data/programs/{id}.gone"));
         // (a note, not a copy: the package stays where it is, in the system image)
         let stale = fs::metadata(&pkg_path(id)).is_ok();
         if fs::write(&link_path(id), b"system").is_err() {
@@ -269,6 +275,9 @@ impl Mgr {
         }
         remove_tree(&data_dir(id), 3); // (an uninstalled program takes its data with it, and its stored policy)
         let _ = fs::remove_file(&policy_path(id));
+        if is_default(id) {
+            let _ = fs::write(&format!("/data/programs/{id}.gone"), b"uninstalled"); // (a default program the user removed stays removed)
+        }
         self.programs.retain(|a| a.m.id != id);
         self.insts.retain(|i| i.program != id);
         OK
@@ -337,8 +346,10 @@ impl Mgr {
         match cmd.spawn() {
             Ok(c) => {
                 println!("[progmgr] {id}/{} started as task {}", a.name, c.id());
-                if shell {
-                    // the compositor lets this task make panels and overlays and use the shell requests (it only listens to the manager for this)
+                if m.desktop && shell {
+                    // the compositor gives the desktop role (taskbar, Start menu, the shell requests) only on the manager's word
+                    let r = DISPLAY.call([97 | 1 << 24 /* MGR_SET_ROLE, role desktop */, c.id() as u64, 0]);
+                    println!("[progmgr] {id}: desktop role {}", if matches!(r, Ok(x) if x[0] == 0) { "given" } else { "refused (no desktop is running the screen?)" });
                 }
                 self.insts[ix].child = Some(c);
                 Ok(())
@@ -631,7 +642,27 @@ program!("progmgr", |_c| {
             }
         }
     }
+    // the programs the image comes with (a desktop's, for one): `/system/etc/program-defaults`, one id a line, `id autostart` to start it too.
+    // Installed once; one the user uninstalled stays uninstalled (a `.gone` note in /data/programs).
+    let mut autostart: Vec<String> = Vec::new();
+    if let Ok(t) = fs::read_to_string("/system/etc/program-defaults") {
+        for line in t.lines().map(|l| l.split('#').next().unwrap_or("").trim()).filter(|l| !l.is_empty()) {
+            let mut it = line.split_whitespace();
+            let Some(id) = it.next() else { continue };
+            if !m.programs.iter().any(|a| a.m.id == id) && fs::metadata(&format!("/data/programs/{id}.gone")).is_err() {
+                let r = m.install(id);
+                println!("[progmgr] default program {id}: {}", if r == OK { "installed" } else { "not installed" });
+            }
+            if it.next() == Some("autostart") {
+                autostart.push(id.into());
+            }
+        }
+    }
     println!("[progmgr] ready, {} programs installed", m.programs.len());
+    for id in autostart {
+        let r = m.start(&id, 0, 0);
+        println!("[progmgr] autostart {id}: {}", if r[0] == OK { "started" } else { "not started" });
+    }
     loop {
         let now = ticks();
         loop {

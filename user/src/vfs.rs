@@ -98,9 +98,49 @@ fn find_shell() {
     }
 }
 
-fn page(va: usize) -> &'static mut [u8; BS] {
-    // SAFETY: callers pass the address of a page `vfs_server` mapped (VA_ROFS, VA_LFS, the client sessions) or a client's own mapped session page; the peer writes it only while we are blocked in a call. UNVERIFIED: that no two `&mut` from this function are live at once was checked only for `flush` (lfs_put does not touch `page`), not for every caller.
-    unsafe { &mut *(va as *mut [u8; BS]) }
+/// A session page shared with another task (a client, or a backend). The peer writes it at any time it runs, so the page is never
+/// turned into a Rust reference: everything goes through copies in and out (`put`, `get`, `vec`, `snap`), each a bounded raw copy.
+#[derive(Clone, Copy)]
+struct Pg(usize);
+
+fn page(va: usize) -> Pg {
+    Pg(va)
+}
+
+impl Pg {
+    /// Copy `src` into the page at `off`.
+    fn put(self, off: usize, src: &[u8]) {
+        assert!(off <= BS && src.len() <= BS - off);
+        // SAFETY: callers pass the address of a page `vfs_server` mapped (VA_ROFS, VA_LFS, the client sessions) or a client's own
+        // mapped session page of `BS` bytes; the range is inside it (asserted); `src` is a local slice, never inside the page.
+        unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), (self.0 as *mut u8).add(off), src.len()) }
+    }
+
+    /// Copy page bytes at `off` into `dst`.
+    fn get(self, off: usize, dst: &mut [u8]) {
+        assert!(off <= BS && dst.len() <= BS - off);
+        // SAFETY: as `put`; `dst` is a local slice.
+        unsafe { core::ptr::copy_nonoverlapping((self.0 as *const u8).add(off), dst.as_mut_ptr(), dst.len()) }
+    }
+
+    fn vec(self, off: usize, len: usize) -> Vec<u8> {
+        let mut v = vec![0u8; len];
+        self.get(off, &mut v);
+        v
+    }
+
+    /// Set the bytes from `from` to the end of the page to `byte`.
+    fn fill_from(self, from: usize, byte: u8) {
+        assert!(from <= BS);
+        // SAFETY: as `put`: `from..BS` is inside the page.
+        unsafe { core::ptr::write_bytes((self.0 as *mut u8).add(from), byte, BS - from) }
+    }
+
+    fn snap<const N: usize>(self, off: usize) -> [u8; N] {
+        let mut a = [0u8; N];
+        self.get(off, &mut a);
+        a
+    }
 }
 
 /// Backends restart on crash and every request is idempotent, so retry on E_DEAD.
@@ -184,8 +224,8 @@ fn scope_entries(ds: &Datafs, sc: &str) -> usize {
 // ---------------------------------------------------------------------------
 fn rofs_path(p: &str) {
     let pg = page(va(VA_ROFS));
-    pg[..p.len()].copy_from_slice(p.as_bytes());
-    pg[p.len()] = 0;
+    pg.put(0, p.as_bytes());
+    pg.put(p.len(), &[0]);
 }
 
 fn rofs_stat(p: &str) -> Result<(u64, u64), u64> {
@@ -200,7 +240,7 @@ fn rofs_read(p: &str, off: u64, out: &mut [u8]) -> Result<usize, u64> {
     match r[0] {
         0 => {
             let n = r[1] as usize;
-            out[..n].copy_from_slice(&page(va(VA_ROFS))[DATA..DATA + n]);
+            page(va(VA_ROFS)).get(DATA, &mut out[..n]);
             Ok(n)
         }
         1 => Err(ENOENT),
@@ -213,7 +253,7 @@ fn rofs_list(p: &str) -> Result<Vec<u8>, u64> {
     rofs_path(p);
     let r = backend(SL_ROFS_EP, [ROFS_LIST, 0, 0]).ok_or(EIO)?;
     match r[0] {
-        0 => Ok(page(va(VA_ROFS))[DATA..DATA + r[1] as usize].to_vec()),
+        0 => Ok(page(va(VA_ROFS)).vec(DATA, r[1] as usize)),
         1 => Err(ENOENT),
         _ => Err(EISDIR),
     }
@@ -372,7 +412,8 @@ impl Datafs {
         };
         match lfs_get(META_KEY) {
             Ok(true) => {
-                let pg = page(va(VA_LFS));
+                let copy = page(va(VA_LFS)).vec(0, BS); // (parse a private copy)
+                let pg = &copy[..];
                 if u32::from_le_bytes(pg[0..4].try_into().unwrap()) == MAGIC {
                     d.next_ino = u32::from_le_bytes(pg[4..8].try_into().unwrap());
                     d.next_gen = u32::from_le_bytes(pg[8..12].try_into().unwrap()).max(1);
@@ -406,7 +447,8 @@ impl Datafs {
                 exit(1)
             }
         }
-        let pg = page(va(VA_LFS));
+        let copy = page(va(VA_LFS)).vec(0, BS); // (parse a private copy)
+        let pg = &copy[..];
         if u32::from_le_bytes(pg[0..4].try_into().unwrap()) != JOURNAL_MAGIC {
             return;
         }
@@ -458,8 +500,7 @@ impl Datafs {
 
     /// Persist directory table and make everything written so far durable.
     fn flush(&mut self) -> Result<(), u64> {
-        let pg = page(va(VA_LFS));
-        pg.fill(0);
+        let mut pg = vec![0u8; BS]; // (built privately, then copied into the page)
         pg[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         pg[4..8].copy_from_slice(&self.next_ino.to_le_bytes());
         pg[8..12].copy_from_slice(&self.next_gen.to_le_bytes());
@@ -470,6 +511,7 @@ impl Datafs {
             b[68] = e.kind;
             b[72..80].copy_from_slice(&e.size.to_le_bytes());
         }
+        page(va(VA_LFS)).put(0, &pg);
         lfs_put(META_KEY)?;
         if self.jdirty {
             pg.fill(0);
@@ -482,6 +524,7 @@ impl Datafs {
                     b[8..16].copy_from_slice(&s.old_size.to_le_bytes());
                 }
             }
+            page(va(VA_LFS)).put(0, &pg);
             lfs_put(JOURNAL_KEY)?;
         }
         lfs_sync()?;
@@ -585,7 +628,7 @@ impl Datafs {
             return Ok(()); // beyond the old end (rollback drops it), or saved already
         }
         if !lfs_get(key(ino, blk))? {
-            page(va(VA_LFS)).fill(0); // a hole reads as zeros
+            page(va(VA_LFS)).fill_from(0, 0); // a hole reads as zeros
         }
         lfs_put(undo_key(ino, s.gen, blk))?;
         s.logged[(blk / 64) as usize] |= 1 << (blk % 64);
@@ -611,7 +654,7 @@ impl Datafs {
             let (blk, inb) = (pos / BS as u64, (pos % BS as u64) as usize);
             let n = (total - done).min(BS - inb);
             if lfs_get(key(ino, blk))? {
-                out[done..done + n].copy_from_slice(&page(va(VA_LFS))[inb..inb + n]);
+                page(va(VA_LFS)).get(inb, &mut out[done..done + n]);
             } else {
                 out[done..done + n].fill(0); // hole
             }
@@ -635,13 +678,13 @@ impl Datafs {
         if from % bs != 0 {
             // the end of the block holding `from`: keep what is below it, zero the rest
             if lfs_get(key(ino, b))? {
-                page(va(VA_LFS))[(from % bs) as usize..].fill(0);
+                page(va(VA_LFS)).fill_from((from % bs) as usize, 0);
                 lfs_put(key(ino, b))?;
             }
             b += 1;
         }
         while b < to / bs {
-            page(va(VA_LFS)).fill(0);
+            page(va(VA_LFS)).fill_from(0, 0);
             lfs_put(key(ino, b))?;
             b += 1;
         }
@@ -676,12 +719,12 @@ impl Datafs {
                 // partial block: read-modify-write. Only the part below the old end of file is content.
                 let valid = size.saturating_sub(blk * BS as u64).min(BS as u64) as usize;
                 if valid > 0 && lfs_get(k)? {
-                    page(va(VA_LFS))[valid..].fill(0);
+                    page(va(VA_LFS)).fill_from(valid, 0);
                 } else {
-                    page(va(VA_LFS)).fill(0);
+                    page(va(VA_LFS)).fill_from(0, 0);
                 }
             }
-            page(va(VA_LFS))[inb..inb + n].copy_from_slice(&data[done..done + n]);
+            page(va(VA_LFS)).put(inb, &data[done..done + n]);
             lfs_put(k)?;
             done += n;
         }
@@ -860,8 +903,8 @@ fn client_page(sender: u64, gens: &mut [u64]) -> Option<(usize, bool, usize)> {
     }
 }
 
-fn get_path(pg: &[u8; BS]) -> Option<String> {
-    let own: [u8; DATA] = snapshot(&pg[..DATA]); // (the client may rewrite the page while we parse it)
+fn get_path(pg: Pg) -> Option<String> {
+    let own: [u8; DATA] = pg.snap(0); // (the client may rewrite the page while we parse it)
     let n = own.iter().position(|&c| c == 0)?;
     norm(core::str::from_utf8(&own[..n]).ok()?)
 }
@@ -910,7 +953,7 @@ pub fn vfs_server() -> ! {
 /// (the kernel says who that is), only while the child has a file session, and the directory is named as the *caller* sees it, so
 /// a caller that is itself confined can only narrow, never widen. The child is confined from its first request: it is
 /// normally still an embryo when this arrives (see `metal_loader::spawn_with`).
-fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64], who: usize, pg: &[u8; BS], child: u64) -> [u64; 3] {
+fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64], who: usize, pg: Pg, child: u64) -> [u64; 3] {
     let err = |e: u64| [e, 0, 0];
     let child = child as usize;
     if child >= scopes.len() || child == who {
@@ -939,7 +982,7 @@ fn fd_slot(table: &[Fd], fd: u64) -> Option<usize> {
     (i < FDS && !matches!(table[i], Fd::Free)).then_some(i)
 }
 
-fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], scope: Option<&str>) -> [u64; 3] {
+fn handle(ds: &mut Datafs, table: &mut [Fd], pg: Pg, w: [u64; 3], scope: Option<&str>) -> [u64; 3] {
     let err = |e: u64| [e, 0, 0];
     match w[0] {
         V_OPEN => {
@@ -1017,7 +1060,7 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], sco
             };
             match res {
                 Ok(n) => {
-                    pg[DATA..DATA + n].copy_from_slice(&buf[..n]);
+                    pg.put(DATA, &buf[..n]);
                     [0, n as u64, 0]
                 }
                 Err(e) => err(e),
@@ -1028,7 +1071,7 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], sco
             let len = (w[2] as usize).min(MAXIO);
             match &mut table[i] {
                 Fd::Data { slot, ino, off, flags, gen } if *flags & O_WRITE != 0 && ds.ents[*slot].ino == *ino && ds.wgen[*slot] == *gen => {
-                    match ds.write(*slot, *off, &pg[DATA..DATA + len]) {
+                    match ds.write(*slot, *off, &pg.vec(DATA, len)) {
                         Ok(n) => {
                             *off += n as u64;
                             [0, n as u64, 0]
@@ -1094,7 +1137,7 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], sco
                     match names {
                         Ok(v) => {
                             let n = v.len().min(MAXIO);
-                            pg[DATA..DATA + n].copy_from_slice(&v[..n]);
+                            pg.put(DATA, &v[..n]);
                             [0, n as u64, 0]
                         }
                         Err(e) => err(e),
@@ -1123,8 +1166,9 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: &mut [u8; BS], w: [u64; 3], sco
         }
         V_RENAME => {
             let Some(from) = get_path(pg) else { return err(EINVAL) };
-            let n = pg[..DATA].iter().position(|&c| c == 0).unwrap_or(DATA);
-            let rest = &pg[(n + 1).min(DATA)..DATA];
+            let own: [u8; DATA] = pg.snap(0); // (a private copy: the client may rewrite the page meanwhile)
+            let n = own.iter().position(|&c| c == 0).unwrap_or(DATA);
+            let rest = &own[(n + 1).min(DATA)..DATA];
             let Some(m) = rest.iter().position(|&c| c == 0) else { return err(EINVAL) };
             let Some(to) = core::str::from_utf8(&rest[..m]).ok().and_then(norm) else { return err(EINVAL) };
             match (route_scoped(&from, scope), route_scoped(&to, scope)) {
@@ -1176,7 +1220,7 @@ impl Vfs {
         Vfs { ep, shm }
     }
 
-    fn pg(&self) -> &'static mut [u8; BS] {
+    fn pg(&self) -> Pg {
         page(self.shm)
     }
 
@@ -1196,8 +1240,8 @@ impl Vfs {
             return Err(EINVAL as i64);
         }
         let pg = self.pg();
-        pg[..p.len()].copy_from_slice(p.as_bytes());
-        pg[p.len()] = 0;
+        pg.put(0, p.as_bytes());
+        pg.put(p.len(), &[0]);
         self.rpc(op, a, 0)
     }
 
@@ -1218,7 +1262,7 @@ impl Vfs {
             if n == 0 {
                 break;
             }
-            buf[done..done + n as usize].copy_from_slice(&self.pg()[DATA..DATA + n as usize]);
+            self.pg().get(DATA, &mut buf[done..done + n as usize]);
             done += n as usize;
         }
         Ok(done)
@@ -1227,7 +1271,7 @@ impl Vfs {
         let mut done = 0;
         while done < data.len() {
             let n = (data.len() - done).min(MAXIO);
-            self.pg()[DATA..DATA + n].copy_from_slice(&data[done..done + n]);
+            self.pg().put(DATA, &data[done..done + n]);
             let (wrote, _) = self.rpc(V_WRITE, fd, n as u64)?;
             done += wrote as usize;
         }
@@ -1238,7 +1282,7 @@ impl Vfs {
     }
     pub fn list(&self, path: &str) -> VResult<String> {
         let (n, _) = self.with_path(path, V_LIST, 0)?;
-        Ok(String::from_utf8_lossy(&self.pg()[DATA..DATA + n as usize]).into_owned())
+        Ok(String::from_utf8_lossy(&self.pg().vec(DATA, n as usize)).into_owned())
     }
     pub fn unlink(&self, path: &str) -> VResult<()> {
         self.with_path(path, V_UNLINK, 0).map(|_| ())

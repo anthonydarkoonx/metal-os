@@ -272,9 +272,16 @@ where
 {
     let s = Scope { ends: crate::sync::Mutex::new(Vec::new()), _marker: core::marker::PhantomData };
     let r = f(&s);
-    let ends = core::mem::take(&mut *s.ends.lock());
-    for e in ends {
-        join(e.word());
+    // A scoped thread may itself spawn more on the same scope, so one pass is not enough: keep joining until a pass finds nothing new.
+    // Any thread that can still spawn is itself in the list, so it has been joined before the list is found empty.
+    loop {
+        let ends = core::mem::take(&mut *s.ends.lock());
+        if ends.is_empty() {
+            break;
+        }
+        for e in ends {
+            join(e.word());
+        }
     }
     r
 }

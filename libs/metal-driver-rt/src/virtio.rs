@@ -31,6 +31,14 @@ pub const OFF_DESC: usize = 0x000;
 pub const OFF_AVAIL: usize = 0x100;
 pub const OFF_USED: usize = 0x200;
 
+/// Where `queue_sized` puts the available and the used ring (offsets from the start of the queue's page), or None if the queue does not fit
+/// in one page. The used ring starts on a 64-byte boundary, and the available ring ends in an earlier cache line.
+pub fn packed_layout(size: u16) -> Option<(usize, usize)> {
+    let avail = 16 * size as usize;
+    let used = (avail + 6 + 2 * size as usize + 63) & !63;
+    (used + 6 + 8 * size as usize <= 4096).then_some((avail, used))
+}
+
 fn rd32(a: usize) -> u32 {
     unsafe { read_volatile(a as *const u32) }
 }
@@ -150,13 +158,11 @@ impl Pci {
     }
 
     /// A queue of up to a few hundred entries: the three structures are packed one after the other from the start of
-    /// the memory (descriptors, then the available ring, then the used ring), which must be zeroed.
+    /// the memory (descriptors, then the available ring, then the used ring), which must be zeroed and is one page. The used
+    /// ring starts on a 64-byte boundary of its own: the driver cleans the available ring's cache lines and the device writes the used
+    /// ring, so the two must never share a line (a clean would write the CPU's old copy of the used ring's header over the device's).
     pub fn queue_sized(&self, index: u16, size: u16, va: usize, pa: u64) -> Result<Queue, &'static str> {
-        let avail = 16 * size as usize;
-        let used = (avail + 6 + 2 * size as usize + 3) & !3;
-        if used + 6 + 8 * size as usize > 4096 * 2 {
-            return Err("queue does not fit");
-        }
+        let (avail, used) = packed_layout(size).ok_or("queue does not fit")?;
         self.queue_at(index, size, va, pa, avail, used)
     }
 
@@ -298,6 +304,7 @@ impl Queue {
         dma::flush(self.va + self.off_used, 4 + 8 * self.size as usize); // the device wrote the used ring
         let used = unsafe { read_volatile((self.va + self.off_used + 2) as *const u16) };
         if used != self.used_seen {
+            fence(); // the device's data is read only after its index is seen
             self.used_seen = used;
             for i in 0..self.ninflight {
                 let (va, len) = self.inflight[i];
@@ -356,7 +363,9 @@ impl Queue {
         if idx == self.used_seen {
             return None;
         }
+        fence(); // the element is read only after its index is seen ...
         let e = (self.va + self.off_used + 4 + 8 * (self.used_seen % self.size) as usize) as *const u32;
+        dma::flush(e as usize, 8); // ... and from memory, not from a line fetched before the device wrote it
         let (id, len) = unsafe { (read_volatile(e), read_volatile(e.add(1))) };
         self.used_seen = self.used_seen.wrapping_add(1);
         if let Some(&(va, n)) = self.posted.get(id as usize) {
@@ -364,5 +373,38 @@ impl Queue {
         }
         fence();
         Some((id as u16, len))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+
+    #[test]
+    fn the_used_ring_never_shares_a_cache_line_with_the_available_ring() {
+        for size in 1..=256u16 {
+            let Some((avail, used)) = packed_layout(size) else { continue };
+            let avail_last_byte = avail + 4 + 2 * size as usize + 2 - 1; // flags, idx, the entries, used_event
+            assert_eq!(used % 64, 0, "size {size}: used ring not line-aligned");
+            assert!(avail_last_byte / 64 < used / 64, "size {size}: the rings share a cache line");
+            assert!(avail >= 16 * size as usize, "size {size}: overlaps the descriptors");
+            assert!(used + 4 + 8 * size as usize + 2 <= 4096, "size {size}: past the page");
+        }
+    }
+
+    #[test]
+    fn the_network_queues_fit_one_page_each() {
+        use crate::netring::{NRX, NTX};
+        assert!(packed_layout(NRX as u16).is_some());
+        assert!(packed_layout(NTX as u16).is_some());
+        // (the transmit queue starts one page after the receive queue)
+        let (_, used) = packed_layout(NRX as u16).unwrap();
+        assert!(used + 6 + 8 * NRX <= 4096);
+    }
+
+    #[test]
+    fn a_queue_too_big_for_a_page_is_refused() {
+        assert!(packed_layout(512).is_none());
     }
 }

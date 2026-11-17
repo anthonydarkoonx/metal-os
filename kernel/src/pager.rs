@@ -203,7 +203,7 @@ pub fn next(cur: usize, buf_va: usize) -> Result<(u64, u64), i64> {
         Some(Op::Read { slot, .. }) => Ok((JOB_READ, slot as u64)),
         Some(Op::Write { slot, .. }) => {
             let t = task::lock(me);
-            let Some(pa) = crate::swap::translate(&t, me, buf_va) else { return Err(E_INVAL) };
+            let Some(pa) = crate::swap::translate_writable(&t, me, buf_va) else { return Err(E_INVAL) };
             if !crate::frame::phys::try_copy_to(pa, &SCRATCH.get()[..PAGE]) {
                 return Err(E_INVAL); // not RAM (a device page)
             }

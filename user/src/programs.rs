@@ -978,6 +978,8 @@ pub fn tests() {
         println!("[client] TEST 150 threads one after another each get a fresh slot (code {c}): {}", verdict(c == 0));
         let c = run(10, 4, false);
         println!("[client] TEST threads grow their program's heap and see each other's pages (code {c}): {}", verdict(c == 0));
+        let c = run(11, 1, false);
+        println!("[client] TEST a thread that ends naming the program's read-only code as its exit word leaves the code untouched (code {c}): {}", verdict(c == 0));
         let t = Req::new().arg(8).threads(4).go(&threads);
         sleep(15);
         let busy_slots = (FIRST_DYNAMIC as i64..64).filter(|&x| state_of(x) != 0).count();

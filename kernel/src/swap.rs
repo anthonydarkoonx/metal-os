@@ -283,12 +283,25 @@ pub fn handle_fault(tid: usize, ec: u64, esr: u64, far: usize) -> Fault {
 /// Physical address of user address `va` in a task whose lock the caller holds, bringing the page back from
 /// the store first if it was swapped out.
 pub fn translate(t: &task::Task, tid: usize, va: usize) -> Option<usize> {
-    if let Some(pa) = mmu::translate(t.l1, va) {
+    translate_for(t, tid, va, false)
+}
+
+/// `translate` for an address the kernel is about to write: refuses a page the program maps read-only (see `mmu::translate_writable`).
+pub fn translate_writable(t: &task::Task, tid: usize, va: usize) -> Option<usize> {
+    translate_for(t, tid, va, true)
+}
+
+fn translate_for(t: &task::Task, tid: usize, va: usize, write: bool) -> Option<usize> {
+    let walk = |va| if write { mmu::translate_writable(t.l1, va) } else { mmu::translate(t.l1, va) };
+    if let Some(pa) = walk(va) {
         return Some(pa);
+    }
+    if write && mmu::translate(t.l1, va).is_some() {
+        return None; // mapped, but read-only for the program
     }
     let page = va & !(PAGE - 1);
     match mmu::inspect(t.l1, page) {
-        Page::Swapped(_) if bring_in(tid, t.l1, page) == Back::Ok => return mmu::translate(t.l1, va),
+        Page::Swapped(_) if bring_in(tid, t.l1, page) == Back::Ok => return walk(va),
         Page::Disk(slot) => {
             // the caller fails; a system call on the list in `syscall::handle` is run again when the page is back
             if let crate::pager::Wait::Sleep = crate::pager::request_in(tid, page, slot) {

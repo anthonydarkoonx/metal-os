@@ -124,7 +124,7 @@ pub fn store_and_wake(t: &task::Task, space: usize, va: usize, value: u32) {
     if va % 4 != 0 {
         return;
     }
-    let Some(pa) = crate::swap::translate(t, space, va) else { return };
+    let Some(pa) = crate::swap::translate_writable(t, space, va) else { return }; // (a read-only page is never written for a program)
     let key = key_of(pa, va);
     let _table = TABLE.lock(R_WORDS);
     if !crate::frame::phys::try_write_u32(pa, value) {

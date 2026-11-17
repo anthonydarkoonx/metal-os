@@ -395,12 +395,23 @@ pub fn is_mapped(l1: usize, va: usize) -> bool {
 
 /// Software page-table walk (used to validate user pointers).
 pub fn translate(l1: usize, va: usize) -> Option<usize> {
+    translate_for(l1, va, false)
+}
+
+/// Like `translate`, for an address the *kernel is about to write* on the program's behalf: None if the program's own mapping is read-only
+/// (code, `Perm::Ro` shared pages). The kernel reaches RAM through its own read-write mapping, so without this check a program could get the
+/// kernel to write into a page it is not allowed to write.
+pub fn translate_writable(l1: usize, va: usize) -> Option<usize> {
+    translate_for(l1, va, true)
+}
+
+fn translate_for(l1: usize, va: usize, write: bool) -> Option<usize> {
     let page = va & !(mem::PAGE - 1);
     if !in_user(page) {
         return None;
     }
     let pte = *leaf(l1, page, None)?;
-    if pte & 1 == 0 {
+    if pte & 1 == 0 || (write && pte & AP_RO != 0) {
         return None;
     }
     Some((pte & ADDR_MASK) as usize | (va & (mem::PAGE - 1)))

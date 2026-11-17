@@ -80,6 +80,8 @@ impl Ring {
         if self.is_empty() {
             return None;
         }
+        // the entry must not be read before the producer's index is seen (a control dependency does not order two loads on Arm)
+        fence(Ordering::Acquire);
         unsafe {
             let c = read_volatile(self.cons());
             let v = read_volatile(self.entry(c));
@@ -104,4 +106,84 @@ pub fn entry(slot: usize, len: usize) -> u32 {
 
 pub fn unpack(v: u32) -> (usize, usize) {
     ((v & 0xFFFF) as usize, (v >> 16) as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::Arc;
+    use std::vec;
+
+    fn page() -> std::boxed::Box<[u64; 512]> {
+        std::boxed::Box::new([0u64; 512])
+    }
+
+    #[test]
+    fn entries_come_out_in_order_across_wraparound() {
+        let mem = page();
+        let r = Ring(mem.as_ptr() as usize);
+        for round in 0..5u32 {
+            for i in 0..RING_ENTRIES as u32 {
+                assert!(r.push(round * 1000 + i));
+            }
+            assert!(r.is_full() && !r.push(7), "a full ring refuses");
+            for i in 0..RING_ENTRIES as u32 {
+                assert_eq!(r.pop(), Some(round * 1000 + i));
+            }
+            assert_eq!(r.pop(), None);
+        }
+    }
+
+    #[test]
+    fn a_hostile_producer_index_cannot_make_the_consumer_read_outside_the_ring() {
+        let mem = page();
+        let r = Ring(mem.as_ptr() as usize);
+        unsafe { write_volatile(r.prod(), u32::MAX) }; // the peer claims four billion entries
+        assert_eq!(r.len() as usize, RING_ENTRIES);
+        let mut n = 0;
+        while r.pop().is_some() && n < 10 * RING_ENTRIES {
+            n += 1;
+        }
+        assert!(n >= RING_ENTRIES); // (it keeps handing out ring slots, never an address outside the page)
+    }
+
+    #[test]
+    fn one_producer_and_one_consumer_never_lose_or_reorder_entries() {
+        let mem: Arc<[u64; 512]> = Arc::new([0u64; 512]);
+        let base = mem.as_ptr() as usize;
+        let stop = Arc::new(AtomicBool::new(false));
+        let total = 200_000u32;
+        let prod = std::thread::spawn(move || {
+            let r = Ring(base);
+            let mut i = 0u32;
+            while i < total {
+                if r.push(i) {
+                    i += 1;
+                }
+            }
+        });
+        let seen = Arc::clone(&mem);
+        let s2 = stop.clone();
+        let cons = std::thread::spawn(move || {
+            let r = Ring(seen.as_ptr() as usize);
+            let mut expect = 0u32;
+            let mut out = vec![];
+            while expect < total && !s2.load(SeqCst) {
+                if let Some(v) = r.pop() {
+                    if v != expect {
+                        out.push((expect, v));
+                        expect = v;
+                    }
+                    expect += 1;
+                }
+            }
+            out
+        });
+        prod.join().unwrap();
+        let bad = cons.join().unwrap();
+        stop.store(true, SeqCst);
+        assert!(bad.is_empty(), "entries lost or out of order: {:?}", &bad[..bad.len().min(5)]);
+    }
 }

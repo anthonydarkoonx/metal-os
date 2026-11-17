@@ -104,6 +104,14 @@ extern "C" fn quick(_: u64) -> ! {
     thread::exit(&DONE[2])
 }
 
+/// Ends by naming a word in the program's own *code* as the word the kernel stores a 1 into and wakes: the kernel must refuse (the code
+/// page is read-only for the program), not write through its own mapping.
+extern "C" fn ro_exit(word: u64) -> ! {
+    DONE[0].store(1, SeqCst);
+    svc(thread::THREAD_EXIT, word, 1, 0, 0, 0);
+    loop {}
+}
+
 extern "C" fn heaper(id: u64) -> ! {
     let p = heap_grow(1);
     if p > 0 {
@@ -320,6 +328,20 @@ program!("threads", |c| {
             let distinct = (0..4).all(|i| (0..4).all(|j| i == j || pages[i] != pages[j]) && pages[i] as i64 != mine);
             let seen = (0..4).all(|i| unsafe { core::ptr::read_volatile(pages[i] as *const u64) } == 0xABCD_0000 + i as u64);
             if SHARED.load(SeqCst) == 4 && mine > 0 && distinct && seen { 0 } else { 2 }
+        }
+        // a thread that ends naming a read-only page as its exit word cannot make the kernel write there
+        11 => {
+            let word = ro_exit as extern "C" fn(u64) -> ! as usize;
+            let before = unsafe { core::ptr::read_volatile(word as *const u32) };
+            if start(ro_exit, word as u64) < 0 {
+                return 1;
+            }
+            while DONE[0].load(SeqCst) == 0 {
+                sleep(1);
+            }
+            sleep(30); // (the thread is gone by now; the kernel would have stored its 1 on the way out)
+            let after = unsafe { core::ptr::read_volatile(word as *const u32) };
+            if before == after { 0 } else { 2 }
         }
         _ => 99,
     }

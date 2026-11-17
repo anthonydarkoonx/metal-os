@@ -210,6 +210,20 @@ fn threads() -> u64 {
     let r = rx.recv_timeout(Duration::from_millis(30));
     check!(4, 11, r == Err(metal_programs::sync::mpsc::RecvTimeoutError::Timeout));
     drop(tx);
+    // a scoped thread that starts another scoped thread: `scope` must wait for the grandchild too, or it ends while the grandchild still
+    // uses what the scope lends it (a use after free)
+    let (mut flag, mut late) = (0u32, 0u32);
+    thread::scope(|s| {
+        let (flag, late) = (&mut flag, &mut late);
+        s.spawn(move || {
+            *flag = 1;
+            s.spawn(move || {
+                thread::sleep(Duration::from_millis(80)); // (far longer than it takes `scope` to look at its list)
+                *late = 7;
+            });
+        });
+    });
+    check!(4, 12, flag == 1 && late == 7);
     0
 }
 

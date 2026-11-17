@@ -199,6 +199,7 @@ impl Shell {
     }
 
     fn fetch(&mut self) {
+        const LOGO_COLS: usize = 21;
         let f = &self.facts;
         let tasks = sysinfo(1);
         let rows = [
@@ -211,8 +212,12 @@ impl Shell {
             ("IOMMU", if tasks[1] != 0 { format!("Arm SMMUv3, {} devices confined", tasks[2]) } else { String::from("none") }),
             ("TASKS", format!("{} running, {} driver restarts", tasks[3], tasks[4])),
         ];
-        for (k, v) in rows {
+        // the planet on the left, the rows beside it (8 rows of 19 px hold the 152 px logo)
+        let top = self.con.reserve_rows(rows.len());
+        self.con.draw_logo(0, top);
+        for (i, (k, v)) in rows.into_iter().enumerate() {
             println!("[fetch] {k:<8}{v}");
+            self.con.goto(LOGO_COLS, top + i);
             self.kv(k, &v);
         }
     }

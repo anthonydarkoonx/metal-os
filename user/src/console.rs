@@ -237,6 +237,30 @@ impl Console {
         self.cy = row.min(ROWS - 1);
     }
 
+    /// Make sure `rows` lines starting at the cursor's line, and one more for the prompt, fit on the screen (scrolling if not).
+    /// Returns the first of them.
+    pub fn reserve_rows(&mut self, rows: usize) -> usize {
+        self.cursor(false);
+        let start = ROWS - 1 - rows;
+        if self.cy > start {
+            let k = self.cy - start;
+            self.cy = ROWS - 1;
+            for _ in 0..k {
+                self.newline();
+            }
+            self.cy = start;
+        }
+        self.cx = 0;
+        self.cy
+    }
+
+    /// Draw the `fetch` logo with its top-left corner at the cell (`col`, `row`).
+    pub fn draw_logo(&mut self, col: usize, row: usize) {
+        let (x, y) = Self::cell(col, row);
+        crate::logo::draw(self.px(), WIDTH, x, y, themed(DIM), themed(FG), themed(ACCENT));
+        self.mark(y, y + crate::logo::SIZE);
+    }
+
     /// Show the cursor. (Nothing is presented here: the console asks `take_dirty` and repaints.)
     pub fn flush(&mut self) {
         self.cursor(true);

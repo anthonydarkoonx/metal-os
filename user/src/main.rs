@@ -40,6 +40,7 @@ mod fuzz;
 mod programs;
 mod info;
 mod kbd;
+mod logo;
 mod netd;
 mod netdrv;
 mod shell;

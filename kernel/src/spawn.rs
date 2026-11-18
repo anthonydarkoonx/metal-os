@@ -697,7 +697,22 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     f.x[4] = args_len as u64;
     f.sp = args_sp as u64;
     f.spsr = 0;
-    sched::set_state(tid, State::Embryo);
+    // The slot becomes an embryo only if it still has its parent. The death of the parent's first task (while a thread of it is in this call)
+    // takes every task lock and clears the `PARENT` of every slot it left to it, but does nothing for a slot that is not an embryo yet (a
+    // `Free` one has nothing to end), so an embryo made after that would belong to nobody for ever. Looking and setting under a task lock
+    // closes the gap: the death either ran before (the parent is gone: undo) or finds the embryo and ends it.
+    let committed = {
+        let _t = lock(tid);
+        let still_mine = PARENT[tid].load(Ordering::SeqCst) == pa as u8;
+        if still_mine {
+            sched::set_state(tid, State::Embryo);
+        }
+        still_mine
+    };
+    if !committed {
+        task::set_l1(tid, 0);
+        return fail(E_INVAL);
+    }
     Ok(tid)
 }
 

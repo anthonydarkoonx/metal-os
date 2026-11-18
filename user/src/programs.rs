@@ -554,6 +554,16 @@ pub fn tests() {
     } else {
         println!("[client] TEST the race test program is in the system image: FAIL");
     }
+    // N6: a program that ends while a thread of it is in SPAWN leaves no embryo behind (the count of live tasks is the same afterwards)
+    if race.len() >= 32 && sysinfo(0)[4] >= 2 {
+        let live0 = sysinfo(1)[3] as i64;
+        for _ in 0..60 {
+            run_with_console3(Req::new().arg(21).heap(64).budget(1500).threads(1).give(&[SPAWN_SLOT as u8]), &race, b"");
+        }
+        sleep(50);
+        let leaked = sysinfo(1)[3] as i64 - live0;
+        println!("[client] TEST a program that ends in the middle of SPAWN leaves no embryo nobody owns (60 runs, {leaked} tasks left over): {}", verdict(leaked == 0));
+    }
     // N3: shared memory that a thread made and gave to its own program is charged to the program after the thread has ended
     if race.len() >= 32 {
         let (n3, o3, _) = run_with_console3(Req::new().arg(20).heap(400).threads(1), &race, b"");

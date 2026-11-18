@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N6 and N8 to N11 are open; N1 to N5 and N7 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N8 to N11 are open; N1 to N7 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -70,7 +70,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 # Second audit (2026-11-18, commit `986fe66`)
 
-Auditor: Claude (code review). **Status:** N1 to N5 and N7 are fixed and removed; everything else in this section is open.
+Auditor: Claude (code review). **Status:** N1 to N7 are fixed and removed; everything else in this section is open.
 
 **How this was done.** Static review only, like the first audit: nothing was built, booted or exploited, so every finding is a reading of the code. The findings that depend on timing between cores are unproven until a test hits them. Line numbers refer to `986fe66`.
 
@@ -80,20 +80,7 @@ Auditor: Claude (code review). **Status:** N1 to N5 and N7 are fixed and removed
 
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
-| N6 | Medium | `SPAWN` racing the first task's exit leaves an embryo nobody owns | A program with `spawn` and 1 thread; SMP only |
 | N8–N11 | Low | See below | |
-
-## Medium
-
-### N6. `SPAWN` racing the first task's exit leaves an embryo nobody owns
-
-While `spawn` builds a child, the slot's state is still `Free`, but `PARENT[tid]` is already set (`kernel/src/spawn.rs:559`); the state becomes `Embryo` at the end (`:682`).
-
-If the program's first task exits or faults while one of its threads is in `spawn`, `on_death` finds the slot by its parent, clears the parent, and does nothing else because the state is `Free` (`:820`–`824`). The thread then finishes the call. The result is an embryo with no parent: nobody can load, start or kill it, and nothing collects it. The exit holds every task lock, so the thread waits for it inside `spawn`; the window is most of the call.
-
-Each time, a task slot is lost for good (there are 37), with about 20 frames and, if asked for, a file and a network session (8 each, 6 usable by programs). The program dies in the attempt, so the rate is limited by how often it is started.
-
-**Fix.** Give a slot under construction a state of its own, or have `spawn` check, before it sets `Embryo`, that the parent is alive and still the parent, and undo otherwise.
 
 ## Low
 
@@ -107,6 +94,6 @@ Each time, a task slot is lost for good (there are 37), with about 20 frames and
 
 ## Suggested order of work
 
-1. N6, then the Low items.
+1. The Low items: N9 with L2 (finish the generation fix), then N10 and N11, then the rest.
 
 Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), and the N3 hand-over: a program that ends while another program holds its shared memory must leave the memory charged to that holder (or end it when the holder cannot pay). The N3 fix has a test only for the thread case.

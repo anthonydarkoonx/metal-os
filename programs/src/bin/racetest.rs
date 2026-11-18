@@ -57,6 +57,9 @@ use metal_programs::*;
 //   20 N3: memory a thread made and gave to its own program outlives the thread, and the program pays for it. A thread makes 64 pages of shared
 //      memory, grants it to the main thread and ends; 20 times. The program's limit is 400 pages: it must be refused after a few rounds. Exit 10
 //      if 12 or more rounds were allowed (the memory was charged to nobody once its maker had ended).
+//   21 N6: a program that ends while one of its threads is in SPAWN must not leave an embryo nobody owns. A thread keeps starting embryos and
+//      killing them (a spawn capability is in slot 0); the main thread ends after a random delay. The conductor counts the live tasks before
+//      and after many runs: a leaked embryo stays in the count for ever.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -643,6 +646,39 @@ fn n3() -> u64 {
     }
 }
 
+extern "C" fn spawn_loop(_: u64) -> ! {
+    loop {
+        // (eight embryos in a row, so that most of the time is spent inside SPAWN; then they are all ended and collected)
+        let mut kids = [0i64; 8];
+        for k in kids.iter_mut() {
+            let mut req = [0u8; 96];
+            req[0..4].copy_from_slice(&2u32.to_le_bytes());
+            for i in 0..8 {
+                req[64 + 4 * i] = NONE as u8;
+            }
+            *k = svc(SPAWN, 0, req.as_ptr() as u64, 0, 0, 0)[0] as i64;
+        }
+        for &k in kids.iter().filter(|&&k| k > 0) {
+            kill(k as u64);
+        }
+        for &k in kids.iter().filter(|&&k| k > 0) {
+            wait(k as u64, false);
+        }
+    }
+}
+
+fn n6() -> u64 {
+    if thread::create_with_kernel_stack(spawn_loop, 0, 1 << 0, 0) < 0 {
+        // (the thread gets the spawn capability: slot 0)
+        return 2;
+    }
+    let mut r = svc(metal_programs::random::GETRANDOM, 0, 0, 0, 0, 0)[1] | 1; // (a different delay every run)
+    for _ in 0..(rng(&mut r) % 100_000) {
+        core::hint::spin_loop();
+    }
+    0 // (the program ends here, with the thread most likely inside SPAWN)
+}
+
 const FS_PAGE_SLOT: u64 = 9;
 
 fn session_page(fill: bool) -> u64 {
@@ -696,6 +732,7 @@ program!("racetest", |c| {
         15 => queue_share(),
         16 => n1(),
         20 => n3(),
+        21 => n6(),
         18 => session_page(true),
         19 => session_page(false),
         17 => n2(),

@@ -51,6 +51,12 @@ use metal_programs::*;
 //   17 N2: TASK_LOAD of an embryo that is killed while it loads. A thread loads 200 pages into an embryo; the main thread kills and collects
 //      the embryo meanwhile (after a random delay). The load must stop with an error: if it comes back successful after the embryo has been
 //      collected, it went on writing the page tables of a dead task. Exit code: 0 = never, 10 = it did. (A spawn capability is in slot 0.)
+//   18, 19  N5: a file session page is wiped when it is handed to the next program. 18 (started with file access) maps its session page (slot 9),
+//      fills it and ends; 19 (started with file access after 18 was collected, so it gets the same page) counts the non-zero bytes it finds
+//      there before it has made a single request, and exits with that count. Expected 0.
+//   20 N3: memory a thread made and gave to its own program outlives the thread, and the program pays for it. A thread makes 64 pages of shared
+//      memory, grants it to the main thread and ends; 20 times. The program's limit is 400 pages: it must be refused after a few rounds. Exit 10
+//      if 12 or more rounds were allowed (the memory was charged to nobody once its maker had ended).
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -605,6 +611,59 @@ fn n2() -> u64 {
     0
 }
 
+const N3_ROUNDS: usize = 20;
+static N3_OK: AtomicU32 = AtomicU32::new(0);
+static N3_ME: AtomicU32 = AtomicU32::new(0);
+static N3_ROUND: AtomicU32 = AtomicU32::new(0);
+static DONE20: [AtomicU32; N3_ROUNDS + 1] = [const { AtomicU32::new(0) }; N3_ROUNDS + 1];
+
+extern "C" fn orphaner(_: u64) -> ! {
+    let s = shm_create(64);
+    if s >= 0 && svc(CAP_GRANT, s as u64, N3_ME.load(Acquire) as u64, 0xFFFF & !4, 0, 0)[0] as i64 >= 0 {
+        N3_OK.fetch_add(1, SeqCst);
+    }
+    thread::exit(&DONE20[N3_ROUND.load(Acquire) as usize])
+}
+
+fn n3() -> u64 {
+    N3_ME.store(svc(21, 8, 0, 0, 0, 0)[1] as u32, Release);
+    for round in 1..=N3_ROUNDS as u32 {
+        N3_ROUND.store(round, Release);
+        if thread::create_with_kernel_stack(orphaner, 0, 0, 0) < 0 {
+            return 2;
+        }
+        thread::join(&DONE20[round as usize]);
+    }
+    let ok = N3_OK.load(Acquire);
+    println!("racetest: {ok} of {N3_ROUNDS} threads were allowed to leave 64 pages behind");
+    if ok >= 12 {
+        10
+    } else {
+        0
+    }
+}
+
+const FS_PAGE_SLOT: u64 = 9;
+
+fn session_page(fill: bool) -> u64 {
+    if map(FS_PAGE_SLOT, BIG, true) != 0 {
+        return 1000;
+    }
+    let p = BIG as *mut u8;
+    let mut n = 0;
+    for i in 0..PAGE {
+        // SAFETY: the session page (one page) was just mapped writable at BIG.
+        unsafe {
+            if fill {
+                core::ptr::write_volatile(p.add(i), 0xA5);
+            } else if core::ptr::read_volatile(p.add(i)) != 0 {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 program!("racetest", |c| {
     match c.arg & 0xFF {
         8 => {
@@ -636,6 +695,9 @@ program!("racetest", |c| {
         14 => m7(14, 4),
         15 => queue_share(),
         16 => n1(),
+        20 => n3(),
+        18 => session_page(true),
+        19 => session_page(false),
         17 => n2(),
         4..=6 => m1(c.arg),
         1 => h1(),

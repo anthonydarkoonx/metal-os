@@ -404,9 +404,18 @@ pub fn boot_net_page(tid: usize) -> Option<u8> {
     Some(k)
 }
 
+/// Wipe a session page as it is given to a program: it still holds what the program before it (and the server) last put there, file contents and
+/// paths or network data, and the new program maps it.
+fn clear_session_page(obj: u8) {
+    if let Some(o) = crate::obj::get(obj) {
+        crate::frame::phys::zero_page(o.pa);
+    }
+}
+
 fn claim_net_page() -> Option<u8> {
     for k in 0..NET_PAGES {
         if NET_POOL.fetch_or(1 << k, Ordering::SeqCst) & (1 << k) == 0 {
+            clear_session_page(crate::obj::OBJ_SHM_NET_PROG0 + k as u8);
             return Some(k as u8);
         }
     }
@@ -423,6 +432,7 @@ fn drop_net_page(tid: usize) {
 fn claim_fs_page() -> Option<u8> {
     for k in 0..FS_PAGES {
         if FS_POOL.fetch_or(1 << k, Ordering::SeqCst) & (1 << k) == 0 {
+            clear_session_page(crate::obj::OBJ_SHM_VFS_PROG0 + k as u8);
             return Some(k as u8);
         }
     }

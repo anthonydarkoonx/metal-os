@@ -185,16 +185,23 @@ pub fn mint_for(owner: usize, parent: Option<(NodeId, u32)>) -> Option<Minted> {
 /// A node made by `CAP_GRANT` from task `granter`: refused when the task already has `GRANT_QUOTA` outstanding, or when
 /// fewer than `GRANT_RESERVE` nodes would be left for everyone else.
 pub fn mint_granted(parent: (NodeId, u32), granter: usize) -> Option<Minted> {
+    // (a program's grants also count against its node allowance for as long as the copies live: the `granter` is a task, and goes when a thread
+    // ends, but the program that made the grant does not)
+    let program = crate::task::aspace(granter);
+    let charged = crate::spawn::is_program(program);
     let mut t = NODE_TABLE.lock(R_NODES);
     let g = granter as u8;
     if !parent_ok(&t, parent) {
         return None;
     }
-    if t.iter().filter(|n| n.used && n.granter == g).count() >= GRANT_QUOTA || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE {
+    if t.iter().filter(|n| n.used && n.granter == g).count() >= GRANT_QUOTA
+        || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE
+        || (charged && t.iter().filter(|n| n.used && n.owner == program as u8).count() >= PROGRAM_NODE_QUOTA)
+    {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    Some(take(&mut t, i, parent.0, g, NO_GRANTER))
+    Some(take(&mut t, i, parent.0, g, if charged { program as u8 } else { NO_GRANTER }))
 }
 
 /// The node `n` hangs under, if it is in use and has one.

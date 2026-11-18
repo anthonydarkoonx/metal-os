@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N3, N5, N6 and N8 to N11 are open; N1, N2, N4 and N7 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N6 and N8 to N11 are open; N1 to N5 and N7 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -70,7 +70,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 # Second audit (2026-11-18, commit `986fe66`)
 
-Auditor: Claude (code review). **Status:** N1, N2, N4 and N7 are fixed and removed; everything else in this section is open.
+Auditor: Claude (code review). **Status:** N1 to N5 and N7 are fixed and removed; everything else in this section is open.
 
 **How this was done.** Static review only, like the first audit: nothing was built, booted or exploited, so every finding is a reading of the code. The findings that depend on timing between cores are unproven until a test hits them. Line numbers refer to `986fe66`.
 
@@ -80,32 +80,10 @@ Auditor: Claude (code review). **Status:** N1, N2, N4 and N7 are fixed and remov
 
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
-| N3 | Medium | Shared memory orphaned by a thread's exit is charged to nobody | A program with 1 thread |
-| N5 | Medium | File and network session pages go to the next program uncleared | Any program with `files` or `network` |
 | N6 | Medium | `SPAWN` racing the first task's exit leaves an embryo nobody owns | A program with `spawn` and 1 thread; SMP only |
 | N8–N11 | Low | See below | |
 
 ## Medium
-
-### N3. Shared memory orphaned by a thread's exit is charged to nobody
-
-When the creator of shared memory ends while someone holds a copy, the object becomes an orphan: its frames go to the kernel and the creator's charge is returned at once (`kernel/src/task.rs:658`–`664`, `kernel/src/obj.rs:255`–`269`). The creator is a task, so a thread counts.
-
-A thread creates shared memory, grants a copy to its own first task (allowed: same program) and exits. The program keeps the memory, mapped, and is charged nothing. It repeats with a new thread. One capability table holds about 30 such objects, each as large as the program's heap limit (up to 4096 pages), and each thread adds another table. The frames are pinned, so they cannot be swapped or compacted. On a 64 MiB machine this uses up all memory.
-
-The same steps get around the per-program limits on memory objects and capability nodes: an orphan has no owner in the object table (`o.owner = NO_OWNER`), and the nodes of the copies were made by `CAP_GRANT` from a thread that is gone, so they count for nobody.
-
-A parent and a child program can do the same without threads (the child grants to its parent and exits).
-
-**Fix.** Charge an orphan to its holders (split, or to the first holder), or orphan only when the whole program ends and free what a thread created when the thread ends, as the ABI already says ("what a thread creates is its own: it goes when the thread ends").
-
-### N5. Session pages go to the next program uncleared
-
-The eight file session pages and the eight network session pages are allocated once at boot (`kernel/src/devices.rs:371`, `:408`). A program's session is a number into that pool (`claim_fs_page`, `claim_net_page`, `kernel/src/spawn.rs:402`–`425`), given back when the program ends and handed to the next program, lowest number first. Nothing clears the page: not the kernel, not the VFS server (it only empties the descriptor table when the generation changes), not `netd` (it only closes the old handles).
-
-So a program reads what its predecessor in that session last sent or received through the page: up to 3840 bytes of file content and paths, or of network data. A program confined to its own directory sees data from outside it.
-
-**Fix.** Zero the page in `spawn` when the session is claimed.
 
 ### N6. `SPAWN` racing the first task's exit leaves an embryo nobody owns
 
@@ -129,7 +107,6 @@ Each time, a task slot is lost for good (there are 37), with about 20 frames and
 
 ## Suggested order of work
 
-1. N3 and N5: no race needed, any program with the right manifest can do them today.
-2. N6, then the Low items.
+1. N6, then the Low items.
 
-Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), a thread orphaning memory in a loop while the parent watches `QUOTA` (N3), a program reading its session page before its first call (N5).
+Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), and the N3 hand-over: a program that ends while another program holds its shared memory must leave the memory charged to that holder (or end it when the holder cannot pay). The N3 fix has a test only for the thread case.

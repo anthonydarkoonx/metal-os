@@ -1304,7 +1304,7 @@ fn shm_info(cur: usize, slot: u64) -> Out {
             // capability and nobody holds a copy any more
             Some(o) if o.kind == ObjKind::Shared => {
                 let alone = o.root == c.node && crate::cap::mark_subtree(c.node, false, &mut [false; crate::cap::NODES]) == 0;
-                Out::Ret(o.pages as i64 | ((o.aux == obj::SHM_ORPHAN) as i64) << 32 | (alone as i64) << 33)
+                Out::Ret(o.pages as i64 | ((o.root == crate::cap::NO_PARENT) as i64) << 32 | (alone as i64) << 33)
             }
             _ => Out::Ret(E_INVAL),
         },

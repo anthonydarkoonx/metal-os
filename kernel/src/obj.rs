@@ -245,48 +245,58 @@ pub fn shm_register(pages: usize, creator: usize, root: crate::cap::NodeId, list
     Some(i as u8)
 }
 
-/// `MemObj::aux` of a shared object whose creator is gone.
+/// `MemObj::aux` of a shared object whose creator is gone and that is charged to nobody (the creator was a boot-time task).
 pub const SHM_ORPHAN: usize = usize::MAX;
 /// How many shared objects are orphans (the sweep after a revocation looks for them only when there are some).
 static ORPHANS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// The creator's capability goes while others still hold the object: it lives on, belonging to the kernel and charged to
-/// nobody, until the last holder lets go of it (`shm_destroy` then). Whoever maps it keeps what they see; nothing faults.
+/// Is this a shared object whose creator's capability is gone?
+fn is_orphan(o: &MemObj) -> bool {
+    o.kind == ObjKind::Shared && o.root == crate::cap::NO_PARENT
+}
+
+/// The creator's capability goes while others still hold the object: it lives on, its frames belonging to the kernel, until the last holder
+/// lets go of it (`shm_destroy` then). Whoever maps it keeps what they see; nothing faults.
+///
+/// Who pays for it stays with the program that made it (`aux`, and the object-table entry in `owner`), so that ending a thread, or a program
+/// that is not yet gone, does not hand out memory for free: `World::reclaim_space` moves the charge to a holder when that program ends (or
+/// ends the object if no holder can take it). Only an object of a boot-time task (trusted, and restarted often) is charged to nobody.
 pub fn shm_orphan(i: u8) {
     let mut t = OBJS.lock(R_OBJ);
     let o = &mut t[i as usize];
-    if o.kind != ObjKind::Shared || o.aux == SHM_ORPHAN {
+    if o.kind != ObjKind::Shared || is_orphan(o) {
         return;
     }
     for p in 0..o.pages {
         mem::set_owner(crate::frame::phys::read_u32(o.list + 4 * p) as usize * mem::PAGE, mem::OWNER_KERNEL);
     }
-    crate::spawn::release_contig(o.aux, o.pages);
-    o.aux = SHM_ORPHAN;
-    o.owner = NO_OWNER;
+    if !crate::spawn::is_program(o.aux) {
+        crate::spawn::release_contig(o.aux, o.pages);
+        o.aux = SHM_ORPHAN;
+        o.owner = NO_OWNER;
+    }
     o.root = crate::cap::NO_PARENT;
     ORPHANS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
 }
 
-/// Is this a shared object whose creator is gone?
-pub fn shm_is_orphan(i: u8) -> bool {
-    get(i).is_some_and(|o| o.kind == ObjKind::Shared && o.aux == SHM_ORPHAN)
-}
-
-/// The ids of the orphaned shared objects, into `out`; how many.
-pub fn shm_orphans(out: &mut [u8; 16]) -> usize {
+/// The first orphaned shared object at or after table entry `from` (for the sweep), if `charged_to` is `None`; with `Some(program)`, the first
+/// one that is charged to that program.
+pub fn next_orphan(from: usize, charged_to: Option<usize>) -> Option<u8> {
     if ORPHANS.load(core::sync::atomic::Ordering::SeqCst) == 0 {
-        return 0;
+        return None;
     }
     let t = OBJS.lock(R_OBJ);
-    let mut n = 0;
-    for (i, o) in t.iter().enumerate().skip(FIRST_DYNAMIC) {
-        if o.kind == ObjKind::Shared && o.aux == SHM_ORPHAN && n < out.len() {
-            out[n] = i as u8;
-            n += 1;
-        }
+    (from.max(FIRST_DYNAMIC)..NOBJ).find(|&i| is_orphan(&t[i]) && charged_to.is_none_or(|p| t[i].aux == p)).map(|i| i as u8)
+}
+
+/// Charge orphan `i` to program `q`, which has just reserved its pages: from now on `q` pays for it and it counts against `q`'s object limit.
+pub fn shm_charge_to(i: u8, q: usize) {
+    let mut t = OBJS.lock(R_OBJ);
+    let o = &mut t[i as usize];
+    if is_orphan(o) {
+        o.aux = q;
+        o.owner = owner_tag(q);
     }
-    n
 }
 
 /// Free a shared object: its frames, its list and its table entry, and the creator's charge for it. (The capabilities and
@@ -294,9 +304,10 @@ pub fn shm_orphans(out: &mut [u8; 16]) -> usize {
 pub fn shm_destroy(i: u8) {
     let Some(o) = get(i).filter(|o| o.kind == ObjKind::Shared) else { return };
     shm_release_frames(o.list, o.pages, o.pages);
-    if o.aux == SHM_ORPHAN {
+    if is_orphan(&o) {
         ORPHANS.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
-    } else {
+    }
+    if o.aux != SHM_ORPHAN {
         crate::spawn::release_contig(o.aux, o.pages);
     }
     release(i);

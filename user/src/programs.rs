@@ -554,6 +554,20 @@ pub fn tests() {
     } else {
         println!("[client] TEST the race test program is in the system image: FAIL");
     }
+    // N3: shared memory that a thread made and gave to its own program is charged to the program after the thread has ended
+    if race.len() >= 32 {
+        let (n3, o3, _) = run_with_console3(Req::new().arg(20).heap(400).threads(1), &race, b"");
+        let o3 = String::from_utf8_lossy(&o3).into_owned();
+        println!("[client] TEST shared memory that outlives the thread that made it is still charged to its program (exit code {n3}{}): {}", if o3.is_empty() { String::new() } else { alloc::format!(", {}", o3.trim()) }, verdict(n3 == 0));
+    }
+    // N5: a file session page is wiped when the next program gets it
+    if race.len() >= 32 {
+        let w = Req::new().arg(18).heap(64).fs().go(&race);
+        let wc = if w > 0 { wait(w, false) } else { -1 };
+        let r = Req::new().arg(19).heap(64).fs().go(&race);
+        let leftover = if r > 0 { wait(r, false) } else { -1 };
+        println!("[client] TEST a program's file session page holds nothing of the program before it (writer exit {wc}, bytes left over {leftover}): {}", verdict(wc == 0 && leftover == 0));
+    }
     // M1: a thread's copy of a run-time memory capability cannot end the object, and MC_FREE does not take shared memory
     if race.len() >= 32 {
         let m1: Vec<u64> = [4u64, 5, 6]

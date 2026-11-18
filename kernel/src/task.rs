@@ -632,11 +632,52 @@ impl World {
 
     /// Shared memory whose creator is gone is freed when nothing holds it any more.
     fn sweep_orphans(&mut self) {
-        let mut ids = [0u8; 16];
-        for k in 0..obj::shm_orphans(&mut ids) {
-            let id = ids[k];
+        let mut from = 0;
+        while let Some(id) = obj::next_orphan(from, None) {
+            from = id as usize + 1;
             let held = self.tasks.iter().any(|t| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()));
             if !held {
+                obj::shm_destroy(id);
+            }
+        }
+    }
+
+    /// Program `leader` is ending: the shared memory it made that outlived its own capability (held by others) is charged to it still, and the
+    /// charge is about to go. Give each such object to a program that holds it and can pay for it (it counts against that program's limit from
+    /// now on); if no holder can, the object ends with its creator, and every holder's copy and mapping with it.
+    fn hand_over_orphans(&mut self, leader: usize) {
+        let mut from = 0;
+        while let Some(id) = obj::next_orphan(from, Some(leader)) {
+            from = id as usize + 1;
+            let Some(o) = obj::get(id) else { continue };
+            let holds = |t: &Task| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive());
+            let mut taken = false;
+            for h in 0..MAX_TASKS {
+                let q = aspace(h);
+                if q == leader || !holds(&self.tasks[h]) || matches!(sched::state(h), State::Free | State::Dead) {
+                    continue;
+                }
+                let held = self.tasks[q].held_pages();
+                if crate::spawn::reserve_contig(q, held, o.pages) {
+                    obj::shm_charge_to(id, q);
+                    taken = true;
+                    break;
+                }
+            }
+            if !taken {
+                let mut nodes = [crate::cap::NO_PARENT; MAX_TASKS * NCAPS];
+                let mut n = 0;
+                for t in self.tasks.iter() {
+                    for c in t.caps.iter().filter(|c| c.kind == Kind::Memory && c.obj == id && c.alive()) {
+                        nodes[n] = c.node;
+                        n += 1;
+                    }
+                }
+                for &node in &nodes[..n] {
+                    if crate::cap::node_alive(node) {
+                        self.revoke_subtree(node, true);
+                    }
+                }
                 obj::shm_destroy(id);
             }
         }
@@ -702,6 +743,7 @@ impl World {
     /// Free an address space: its mappings, the pages in the swap store and every frame it owns. The last task that
     /// ran in it calls this.
     fn reclaim_space(&mut self, leader: usize) -> usize {
+        self.hand_over_orphans(leader);
         let t = &mut self.tasks[leader];
         t.maps = [MapRec { used: false, va: 0, pages: 0, node: 0 }; MAX_MAPS];
         if t.l1 != 0 {

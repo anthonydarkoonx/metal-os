@@ -140,6 +140,7 @@ qemu-test: kernel disk
 	@$(WITH_PEER) sh -c 'timeout 260 $(QEMU) > build.log 2>&1'; rc=$$?; cat build.log; \
 	 grep -q "TEST zero-copy shared memory.*PASS" build.log && \
 	 grep -q "TEST async IPC_SEND.*PASS" build.log && \
+	 grep -q "TEST kernel pages are write-xor-execute.*: PASS; WXN on: PASS; PAN on.*: PASS" build.log && \
 	 grep -q "TEST capability revoke.*PASS" build.log && \
 	 grep -q "TEST capability grants are bounded.*PASS" build.log && \
 	 grep -q "TEST the stack is fully usable.*PASS" build.log && \

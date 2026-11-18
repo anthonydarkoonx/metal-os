@@ -176,6 +176,14 @@ extern "C" fn kmain() -> ! {
         kaslr::NO_ROOM => kprintln!("[kaslr] WARNING: no room in RAM to move the kernel image"),
         _ => kprintln!("[kaslr] WARNING: kernel address not randomised"),
     }
+    let (wx, wxn, pan) = mmu::audit();
+    let v = |b: bool| if b { "PASS" } else { "FAIL" };
+    kprintln!(
+        "[mmu] TEST kernel pages are write-xor-execute (code read-only, no other RAM executable): {}; WXN on: {}; PAN on (or not in this CPU): {}",
+        v(wx),
+        v(wxn),
+        v(pan)
+    );
     timer::init();
     sched::init();
     platform::init_devices();

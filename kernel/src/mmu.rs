@@ -2,8 +2,11 @@
 //!
 //! * L1[0] 0x0000_0000..1G   device, EL1-only (UART, GIC, PCI BARs)
 //! * L1[256] 0x40_0000_0000..+1G device, EL1-only (PCIe ECAM)
-//! * L1[1] 0x4000_0000..2G   RAM identity map, EL1-only: 2 MiB blocks, and 4 KiB pages where the kernel's stacks are (their
-//!   guard pages are left unmapped, so an overflow faults instead of overwriting what lies below)
+//! * L1[1] 0x4000_0000..2G   RAM identity map, EL1-only: 2 MiB blocks, never executable; and 4 KiB pages where the kernel image
+//!   is: code read + execute, read-only data, and the data, .bss and stacks read + write (the stacks' guard pages are
+//!   left unmapped, so an overflow faults instead of overwriting what lies below). No page is both writable and executable
+//!   (SCTLR_EL1.WXN makes that a rule rather than a habit), and where the CPU has PAN the kernel cannot touch a page
+//!   that EL0 can reach by accident.
 //! * L1[2] 0x8000_0000..3G   per-task user window (4 KiB pages, EL0 access)
 //! * L1[8..256] 8G..256G     per-task window for the images of position-independent programs (same, tables made on demand)
 use crate::mem;
@@ -45,8 +48,9 @@ struct Table([u64; 512]);
 
 static KERNEL_L1: Global<Table> = Global::new(Table([0; 512]));
 static KERNEL_L2: Global<Table> = Global::new(Table([0; 512]));
-/// 4 KiB tables for the 2 MiB blocks the kernel's stacks lie in (a few hundred KiB: at most two blocks).
-static KERNEL_L3: Global<[Table; 2]> = Global::new([Table([0; 512]), Table([0; 512])]);
+/// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 5 MiB with its stacks, at any page: at most four blocks).
+const KERNEL_L3_N: usize = 4;
+static KERNEL_L3: Global<[Table; KERNEL_L3_N]> = Global::new([const { Table([0; 512]) }; KERNEL_L3_N]);
 
 /// Per core: 64 KiB of kernel stack and an unmapped guard below it (boot.S and linker.ld use the same numbers).
 pub const KSTACK_SIZE: usize = 0x10000;
@@ -55,6 +59,9 @@ pub const KSTACK_STRIDE: usize = KSTACK_SIZE + KSTACK_GUARD;
 
 extern "C" {
     static __stack_top: u8;
+    static __kernel_start: u8;
+    static __text_end: u8;
+    static __ro_end: u8;
 }
 
 /// If `addr` is in the guard of a core's kernel stack: which core.
@@ -75,7 +82,7 @@ pub fn init() {
     let l1 = &mut l1_guard.0;
     crate::platform::map_devices(l1);
     // RAM: 2 MiB blocks, except where the kernel stacks are (4 KiB pages, the guards unmapped)
-    let normal = ATTR_NORMAL | SH_INNER | AF | UXN;
+    let normal = ATTR_NORMAL | SH_INNER | AF | UXN | PXN;
     let l2 = &mut l2_guard.0;
     // (the 1 GiB of address space that holds the RAM: its first-level slot, and the physical address of its start)
     let gib = crate::platform::RAM_BASE & !0x3FFF_FFFF;
@@ -85,11 +92,12 @@ pub fn init() {
         let unmapped = pa < crate::platform::RAM_UNMAPPED_BELOW;
         *e = if unmapped { 0 } else { pa as u64 | VALID_BLOCK | normal };
     }
-    // SAFETY: `__stack_top` is a linker symbol; only its address is taken, it is never read.
-    let top = unsafe { &__stack_top as *const u8 as usize };
-    let bottom = top - crate::smp::MAX_CPUS * KSTACK_STRIDE;
+    // SAFETY: the four are linker symbols; only their addresses are taken, they are never read.
+    let (start, text_end, ro_end, top) = unsafe {
+        (&__kernel_start as *const u8 as usize, &__text_end as *const u8 as usize, &__ro_end as *const u8 as usize, &__stack_top as *const u8 as usize)
+    };
     let mut used = 0;
-    for block in (bottom - gib) >> 21..=(top - 1 - gib) >> 21 {
+    for block in (start - gib) >> 21..=(top - 1 - gib) >> 21 {
         let l3 = &mut l3s[used].0;
         used += 1;
         let base = gib + (block << 21);
@@ -99,7 +107,15 @@ pub fn init() {
                 let t = top - n * KSTACK_STRIDE;
                 (t - KSTACK_STRIDE..t - KSTACK_SIZE).contains(&pa)
             });
-            *e = if guard { 0 } else { pa as u64 | VALID_TABLE | normal };
+            // (pages of the block outside the image are ordinary RAM: read + write, never executable)
+            let perm = if (start..text_end).contains(&pa) {
+                AP_RO | UXN // code
+            } else if (text_end..ro_end).contains(&pa) {
+                AP_RO | UXN | PXN
+            } else {
+                UXN | PXN
+            };
+            *e = if guard { 0 } else { pa as u64 | VALID_TABLE | ATTR_NORMAL | SH_INNER | AF | perm };
         }
         l2[block] = l3.as_ptr() as u64 | VALID_TABLE;
     }
@@ -140,6 +156,7 @@ pub fn enable_this_cpu() {
             "orr {t}, {t}, #(1 << 0)",   // M
             "orr {t}, {t}, #(1 << 2)",   // C
             "orr {t}, {t}, #(1 << 12)",  // I
+            "orr {t}, {t}, #(1 << 19)",  // WXN: a page that can be written cannot be executed, whatever its table entry says
             "orr {t}, {t}, #(1 << 15)",  // UCT: userspace may read CTR_EL0 (cache line sizes)
             "orr {t}, {t}, #(1 << 26)",  // UCI: userspace may clean / flush its DMA buffers (DC CVAC, DC CIVAC)
             "msr sctlr_el1, {t}",
@@ -148,6 +165,86 @@ pub fn enable_this_cpu() {
             t = out(reg) _,
         );
     }
+    enable_pan();
+}
+
+/// Where the CPU has PAN (ARMv8.1), keep EL1 from reading or writing memory that EL0 can reach: clear SCTLR_EL1.SPAN so that
+/// every exception from EL0 enters the kernel with PAN set, and set it now for the code that runs before the first one. The
+/// kernel reaches a program's frames through the identity map (EL1-only), never through the program's own addresses, so a
+/// kernel access that PAN stops is a bug (a pointer a program chose, followed).
+fn enable_pan() {
+    if !has_pan() {
+        return;
+    }
+    // SAFETY: clears SCTLR_EL1.SPAN (bit 23) and sets PSTATE.PAN (`msr pan, #1`, written as its encoding so that the assembler's
+    // target need not name the feature); no memory is accessed.
+    unsafe {
+        asm!(
+            "mrs {t}, sctlr_el1",
+            "bic {t}, {t}, #(1 << 23)",
+            "msr sctlr_el1, {t}",
+            "isb",
+            ".inst 0xd500419f",
+            "isb",
+            t = out(reg) _,
+        );
+    }
+}
+
+fn has_pan() -> bool {
+    let mmfr1: u64;
+    // SAFETY: reads ID_AA64MMFR1_EL1, a read-only feature register; no memory is accessed.
+    unsafe { asm!("mrs {}, id_aa64mmfr1_el1", out(reg) mmfr1, options(nomem, nostack)) };
+    mmfr1 >> 20 & 0xF != 0
+}
+
+/// Boot-time check of the rules above, from the live tables and registers of the calling core: (text is read-only and the only
+/// executable RAM, nothing writable is executable, WXN is on, PAN is on where the CPU has it).
+pub fn audit() -> (bool, bool, bool) {
+    // SAFETY: linker symbols; only addresses are taken.
+    let (start, text_end) = unsafe { (&__kernel_start as *const u8 as usize, &__text_end as *const u8 as usize) };
+    let l1g = KERNEL_L1.get();
+    let l1 = &l1g.0;
+    let (mut text_ro, mut only_text_x) = (true, true);
+    let ram_gib = crate::platform::RAM_BASE >> 30;
+    let l2 = table((l1[ram_gib] & ADDR_MASK) as usize);
+    let mut leaf_check = |pa: usize, e: u64| {
+        if e & 1 == 0 {
+            return;
+        }
+        let exec = e & PXN == 0;
+        let writable = e & AP_RO == 0;
+        if (start..text_end).contains(&pa) {
+            text_ro &= !writable && exec;
+        } else if exec {
+            only_text_x = false;
+        }
+        if exec && writable {
+            only_text_x = false;
+        }
+    };
+    for (i, &e) in l2.iter().enumerate() {
+        let base = (ram_gib << 30) + i * (2 << 20);
+        if e & 0b11 == 0b11 {
+            let l3 = table((e & ADDR_MASK) as usize);
+            for (p, &pe) in l3.iter().enumerate() {
+                leaf_check(base + p * mem::PAGE, pe);
+            }
+        } else {
+            leaf_check(base, e);
+        }
+    }
+    let sctlr: u64;
+    // SAFETY: reads SCTLR_EL1; no memory is accessed.
+    unsafe { asm!("mrs {}, sctlr_el1", out(reg) sctlr, options(nomem, nostack)) };
+    let wxn = sctlr >> 19 & 1 != 0;
+    let pan_ok = !has_pan() || {
+        let pan: u64;
+        // SAFETY: reads PSTATE.PAN (`mrs`, s3_0_c4_c2_3), which exists only where ID_AA64MMFR1_EL1 says so: checked just above.
+        unsafe { asm!("mrs {}, s3_0_c4_c2_3", out(reg) pan, options(nomem, nostack)) };
+        pan >> 22 & 1 != 0 && sctlr >> 23 & 1 == 0
+    };
+    (text_ro && only_text_x, wxn, pan_ok)
 }
 
 fn table(pa: usize) -> &'static mut [u64; 512] {

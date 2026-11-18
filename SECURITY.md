@@ -16,7 +16,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | M2 | Medium (fixed for programs) | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
 | M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
 | M4 | Medium (fixed) | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
-| M5 | Medium | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
+| M5 | Medium (fixed) | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
 | M6 | Medium | The pager sees and supplies other programs' pages in the clear | The pager program |
 | M7 | Medium | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
 | L1–L10 | Low | See below (L1 fixed) | |
@@ -136,7 +136,9 @@ The in-tree programs are built soft-float, so they are not affected today; the l
 
 **Fix.** Either trap EL0 FP use (`FPEN = 0b01`) and kill or lazily switch, or save and restore the FP state and `TPIDR_EL0` in `dispatch`.
 
-### M5. No write-xor-execute in the kernel; no PAN
+### M5. No write-xor-execute in the kernel; no PAN (fixed)
+
+**Fixed.** `linker.ld` now ends the code and the read-only data on page boundaries (`__text_end`, `__ro_end`). `mmu::init` maps the image with 4 KiB pages: code read + execute, read-only data read-only, data, `.bss` and the stacks read + write and `PXN`; every other RAM block is `PXN` too, so the only executable RAM at EL1 is the kernel's own code. `SCTLR_EL1.WXN` is set, and where the CPU has PAN (`ID_AA64MMFR1_EL1.PAN`) `SPAN` is cleared and `PSTATE.PAN` set on every core. The relocations are applied before the MMU comes on, so read-only data is safe. Test: the kernel walks its own tables and registers at boot (`mmu::audit`) and prints `[mmu] TEST kernel pages are write-xor-execute ...: PASS; WXN on: PASS; PAN on ...: PASS`, which `make qemu-test` requires; the unfixed kernel prints FAIL three times. Checked on QEMU `-cpu max` (PAN present) and `-cpu cortex-a72` (no PAN: the check passes trivially, the kernel boots). Limits: PAN is off on CPUs without it (Cortex-A72 and older); the audit checks the boot core's registers, not each secondary's; the kernel's page-table walker `table()` and the pager still reach frames through the identity map, which is the intended path. The board's own `linker.ld` needs the two new symbols (see `docs/BOARD-SYNC.md`). Original finding:
 
 The RAM identity map is built with `ATTR_NORMAL | SH_INNER | AF | UXN` (`mmu.rs:78`, `:86`, `:102`): writable and executable at EL1 for every frame, including kernel text and every user page. `SCTLR_EL1.WXN` and `PSTATE.PAN` are never set (`mmu.rs:139`–`145`).
 
@@ -220,7 +222,7 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 1. ~~H1 and H2~~ (done in `8ab56dc`; node generations from H1 are still open and would also close L2).
 2. M1 and M3: lifetime rules for dynamic objects and the range checks in `mem.rs`.
 3. M2 and L1: decide who may grant to whom, then hide the introspection pages.
-4. M4 and M5: FP trapping or switching, kernel page permissions, PAN.
+4. ~~M4 and M5~~ (done: FP trapping, kernel page permissions, WXN, PAN).
 5. M7, then the Low items.
 
 Tests for H1 and H2 now exist (`racetest`, in `make qemu-test`, since threads exist only for programs and `make fuzz` runs a single task). Still worth adding: a driver-role task calling `WAIT_WORD` on its register window (M3).

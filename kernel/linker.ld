@@ -1,6 +1,7 @@
 /* The kernel is a position-independent executable (ET_DYN) linked at the address QEMU loads it at, 0x40080000 (boot.S
    has the same number). boot.S applies the R_AARCH64_RELATIVE relocations and, in kaslr.rs / boot.S, moves the image to a
-   random place in RAM. The image is linked read-write-execute in one piece: RAM is mapped with one set of attributes. */
+   random place in RAM. The image is in three page-aligned parts, which mmu.rs maps with different permissions: code up to __text_end (read +
+   execute), read-only data up to __ro_end (the relocations were applied before the MMU came on), the rest (read + write). */
 ENTRY(_start)
 SECTIONS
 {
@@ -8,6 +9,8 @@ SECTIONS
     __kernel_start = .;
     ASSERT(__kernel_start == 0x40080000, "boot.S assumes the link address 0x40080000")
     .text : { KEEP(*(.text.boot0)) KEEP(*(.text.boot)) *(.text .text.*) }
+    . = ALIGN(4096);
+    __text_end = .;
     .dynsym : { *(.dynsym) }
     .dynstr : { *(.dynstr) }
     .gnu.hash : { *(.gnu.hash) }
@@ -17,6 +20,8 @@ SECTIONS
     .data.rel.ro : { *(.data.rel.ro .data.rel.ro.*) }
     .dynamic : { *(.dynamic) }
     .got : { *(.got .got.plt) }
+    . = ALIGN(4096);
+    __ro_end = .;
     .data : ALIGN(8) { *(.data .data.*) }
     .bss : ALIGN(4096) {
         __bss_start = .;

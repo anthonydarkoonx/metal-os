@@ -787,7 +787,14 @@ pub fn task_load(parent: usize, child: usize, req_va: usize) -> Result<(), i64> 
 
 /// `TASK_START(child, entry)`: make the embryo runnable at `entry`, which must lie in a loaded executable page.
 pub fn task_start(parent: usize, child: usize, entry: usize) -> Result<(), i64> {
-    if !embryo_of(parent, child) || entry % 4 != 0 {
+    if child >= MAX_TASKS || entry % 4 != 0 {
+        return Err(E_INVAL);
+    }
+    // Everything under the child's lock, which the end of a task takes (with every other): an embryo that was killed meanwhile has ended and
+    // is not an embryo any more, and one that has not will be ended after it is made runnable. (Without it, a killed embryo could be made
+    // `Ready` after it died, and a core would try to run a task with no address space.)
+    let _t = lock(child);
+    if !embryo_of(parent, child) {
         return Err(E_INVAL);
     }
     let base = IMG_BASE[child].load(Ordering::SeqCst);
@@ -818,6 +825,12 @@ pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
     match sched::state(child) {
         // (a program that has died is not collectable until the last of its threads is gone)
         State::Dead if task::members(child).next().is_none() => {
+            // The lock above is the caller's own task lock, and two threads of one program have different ones: both could get here for the
+            // same zombie. Whoever takes the parent link away collects it; the other finds it gone. (Releasing twice would give back the
+            // core's load twice, and, if a SPAWN took the slot in between, the new program's session.)
+            if PARENT[child].compare_exchange(task::aspace(cur) as u8, NO_PARENT, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                return Waited::Err(E_INVAL);
+            }
             let code = EXIT_CODE[child].load(Ordering::SeqCst);
             release(child);
             Waited::Code(code)

@@ -554,6 +554,17 @@ pub fn tests() {
     } else {
         println!("[client] TEST the race test program is in the system image: FAIL");
     }
+    // N11: a thread of the pager may not call into the pager's job interface
+    if race.len() >= 32 {
+        let c = run_with_console3(Req::new().arg(22).heap(64).threads(1).give_masked(1, MEM_SLOT as u8, 0xFFFF & !4), &race, b"").0;
+        println!("[client] TEST only the pager's first task may take its jobs (bits of calls that were not refused: {c:#x}): {}", verdict(c == 0));
+    }
+    // N10: two threads waiting for the same dead child: exactly one collects it
+    if race.len() >= 32 && sysinfo(0)[4] >= 2 {
+        let (c, o, _) = run_with_console3(Req::new().arg(23).heap(64).budget(3000).threads(1).give(&[SPAWN_SLOT as u8]), &race, b"");
+        let o = String::from_utf8_lossy(&o).into_owned();
+        println!("[client] TEST a dead child is collected by one of two threads that wait for it (exit code {c}{}): {}", if o.is_empty() { String::new() } else { alloc::format!(", {}", o.trim()) }, verdict(c == 0));
+    }
     // L2 and N9: RESTORE_OF puts a capability back only under the node it hung under, not under whatever has taken that node's number since
     {
         let sh = svc(37, 1, 0, 0, 0, 0)[0] as i64;

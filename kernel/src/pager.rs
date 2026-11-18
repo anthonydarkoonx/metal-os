@@ -219,7 +219,9 @@ fn eligible(tid: usize, pager: Option<usize>) -> bool {
 /// `MC_PAGER_NEXT(buffer)`: (job kind, slot), with the bytes of a write job in the caller's buffer.
 pub fn next(cur: usize, buf_va: usize) -> Result<(u64, u64), i64> {
     let me = task::aspace(cur);
-    if buf_va % PAGE != 0 || !is_pager(me) {
+    // Only the pager's first task: the page the kernel copies write jobs through (`SCRATCH`) is one, and borrowed without waiting, so a
+    // second task of the program calling in at the same time would stop the kernel. (`register` already refuses a program with threads.)
+    if buf_va % PAGE != 0 || cur != me || !is_pager(me) {
         return Err(if buf_va % PAGE != 0 { E_INVAL } else { E_PERM });
     }
     // 1. a job already out, or a page waiting to come back
@@ -324,8 +326,8 @@ fn start_write(me: usize) -> Option<Op> {
 /// `MC_PAGER_DONE(status, buffer)`.
 pub fn done(cur: usize, status: u64, buf_va: usize) -> i64 {
     let me = task::aspace(cur);
-    if !is_pager(me) {
-        return E_PERM;
+    if cur != me || !is_pager(me) {
+        return E_PERM; // (the pager's first task only: see `next`)
     }
     let Some(op) = P.lock(R_PAGER).cur else { return E_INVAL };
     match op {

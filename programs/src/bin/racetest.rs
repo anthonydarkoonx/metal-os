@@ -60,6 +60,10 @@ use metal_programs::*;
 //   21 N6: a program that ends while one of its threads is in SPAWN must not leave an embryo nobody owns. A thread keeps starting embryos and
 //      killing them (a spawn capability is in slot 0); the main thread ends after a random delay. The conductor counts the live tasks before
 //      and after many runs: a leaked embryo stays in the count for ever.
+//   22 N11: only the pager's first task may use MC_PAGER_NEXT and MC_PAGER_DONE (a MemCtl capability with the pager right is in slot 1): this
+//      program registers as the pager, a thread of it calls both; each must be refused (-1). Exit code bits: 1 NEXT was not refused, 2 DONE was not.
+//   23 N10: two threads of one program that WAIT for the same dead child: exactly one may collect it. This one and a thread poll (WAIT without
+//      blocking) for a killed child, 40 times (a spawn capability is in slot 0, the thread gets it too). Exit 10 if both collected one.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -679,6 +683,98 @@ fn n6() -> u64 {
     0 // (the program ends here, with the thread most likely inside SPAWN)
 }
 
+#[repr(align(4096))]
+struct PageBuf([u8; PAGE]);
+static mut PBUF: PageBuf = PageBuf([0; PAGE]);
+static PWORD: AtomicU32 = AtomicU32::new(0);
+static P_NEXT: AtomicU32 = AtomicU32::new(0);
+static P_DONE: AtomicU32 = AtomicU32::new(0);
+static P_END: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn pager_thread(_: u64) -> ! {
+    // SAFETY: `addr_of_mut!` only makes a pointer to the page-aligned static; the kernel refuses the call, so nothing is written through it.
+    let buf = unsafe { core::ptr::addr_of_mut!(PBUF) as u64 };
+    P_NEXT.store(svc(MEMCTL, 1, 7, buf, 0, 0)[0] as u32, Release);
+    P_DONE.store(svc(MEMCTL, 1, 8, 0, 0, 0)[0] as u32, Release);
+    thread::exit(&P_END)
+}
+
+fn n11() -> u64 {
+    if svc(MEMCTL, 1, 6, 1, &PWORD as *const AtomicU32 as u64, 0)[0] as i64 != 0 {
+        return 2;
+    }
+    if thread::create_with_kernel_stack(pager_thread, 0, 1 << 1, 0) < 0 {
+        return 3;
+    }
+    thread::join(&P_END);
+    let mut bits = 0;
+    if P_NEXT.load(Acquire) as i32 != -1 {
+        bits |= 1;
+    }
+    if P_DONE.load(Acquire) as i32 != -1 {
+        bits |= 2;
+    }
+    bits
+}
+
+const N10_ROUNDS: usize = 40;
+static SLEEPER: &[u8] = include_bytes!("../../build/sleeper.bin");
+static W_GO: AtomicU32 = AtomicU32::new(0);
+static W_CHILD: AtomicU32 = AtomicU32::new(0);
+static W_THREAD: AtomicU32 = AtomicU32::new(0); // 1: the thread collected the child, 2: it did not
+static DONE23: [AtomicU32; N10_ROUNDS + 1] = [const { AtomicU32::new(0) }; N10_ROUNDS + 1];
+static W_ROUND: AtomicU32 = AtomicU32::new(0);
+
+/// Poll WAIT (without blocking) until the child is collected or is not ours: whether this caller collected it.
+fn collect(child: u64) -> bool {
+    loop {
+        let r = wait(child, true);
+        if r == -10 {
+            core::hint::spin_loop(); // (E_AGAIN: not dead yet)
+            continue;
+        }
+        return r != -5; // (E_INVAL: somebody else collected it)
+    }
+}
+
+extern "C" fn waiter(_: u64) -> ! {
+    let round = W_ROUND.load(Acquire);
+    while W_GO.load(Acquire) != round {
+        core::hint::spin_loop();
+    }
+    W_THREAD.store(if collect(W_CHILD.load(Acquire) as u64) { 1 } else { 2 }, Release);
+    thread::exit(&DONE23[round as usize])
+}
+
+fn n10() -> u64 {
+    let mut both = 0;
+    for round in 1..=N10_ROUNDS as u32 {
+        let child = spawn(0, &Spawn::new(SLEEPER));
+        if child < 0 {
+            println!("racetest: SPAWN failed ({child}) in round {round}");
+            return 2;
+        }
+        W_CHILD.store(child as u32, Release);
+        W_ROUND.store(round, Release);
+        W_THREAD.store(0, Release);
+        if thread::create_with_kernel_stack(waiter, 0, 0, 0) < 0 {
+            return 3;
+        }
+        kill(child as u64);
+        W_GO.store(round, Release);
+        let mine = collect(child as u64);
+        thread::join(&DONE23[round as usize]);
+        if mine && W_THREAD.load(Acquire) == 1 {
+            both += 1;
+        }
+    }
+    if both > 0 {
+        println!("racetest: both threads collected the same child in {both} rounds");
+        return 10;
+    }
+    0
+}
+
 const FS_PAGE_SLOT: u64 = 9;
 
 fn session_page(fill: bool) -> u64 {
@@ -733,6 +829,8 @@ program!("racetest", |c| {
         16 => n1(),
         20 => n3(),
         21 => n6(),
+        22 => n11(),
+        23 => n10(),
         18 => session_page(true),
         19 => session_page(false),
         17 => n2(),

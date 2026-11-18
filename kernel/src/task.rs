@@ -668,6 +668,8 @@ impl World {
                                 }
                             }
                         }
+                        // (a copy of a run-time object's capability, a thread's, ends with the copy: the object stays with the creator's)
+                        Some(o) if o.root != c.node => {}
                         _ => obj::release(c.obj),
                     }
                 }

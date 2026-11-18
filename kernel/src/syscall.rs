@@ -1186,7 +1186,7 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
             let mut t = task::lock(cur);
             let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
             let node = mint_node(None);
-            let obj = obj::alloc_dynamic(pa, pages);
+            let obj = node.and_then(|n| obj::alloc_dynamic(pa, pages, n));
             match (free_slot, node, obj) {
                 (Some(s), Some(n), Some(o)) => {
                     t.caps[s] = Cap { kind: Kind::Memory, obj: o, rights: R_MAP | R_WRITE | R_INFO, node: n };
@@ -1218,7 +1218,15 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
             if !obj::is_dynamic(c.obj) {
                 return Out::Ret(E_PERM);
             }
-            World::lock().revoke_subtree(c.node, true); // clears the capability and unmaps it everywhere
+            if o.kind != ObjKind::Dma {
+                return Out::Ret(E_INVAL); // shared memory is ended with CAP_REVOKE (flag 1) on the creator's capability
+            }
+            let mut w = World::lock();
+            w.revoke_subtree(c.node, true); // clears the capability and unmaps it everywhere
+            if o.root != c.node {
+                return Out::Ret(0); // a copy (a thread's, say): only the copy goes, the object stays with its creator's capability
+            }
+            drop(w);
             let holder = mem::owner_of(o.pa);
             if holder >= mem::OWNER_TASK0 {
                 crate::spawn::release_contig((holder - mem::OWNER_TASK0) as usize, o.pages);
@@ -1371,6 +1379,9 @@ fn cap_revoke(cur: usize, slot: u64, itself: bool) -> Out {
             }
             let mut w = World::lock();
             let n = w.revoke_subtree(c.node, true);
+            if o.root != c.node {
+                return Out::Ret(n as i64); // a copy: only the copy goes
+            }
             for i in 0..o.pages {
                 mem::free(o.pa + i * mem::PAGE);
             }

@@ -491,6 +491,19 @@ pub fn tests() {
     } else {
         println!("[client] TEST the race test program is in the system image and there are at least two cores: FAIL");
     }
+    // M1: a thread's copy of a run-time memory capability cannot end the object, and MC_FREE does not take shared memory
+    if race.len() >= 32 {
+        let m1: Vec<u64> = [4u64, 5, 6]
+            .iter()
+            .map(|&mode| run_with_console3(Req::new().arg(mode).heap(64).threads(1).give_masked(1, MEM_SLOT as u8, 0xFFFF & !4), &race, b"").0 as u64)
+            .collect();
+        println!("[client] TEST a thread's copy of run-time memory cannot free it (exit codes for CAP_REVOKE, thread end, MC_FREE: {m1:?}): {}", verdict(m1.iter().all(|&c| c == 0)));
+        let shm = svc(37, 1, 0, 0, 0, 0)[0] as i64;
+        let freed = svc(MEMCTL, MEM_SLOT, 3, shm as u64, 0, 0)[0] as i64;
+        let still = shm >= 0 && svc(4, shm as u64, 0xA000_0000, 1, 0, 0)[0] == 0;
+        svc(CAP_REVOKE, shm as u64, 1, 0, 0, 0);
+        println!("[client] TEST MC_FREE refuses a shared-memory capability, which stays usable (result {freed}, still mapped {still}): {}", verdict(freed == E_INVAL as i64 && still));
+    }
 
     // ---- the pager: pages written back to disk and read again ------------------------------------------------------------
     pager_tests(&v, &load("pager"), &load("pagetest"));

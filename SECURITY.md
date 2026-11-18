@@ -12,7 +12,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 |---|---|---|---|
 | H1 | High (fixed in `8ab56dc`) | Capability checks race with revocation; a mapping can outlive freed shared memory | Any two cooperating tasks, SMP only |
 | H2 | High (fixed in `8ab56dc`) | `HEAP_RELEASE` frees frames before flushing the TLB | Any program with a thread, SMP only |
-| M1 | Medium | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
+| M1 | Medium (fixed) | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
 | M2 | Medium | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
 | M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
 | M4 | Medium | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
@@ -80,7 +80,11 @@ The same order appears in `spawn::free_thread_stack` (`spawn.rs:983`–`990`) an
 
 ## Medium
 
-### M1. Run-time memory objects can be freed through a derived capability
+### M1. Run-time memory objects can be freed through a derived capability (fixed)
+
+**Fixed:** `MC_ALLOC` objects now record the node of the creator's capability as their root (`obj::alloc_dynamic`). `CAP_REVOKE` (flag 1) and `MC_FREE` free the frames and the object-table entry only when the capability is the root; on a copy only the copy goes. Thread exit (`World::reset`) releases the entry only for the root. `MC_FREE` rejects shared memory with `E_INVAL`. Regression tests: `racetest` modes 4 to 6 (a thread ends the object through its copy: revoke, thread end, `MC_FREE`) and a conductor check that `MC_FREE` refuses a shared-memory capability, both in `make qemu-test`. On the unfixed kernel all three thread cases fail and the shared-memory `MC_FREE` panics at `mem.rs:221`. Not fixed here: `CAP_REVOKE` on a creator's run-time memory capability does not give the pages back to the program's holding quota (`MC_FREE` does).
+
+The original finding follows.
 
 An `MC_ALLOC` object should live as long as its creator's capability. Three paths free it through a copy instead. The copy comes from `THREAD_CREATE`, which duplicates capabilities without requiring the grant right (`spawn.rs:861`).
 

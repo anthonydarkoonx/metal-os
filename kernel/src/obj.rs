@@ -121,11 +121,12 @@ pub fn init() {
 pub const FIRST_PLATFORM_OBJ: u8 = 52;
 const FIRST_DYNAMIC: usize = 64;
 
-/// Register a contiguous DMA-style object created at run time.
-pub fn alloc_dynamic(pa: usize, pages: usize) -> Option<u8> {
+/// Register a contiguous DMA-style object created at run time. `root` is the node of the creator's capability: the object
+/// lives as long as that capability does (a copy of the capability, such as a thread's, never ends it).
+pub fn alloc_dynamic(pa: usize, pages: usize, root: crate::cap::NodeId) -> Option<u8> {
     let mut t = OBJS.lock(R_OBJ);
     let i = (FIRST_DYNAMIC..NOBJ).find(|&i| t[i].kind == ObjKind::Unused)?;
-    t[i] = MemObj { kind: ObjKind::Dma, pa, pages, aux: 0, root: 0, list: 0 };
+    t[i] = MemObj { kind: ObjKind::Dma, pa, pages, aux: 0, root, list: 0 };
     Some(i as u8)
 }
 

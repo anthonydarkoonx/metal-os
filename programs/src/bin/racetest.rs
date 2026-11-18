@@ -19,7 +19,15 @@ use metal_programs::*;
 //   3  the allocating program for mode 2: waits for the main thread's signal (word 0 of the shared object in slot 0), then takes
 //      and fills pages.
 
+//   4, 5, 6  M1: run-time memory (MC_ALLOC) and a thread's copy of its capability. The thread ends the object, in three ways, through
+//      its copy: 4 = CAP_REVOKE of itself, 5 = the thread simply ends, 6 = MC_FREE. The object must stay usable for the main
+//      thread (whose capability it is): a second mapping works, and the first one still holds what was written. Exit 0 = it did.
+//      (A MemCtl capability is in slot 1.)
+
 const BIG: usize = 0xA000_0000;
+const MEMCTL: u64 = 18;
+const MC_ALLOC: u64 = 2;
+const MC_FREE: u64 = 3;
 const PAGE: usize = 4096;
 const E_BADCAP: i64 = -2;
 const HEAP_RELEASE: u64 = 19;
@@ -183,8 +191,51 @@ fn allocator() -> u64 {
     (taken != ALLOC_PAGES) as u64 // 0 = it got all it asked for while the release was running
 }
 
+static MODE: AtomicU32 = AtomicU32::new(0);
+
+/// M1's thread: it holds copies of the MemCtl capability (slot 1) and of the object's (slot `s`).
+extern "C" fn copier(s: u64) -> ! {
+    match MODE.load(Acquire) {
+        4 => {
+            revoke_self(s);
+        }
+        6 => {
+            svc(MEMCTL, 1, MC_FREE, s, 0, 0);
+        }
+        _ => {} // 5: it just ends
+    }
+    thread::exit(&DONE)
+}
+
+fn m1(mode: u64) -> u64 {
+    let s = svc(MEMCTL, 1, MC_ALLOC, 1, 0, 0)[0] as i64;
+    if s < 0 {
+        return 2;
+    }
+    let s = s as u64;
+    if map(s, BIG, true) != 0 {
+        return 3;
+    }
+    // SAFETY: the 1-page object was just mapped writable at BIG.
+    unsafe { core::ptr::write_volatile(BIG as *mut u64, T_MAGIC) };
+    MODE.store(mode as u32, Release);
+    if thread::create_with_kernel_stack(copier, s, (1 << 1) | (1 << s), 0) < 0 {
+        return 4;
+    }
+    thread::join(&DONE);
+    if map(s, BIG + 0x10000, true) != 0 {
+        return 10; // the object is gone from under the capability that is still here
+    }
+    // SAFETY: BIG and BIG + 0x10000 are mappings of the same live object.
+    if unsafe { core::ptr::read_volatile((BIG + 0x10000) as *const u64) } != T_MAGIC {
+        return 11;
+    }
+    0
+}
+
 program!("racetest", |c| {
     match c.arg {
+        4..=6 => m1(c.arg),
         1 => h1(),
         2 => h2(),
         3 => allocator(),

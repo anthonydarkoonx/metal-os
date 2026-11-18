@@ -263,6 +263,8 @@ qemu-test: kernel disk
 	 grep -q "TEST a program sees files only with the files permission.*PASS" build.log && \
 	 grep -q "TEST a program starts programs only with the spawn permission.*PASS" build.log && \
 	 grep -q "TEST WAIT_WORD and WAKE_WORD on a device mapping are refused.*PASS" build.log && \
+	 grep -q "TEST a thread.s copy of run-time memory cannot free it.*PASS" build.log && \
+	 grep -q "TEST MC_FREE refuses a shared-memory capability.*PASS" build.log && \
 	 grep -q "TEST a map that races a revoke never leaves.*PASS" build.log && \
 	 grep -q "TEST pages released by HEAP_RELEASE are not reachable.*PASS" build.log && \
 	 grep -q "TEST stopping asks the ability to leave.*PASS" build.log && \

@@ -26,6 +26,11 @@
 //!  * A read whose program died, or whose page was released meanwhile, is dropped; a failed read turns the page into
 //!    an unmapped one, so the program faults instead of seeing wrong data.
 //!  * If the pager is gone for more than `PAGER_GRACE` ticks, programs waiting for the disk are killed.
+//!  * The pager never sees a program's bytes and cannot change them unnoticed: a page is sealed (ChaCha20-Poly1305, `metal-aead`)
+//!    with a key drawn at boot that only the kernel knows, a nonce that is a counter (never repeated), and the disk slot, the
+//!    program and the address as associated data, before the pager is handed it. What comes back is checked before a frame is
+//!    given the bytes; a page that fails the check is lost like one the pager failed to read (the program faults), and
+//!    counted. Code pages are never written back at all. Without a key (no real entropy: `rand::secure_fill`) nothing is.
 //!
 //! Limits: a thread-exit wake-up through a word on a page that is on disk is lost (such programs are not chosen while they
 //! have threads, but one that starts a thread later could be waiting on an old page); the pager is a normal program, so
@@ -68,6 +73,34 @@ struct Pager {
     seq: u32,
     /// The tick at which the pager was first found missing (0: it is there).
     missing_since: u64,
+    /// The key pages are sealed with (drawn when the first is), the next nonce, and for each disk slot what is needed to open its page.
+    key: Option<metal_aead::Key>,
+    ctr: u64,
+    meta: [SlotMeta; MAX_SLOTS],
+}
+
+#[derive(Clone, Copy)]
+struct SlotMeta {
+    sealed: bool,
+    ctr: u64,
+    tag: metal_aead::Tag,
+}
+
+const NO_META: SlotMeta = SlotMeta { sealed: false, ctr: 0, tag: [0; metal_aead::TAG_LEN] };
+
+/// The nonce and the associated data of the page of program `tid` at `va`, in disk slot `slot`.
+fn nonce_of(ctr: u64) -> [u8; 12] {
+    let mut n = [0u8; 12];
+    n[..8].copy_from_slice(&ctr.to_le_bytes());
+    n
+}
+
+fn aad_of(slot: u32, tid: usize, va: usize) -> [u8; 13] {
+    let mut a = [0u8; 13];
+    a[..4].copy_from_slice(&slot.to_le_bytes());
+    a[4] = tid as u8;
+    a[5..].copy_from_slice(&(va as u64).to_le_bytes());
+    a
 }
 
 static P: SpinLock<Pager> = SpinLock::new(Pager {
@@ -81,6 +114,9 @@ static P: SpinLock<Pager> = SpinLock::new(Pager {
     cursor: (FIRST_DYNAMIC_TASK, 0),
     seq: 0,
     missing_since: 0,
+    key: None,
+    ctr: 0,
+    meta: [NO_META; MAX_SLOTS],
 });
 
 /// A page is (or may be) on disk: swap.rs consults the pager only then.
@@ -114,6 +150,8 @@ static WRITTEN: AtomicU64 = AtomicU64::new(0);
 static READ: AtomicU64 = AtomicU64::new(0);
 static CANCELLED: AtomicU64 = AtomicU64::new(0);
 static FAILED: AtomicU64 = AtomicU64::new(0);
+/// Pages that came back from the pager different from what was sealed.
+static TAMPERED: AtomicU64 = AtomicU64::new(0);
 
 fn alive(tid: usize) -> bool {
     !matches!(sched::state(tid), State::Free | State::Dead)
@@ -137,6 +175,7 @@ pub fn free_slot(slot: u32) {
     let mut p = P.lock(R_PAGER);
     if (slot as usize) < MAX_SLOTS {
         p.used[slot as usize / 64] &= !(1 << (slot % 64));
+        p.meta[slot as usize] = NO_META;
     }
 }
 
@@ -250,6 +289,23 @@ fn start_write(me: usize) -> Option<Op> {
                         p.used[slot as usize / 64] &= !(1 << (slot % 64));
                         return None;
                     }
+                    // seal it: the pager gets ciphertext (no key, no write-back)
+                    if p.key.is_none() {
+                        let mut k = [0u8; metal_aead::KEY_LEN];
+                        if crate::rand::secure_fill(&mut k) {
+                            p.key = Some(metal_aead::key_from_bytes(&k));
+                        }
+                    }
+                    let Some(key) = p.key else {
+                        p.used[slot as usize / 64] &= !(1 << (slot % 64));
+                        p.want = 0;
+                        SCRATCH.get().fill(0);
+                        return None;
+                    };
+                    p.ctr += 1;
+                    let ctr = p.ctr;
+                    let tag = metal_aead::seal(&key, &nonce_of(ctr), &aad_of(slot, tid, va), &mut SCRATCH.get()[..]);
+                    p.meta[slot as usize] = SlotMeta { sealed: true, ctr, tag };
                     let op = Op::Write { tid: tid as u8, l1: t.l1, va, handle, slot, cancelled: false };
                     p.cur = Some(op);
                     p.want -= 1;
@@ -301,25 +357,33 @@ pub fn done(cur: usize, status: u64, buf_va: usize) -> i64 {
             let tid = tid as usize;
             if status != 0 {
                 FAILED.fetch_add(1, Ordering::Relaxed);
-                // the bytes are lost: the page becomes unmapped, and the program faults when it next touches it
-                let t = task::lock(tid);
-                if t.l1 != 0 && matches!(mmu::inspect(t.l1, va), Page::Disk(s) if s == slot) {
-                    mmu::clear_swapped(t.l1, va);
-                    free_slot(slot);
-                }
+                lose_page(tid, va, slot);
             } else {
                 let owner = mem::OWNER_TASK0 + tid as u8;
                 let Some(pa) = mem::alloc_movable(owner, tid, va) else { return E_NOMEM }; // (the job stays: ask again)
-                let copied = {
+                let opened = {
                     let t = task::lock(me);
                     match crate::swap::translate(&t, me, buf_va) {
-                        Some(src) if buf_va % PAGE == 0 => crate::frame::phys::try_copy_page(pa, src),
-                        _ => false,
+                        Some(src) if buf_va % PAGE == 0 => open_into(pa, src, tid, va, slot),
+                        _ => Opened::Unreadable,
                     }
                 };
-                if !copied {
-                    mem::free(pa);
-                    return E_INVAL;
+                match opened {
+                    Opened::Ok => {}
+                    Opened::Unreadable => {
+                        mem::free(pa);
+                        return E_INVAL;
+                    }
+                    Opened::Forged => {
+                        // not what was sealed: the page is lost (the program faults when it touches it); the pager is told it erred
+                        mem::free(pa);
+                        TAMPERED.fetch_add(1, Ordering::Relaxed);
+                        FAILED.fetch_add(1, Ordering::Relaxed);
+                        lose_page(tid, va, slot);
+                        P.lock(R_PAGER).cur = None;
+                        kick_if_work();
+                        return E_INVAL;
+                    }
                 }
                 let t = task::lock(tid);
                 if t.l1 != 0 && alive(tid) && matches!(mmu::inspect(t.l1, va), Page::Disk(s) if s == slot) && mmu::install_resident(t.l1, va, pa) {
@@ -336,6 +400,49 @@ pub fn done(cur: usize, status: u64, buf_va: usize) -> i64 {
     P.lock(R_PAGER).cur = None;
     kick_if_work();
     0
+}
+
+/// The bytes of the page are lost: it becomes unmapped, and the program faults when it next touches it.
+fn lose_page(tid: usize, va: usize, slot: u32) {
+    let t = task::lock(tid);
+    if t.l1 != 0 && matches!(mmu::inspect(t.l1, va), Page::Disk(s) if s == slot) {
+        mmu::clear_swapped(t.l1, va);
+        free_slot(slot);
+    }
+}
+
+enum Opened {
+    Ok,
+    /// The pager's buffer could not be read (not RAM).
+    Unreadable,
+    /// The bytes fail the check.
+    Forged,
+}
+
+/// Check what the pager returned (the page at physical address `src`) against the seal made when it was written, and put the
+/// plaintext into the frame `pa`.
+fn open_into(pa: usize, src: usize, tid: usize, va: usize, slot: u32) -> Opened {
+    let (key, meta) = {
+        let p = P.lock(R_PAGER);
+        (p.key, p.meta.get(slot as usize).copied())
+    };
+    let mut page = SCRATCH.get();
+    if !crate::frame::phys::try_copy_from(src, &mut page[..]) {
+        return Opened::Unreadable;
+    }
+    let ok = match (key, meta) {
+        (Some(key), Some(m)) if m.sealed => metal_aead::open(&key, &nonce_of(m.ctr), &aad_of(slot, tid, va), &mut page[..], &m.tag),
+        _ => false,
+    };
+    let done = ok && crate::frame::phys::try_copy_to(pa, &page[..]);
+    page.fill(0);
+    if done {
+        Opened::Ok
+    } else if ok {
+        Opened::Unreadable
+    } else {
+        Opened::Forged
+    }
 }
 
 /// The memory daemon wants `n` more pages written back.
@@ -434,6 +541,8 @@ pub struct Stats {
     pub read: u64,
     pub cancelled: u64,
     pub failed: u64,
+    /// Pages the pager returned changed.
+    pub tampered: u64,
     pub slots_used: u64,
     pub registered: bool,
     /// Pages committed to disk in the current hour, and write jobs held back by the hourly cap.
@@ -448,6 +557,7 @@ pub fn stats() -> Stats {
         read: READ.load(Ordering::Relaxed),
         cancelled: CANCELLED.load(Ordering::Relaxed),
         failed: FAILED.load(Ordering::Relaxed),
+        tampered: TAMPERED.load(Ordering::Relaxed),
         slots_used: p.used.iter().map(|w| w.count_ones() as u64).sum(),
         registered: p.tid.map_or(false, alive),
         hour_writes: WINDOW_WRITES.load(Ordering::Relaxed),

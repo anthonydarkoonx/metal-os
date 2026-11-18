@@ -346,7 +346,7 @@ all 12,850 pages the test held were verified afterwards (12,750 of them also too
 * **Writeback to disk (the pager).** When the pool is three quarters full `compactd` asks for 16 pages to be written back
   (`MC_SWAP_WRITEBACK`). The kernel never waits for a disk: a userspace **pager** (`programs/src/bin/pager.rs`, an ordinary program
   with file access and a `MemCtl` capability holding `R_MEM_PAGER`) asks for jobs (`MC_PAGER_NEXT`): a *write* job carries a
-  page decompressed from the store, which the pager writes to a slot of `/data/swap` and reports (`MC_PAGER_DONE`); only then
+  page decompressed from the store and **sealed** (ChaCha20-Poly1305, a boot-time key only the kernel has; checked again when the page comes back, a changed page is lost and the program faults; code pages are never written back), which the pager writes to a slot of `/data/swap` and reports (`MC_PAGER_DONE`); only then
   does the descriptor change to "on disk (slot)" and the store entry go. A task that touches such a page takes a translation
   fault, the kernel queues a *read* job and puts the task to sleep for a tick; it faults again until the pager has read the
   slot and the kernel has mapped a frame filled from it. `LOG`, `WAIT_WORD` and `WAKE_WORD` on a page that is on disk are

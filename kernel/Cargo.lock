@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "metal-aead"
+version = "0.1.0"
+dependencies = [
+ "metal-rand",
+]
+
+[[package]]
 name = "metal-compact"
 version = "0.1.0"
 
@@ -10,6 +17,7 @@ version = "0.1.0"
 name = "metal-kernel"
 version = "0.1.0"
 dependencies = [
+ "metal-aead",
  "metal-compact",
  "metal-loader",
  "metal-lz4",

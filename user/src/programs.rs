@@ -324,6 +324,55 @@ fn pager_tests(v: &Vfs, pager: &[u8], victim: &[u8]) {
     println!("[client] TEST nothing is left behind when the programs are gone (disk slots {}, store entries {} -> {}): {}", end.slots, stored0, stored1, verdict(end.slots == 0 && stored1 <= stored0 + 2));
     kill(p2);
     wait(p2, false);
+
+    // the kernel seals every page before the pager sees it, and checks it when it comes back (kernel/src/pager.rs)
+    let evict_and_write = |t: i64| {
+        sleep(100);
+        svc(MEMCTL, MEM_SLOT, MC_SWAP_OUT, 1024, 1 | 4 | (t as u64 + 1) << 8, 0);
+        svc(MEMCTL, MEM_SLOT, MC_SWAP_WRITEBACK, 512, 0, 0);
+    };
+    let drain = || {
+        for _ in 0..300 {
+            if pager_stats().slots == 0 {
+                break;
+            }
+            sleep(1);
+        }
+    };
+    // a pager that looks at what it is given sees no plaintext; a good one then gets every page back right
+    let _ = v.unlink("/data/pagetest.go");
+    let sn = start_pager(pager, 96 | 1 << 16);
+    let t = Req::new().arg(0).heap(120).fs().go(victim);
+    evict_and_write(t);
+    let seen = if sn > 0 { wait(sn, false) as u64 } else { 0 };
+    let p3 = start_pager(pager, 96);
+    let _ = v.write_file("/data/pagetest.go", b"go");
+    let code = if t > 0 { wait(t, false) } else { -1 };
+    let _ = v.unlink("/data/pagetest.go");
+    drain();
+    println!("[client] TEST the pager is handed sealed pages, never the program's bytes ({} of {} pages written looked like the victim's), and they come back right (victim exit {code}): {}",
+        seen & 0xFF, seen >> 8, verdict(sn > 0 && seen >> 8 >= 48 && seen & 0xFF == 0 && code == 0));
+    kill(p3);
+    wait(p3, false);
+    // a pager that changes a page on its way back is caught: the program is stopped (or told), and never sees wrong bytes
+    let before = pager_stats();
+    let tp = start_pager(pager, 96 | 2 << 16);
+    let t = Req::new().arg(0).heap(120).fs().go(victim);
+    evict_and_write(t);
+    let mut waited = 0;
+    while pager_stats().slots < 48 && waited < 3000 {
+        sleep(2);
+        waited += 2;
+    }
+    let _ = v.write_file("/data/pagetest.go", b"go");
+    let code = if t > 0 { wait(t, false) as u64 } else { 0 };
+    let _ = v.unlink("/data/pagetest.go");
+    drain();
+    let after = pager_stats();
+    println!("[client] TEST a pager that changes a page on its way back is caught: the program faults instead of using it (exit {code:#x}, {} pages refused): {}",
+        after.failed - before.failed, verdict(tp > 0 && (code == EXIT_FAULTED || code == 200) && after.failed > before.failed));
+    kill(tp);
+    wait(tp, false);
 }
 
 /// An interactive session: the conductor has no tests to run. It starts the program manager, hands the screen task (the shell) a

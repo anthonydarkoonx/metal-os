@@ -17,7 +17,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
 | M4 | Medium (fixed) | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
 | M5 | Medium (fixed) | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
-| M6 | Medium | The pager sees and supplies other programs' pages in the clear | The pager program |
+| M6 | Medium (fixed) | The pager sees and supplies other programs' pages in the clear | The pager program |
 | M7 | Medium (fixed) | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
 | L1–L10 | Low | See below (L1 fixed) | |
 
@@ -146,7 +146,9 @@ On its own this is not exploitable. Combined with any kernel write primitive (H1
 
 **Fix.** Map kernel text read-only and executable, everything else `PXN`. Set PAN: the kernel never dereferences user virtual addresses, so it costs nothing.
 
-### M6. The pager is trusted with every program's memory
+### M6. The pager is trusted with every program's memory (fixed)
+
+**Fixed.** Every page is sealed before the pager is handed it: ChaCha20-Poly1305 (new crate `libs/metal-aead`, checked against the RFC 8439 vector and five more made by an independent implementation, and against forgeries) under a key drawn from `rand::secure_fill` when the first page is written and never leaving the kernel; the nonce is a counter that is never reused; the disk slot, the program and the address are the associated data, so a page cannot be moved to another slot or program. The tag stays in the kernel (per slot). When a page comes back it is checked before a frame is given its bytes; one that fails is lost like a failed read (the program faults when it touches it) and counted in the failure count. Executable pages are never written back (`mmu::find_swapped` skips them), so the pager cannot touch a program's code. Without real entropy (`secure_fill` refuses) nothing is written back. Tests in `make qemu-test` with a misbehaving pager (`programs/src/bin/pager.rs` modes 1 and 2): a snooping pager finds none of the victim's plaintext in the 48 pages it writes and a good pager then gets them all back right; a pager that changes a byte of every page it returns gets the program stopped, never wrong data. The unfixed kernel fails both (48 of 48 pages in plaintext; the victim read wrong bytes). **Limits:** the pager still learns which pages are written, when, and how many (and can drop or delay them: availability is not protected, only confidentiality and integrity); it can replay a page's old ciphertext only into the same slot, where the tag no longer matches, so that fails too, but a pager that keeps a copy of the *current* ciphertext can hand it back unchanged, which is just the right page; the key lives for one boot, which is as long as any page on the swap file is valid; the kernel's own memory holds the plaintext while it seals (one scratch page, zeroed after use). Original finding:
 
 Write-back hands the pager the plaintext page (`pager.rs:204`–`210`). Read-in installs whatever bytes the pager returns, with the page's old permissions, including executable ones (`pager.rs:311`–`326`).
 
@@ -225,6 +227,6 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 2. M1 and M3: lifetime rules for dynamic objects and the range checks in `mem.rs`.
 3. M2 and L1: decide who may grant to whom, then hide the introspection pages.
 4. ~~M4 and M5~~ (done: FP trapping, kernel page permissions, WXN, PAN).
-5. ~~M7~~ (done), then the Low items.
+5. ~~M6 and M7~~ (done), then the Low items.
 
 Tests for H1 and H2 now exist (`racetest`, in `make qemu-test`, since threads exist only for programs and `make fuzz` runs a single task). Still worth adding: a driver-role task calling `WAIT_WORD` on its register window (M3).

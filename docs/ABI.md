@@ -296,10 +296,10 @@ MemCtl capability); `MC_PAGER_STATS`(10) needs `R_MEM_STATS`.
 | op | arguments | result |
 |---|---|---|
 | 6 `MC_PAGER_REGISTER` | `slots` (size of the swap file in pages, at most 1024), `word` (address of a 32-bit word the kernel changes and wakes when there is a job) | 0; the caller is the pager (one at a time; a dead pager is replaced) |
-| 7 `MC_PAGER_NEXT` | `buffer` (page-aligned address in the pager's memory) | job kind in `x0` (0 none, 1 write, 2 read), disk slot in `x1`. A write job's page is already in `buffer`. Asking again returns the same job |
-| 8 `MC_PAGER_DONE` | `status` (0 = done), `buffer` | 0. For a read the kernel copies `buffer` into a new frame and maps it; for a write it commits |
+| 7 `MC_PAGER_NEXT` | `buffer` (page-aligned address in the pager's memory) | job kind in `x0` (0 none, 1 write, 2 read), disk slot in `x1`. A write job's page is already in `buffer`, **sealed**: 4096 bytes of ciphertext (ChaCha20-Poly1305 under a key only the kernel has; the tag is kept by the kernel, not written to disk). The pager stores them as they are. Asking again returns the same job |
+| 8 `MC_PAGER_DONE` | `status` (0 = done), `buffer` | 0. For a read the kernel checks `buffer` against the seal and, if it is what was written, decrypts it into a new frame and maps it; if not (changed, or from another slot) the page is lost, the program faults when it touches it, `E_INVAL` goes to the pager, and the failure count rises; for a write it commits |
 | 9 `MC_SWAP_WRITEBACK` | `n` | 0: `n` more pages (cold ones in the compressed store) are to be written back |
-| 10 `MC_PAGER_STATS` | | written in `x0`; `x1` read, `x2` cancelled writes, `x3` failures, `x4` disk slots in use, `x5` a pager is registered |
+| 10 `MC_PAGER_STATS` | | written in `x0`; `x1` read, `x2` cancelled writes, `x3` failures (including pages that came back changed), `x4` disk slots in use, `x5` a pager is registered |
 
-Pages on disk are page-table descriptors with the software bits `SWAPPED` and `ON_DISK` and the slot number where the frame
+Executable pages are never written back. Without real entropy for the key (`rand::secure_fill` refuses: the debugging modes, or no RNDR, seed file or virtio-rng) nothing is written back at all. Pages on disk are page-table descriptors with the software bits `SWAPPED` and `ON_DISK` and the slot number where the frame
 address was. See the README ("Swap") for the rules about what may be written back and what a fault on such a page does.

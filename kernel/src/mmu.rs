@@ -465,8 +465,8 @@ pub fn swapped_to_disk(l1: usize, va: usize, handle: u32, slot_no: u32) -> bool 
     true
 }
 
-/// The first page at or after `from` (a page-aligned user address) that is in the swap store (not on disk): its address
-/// and handle.
+/// The first page at or after `from` (a page-aligned user address) that is in the swap store (not on disk) and is not code: its
+/// address and handle. Executable pages never go to the pager (it would be handing it the program's instructions to change).
 pub fn find_swapped(l1: usize, from: usize) -> Option<(usize, u32)> {
     for i1 in user_l1_entries() {
         let e1 = table(l1)[i1];
@@ -482,7 +482,7 @@ pub fn find_swapped(l1: usize, from: usize) -> Option<(usize, u32)> {
             for i3 in 0..512 {
                 let va = (i1 << 30) + (i2 << 21) + (i3 << 12);
                 let pte = l3[i3];
-                if va >= from && pte & 1 == 0 && pte & SWAPPED != 0 && pte & ON_DISK == 0 {
+                if va >= from && pte & 1 == 0 && pte & SWAPPED != 0 && pte & ON_DISK == 0 && pte & UXN != 0 {
                     return Some((va, ((pte & ADDR_MASK) >> 12) as u32));
                 }
             }

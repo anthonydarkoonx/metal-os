@@ -12,6 +12,7 @@ metal-zram = { path = "../libs/metal-zram" }
 metal-sched = { path = "../libs/metal-sched" }
 metal-compact = { path = "../libs/metal-compact" }
 metal-rand = { path = "../libs/metal-rand" }
+metal-aead = { path = "../libs/metal-aead" }
 metal-loader = { path = "../libs/metal-loader" }
 
 [features]

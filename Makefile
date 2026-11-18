@@ -155,6 +155,8 @@ qemu-test: kernel disk
 	 grep -q "TEST every page comes back from disk.*PASS" build.log && \
 	 grep -q "TEST a program that keeps using its pages while they are pushed to disk.*PASS" build.log && \
 	 grep -q "TEST nothing is left behind when the programs are gone.*PASS" build.log && \
+	 grep -q "TEST the pager is handed sealed pages.*PASS" build.log && \
+	 grep -q "TEST a pager that changes a page on its way back is caught.*PASS" build.log && \
 	 grep -q "TEST driver crash surfaces as error.*PASS" build.log && \
 	 grep -q "TEST driver restarted with fresh state.*PASS" build.log && \
 	 grep -q "TEST sleep/timer.*PASS" build.log && \

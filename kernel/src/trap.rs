@@ -47,6 +47,7 @@ fn ec_name(ec: u64) -> &'static str {
         0x24 | 0x25 => "data abort",
         0x26 => "SP alignment fault",
         0x00 => "undefined/unknown",
+        0x07 => "floating-point or SIMD instruction (not allowed in user programs: build them soft-float)",
         0x0e => "illegal execution state",
         _ => "synchronous exception",
     }

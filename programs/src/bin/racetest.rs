@@ -30,6 +30,10 @@ use metal_programs::*;
 //      sibling not refused, 8 parent refused.
 //   9  L1: SYSINFO pages 10, 11, 13 and 14 (what other tasks hold) need an Admin capability, which this program has not: each must
 //      answer -1, while page 0 works. Exit code: one bit per page that was not refused (1, 2, 4, 8), 16 if page 0 failed.
+//   10 M4: a floating-point / SIMD instruction in a user program traps and ends it (the registers are not switched between tasks, so
+//      they must not be usable). Prints "survived" if it ran; the program is expected to fault.
+//   11 M4: TPIDR_EL0 belongs to the task: this one sets A, a thread sets B and gives up the CPU many times, and a new thread starts
+//      with 0. Exit code bits: 1 the thread did not start with 0, 2 the thread lost its own value, 4 this task's value was changed.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -200,6 +204,51 @@ fn allocator() -> u64 {
 }
 
 static MODE: AtomicU32 = AtomicU32::new(0);
+static TP_RESULT: AtomicU32 = AtomicU32::new(0);
+
+fn tpidr_read() -> u64 {
+    let v: u64;
+    // SAFETY: reads TPIDR_EL0, which a program may use as it likes.
+    unsafe { core::arch::asm!("mrs {}, tpidr_el0", out(reg) v, options(nomem, nostack)) };
+    v
+}
+
+fn tpidr_write(v: u64) {
+    // SAFETY: writes TPIDR_EL0, which a program may use as it likes.
+    unsafe { core::arch::asm!("msr tpidr_el0, {}", in(reg) v, options(nomem, nostack)) };
+}
+
+extern "C" fn tp_thread(_: u64) -> ! {
+    let mut bits = 0;
+    if tpidr_read() != 0 {
+        bits |= 1;
+    }
+    tpidr_write(0xB0B0_B0B0);
+    for _ in 0..3000 {
+        yield_now();
+        if tpidr_read() != 0xB0B0_B0B0 {
+            bits |= 2;
+        }
+    }
+    TP_RESULT.store(bits, Release);
+    thread::exit(&DONE)
+}
+
+fn tpidr() -> u64 {
+    tpidr_write(0xA0A0_A0A0);
+    if thread::create_with_kernel_stack(tp_thread, 0, 0, 0) < 0 {
+        return 100;
+    }
+    let mut bits = 0;
+    for _ in 0..3000 {
+        yield_now();
+        if tpidr_read() != 0xA0A0_A0A0 {
+            bits |= 4;
+        }
+    }
+    thread::join(&DONE);
+    bits | TP_RESULT.load(Acquire) as u64
+}
 
 /// M1's thread: it holds copies of the MemCtl capability (slot 1) and of the object's (slot `s`).
 extern "C" fn copier(s: u64) -> ! {
@@ -284,6 +333,13 @@ program!("racetest", |c| {
             bits
         }
         7 => m2(c.arg >> 8, c.parent),
+        10 => {
+            // SAFETY: `.inst` emits `movi v0.16b, #0`, which touches only a vector register; the kernel is expected to refuse it.
+            unsafe { core::arch::asm!(".inst 0x4f000400", out("v0") _) };
+            println!("racetest: survived a SIMD instruction");
+            0
+        }
+        11 => tpidr(),
         4..=6 => m1(c.arg),
         1 => h1(),
         2 => h2(),

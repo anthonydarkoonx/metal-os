@@ -380,6 +380,18 @@ pub fn ring_wait_unless(tid: usize, min: u32, ready: impl FnOnce() -> bool) -> b
 
 // ---- which core is running what ------------------------------------------------------------
 
+/// Each task's `TPIDR_EL0` (the thread-pointer register, which EL0 may read and write), kept while the task is not running so that
+/// one task's value is never seen by another (SECURITY.md, M4).
+static TPIDR: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+
+fn tpidr_save(tid: usize) {
+    TPIDR[tid].store(crate::frame::cpu::tpidr_el0(), Ordering::Relaxed);
+}
+
+fn tpidr_load(tid: usize) {
+    crate::frame::cpu::set_tpidr_el0(TPIDR[tid].load(Ordering::Relaxed));
+}
+
 static CURRENT: [Padded<AtomicUsize>; MAX_CPUS] = [const { Padded(AtomicUsize::new(usize::MAX)) }; MAX_CPUS];
 
 pub fn current() -> usize {
@@ -669,6 +681,7 @@ pub fn forget_task(tid: usize) {
     **TASK_UTIL.write(tid) = Util::new(WINDOW.load(Ordering::Relaxed));
     SLOT[tid].slice_end.store(u64::MAX, Ordering::Relaxed);
     SLOT[tid].run_start.store(0, Ordering::Relaxed);
+    TPIDR[tid].store(0, Ordering::Relaxed); // (a new task, or a restarted one, starts with a clear thread pointer)
 }
 
 // ---- priorities and inheritance ------------------------------------------------------------
@@ -1449,6 +1462,9 @@ pub fn dispatch(tf: &mut TrapFrame, preempt: bool) {
         return;
     }
     set_flag(&STATS[core].preempt_pending, false);
+    if cur != usize::MAX {
+        tpidr_save(cur); // (the register still holds the interrupted task's value)
+    }
     let mut now = sample_clock(core, preempt);
     if cur != usize::MAX {
         account(cur, core, now);
@@ -1498,6 +1514,7 @@ pub fn dispatch(tf: &mut TrapFrame, preempt: bool) {
                 start_running(next, cur, core, now);
                 CURRENT[core].store(next, Ordering::Relaxed);
                 mmu::switch_to(task::l1_of(next), next as u16 + 1);
+                tpidr_load(next);
                 *tf = *frame(next);
                 let slice = SLOT[next].slice_end.load(Ordering::Relaxed);
                 let mut ev = rt_event(core, next, now);

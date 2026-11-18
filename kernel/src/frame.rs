@@ -212,6 +212,20 @@ pub mod cpu {
         c
     }
 
+    /// `TPIDR_EL0`, the thread-pointer register that EL0 may read and write.
+    pub fn tpidr_el0() -> u64 {
+        let v: u64;
+        // SAFETY: reads TPIDR_EL0, which is always readable at EL1; no memory is accessed.
+        unsafe { asm!("mrs {}, tpidr_el0", out(reg) v, options(nomem, nostack, preserves_flags)) };
+        v
+    }
+
+    /// Set `TPIDR_EL0`. The kernel itself never uses it: it only means something to the task that runs next.
+    pub fn set_tpidr_el0(v: u64) {
+        // SAFETY: writes TPIDR_EL0, which the kernel does not use; no memory is accessed.
+        unsafe { asm!("msr tpidr_el0, {}", in(reg) v, options(nomem, nostack, preserves_flags)) };
+    }
+
     /// The CPU's identification register.
     pub fn midr() -> u64 {
         let m: u64;

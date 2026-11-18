@@ -14,7 +14,7 @@
     str     xzr, [x9], #8
     b       1b
 2:
-    mov     x9, #(3 << 20)          // CPACR_EL1.FPEN: don't trap FP/SIMD
+    mov     x9, #(1 << 20)          // CPACR_EL1.FPEN = 0b01: EL0 may not use FP/SIMD (it traps; the registers are not switched between tasks), EL1 may
     msr     cpacr_el1, x9
     adrp    x9, vectors
     add     x9, x9, :lo12:vectors
@@ -171,7 +171,7 @@ _secondary_start:
     mul     x10, x0, x10
     sub     x9, x9, x10             // this core's stack top
     mov     sp, x9
-    mov     x9, #(3 << 20)
+    mov     x9, #(1 << 20)          // (as on the boot core)
     msr     cpacr_el1, x9
     adrp    x9, vectors
     add     x9, x9, :lo12:vectors

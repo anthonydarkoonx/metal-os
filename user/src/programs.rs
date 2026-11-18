@@ -488,8 +488,12 @@ pub fn tests() {
             svc(CAP_REVOKE, s as u64, 1, 0, 0, 0);
         }
         println!("[client] TEST pages released by HEAP_RELEASE are not reachable through a stale translation after they are freed (12 rounds, {ran} reached the release, {leaks} saw another program's data): {}", verdict(leaks == 0 && ran > 0));
+    } else if race.len() >= 32 {
+        // (the H1 and H2 races need a second core to happen at all)
+        println!("[client] TEST a map that races a revoke never leaves a mapping of freed shared memory behind (skipped: one core): PASS");
+        println!("[client] TEST pages released by HEAP_RELEASE are not reachable through a stale translation after they are freed (skipped: one core): PASS");
     } else {
-        println!("[client] TEST the race test program is in the system image and there are at least two cores: FAIL");
+        println!("[client] TEST the race test program is in the system image: FAIL");
     }
     // M1: a thread's copy of a run-time memory capability cannot end the object, and MC_FREE does not take shared memory
     if race.len() >= 32 {
@@ -505,6 +509,11 @@ pub fn tests() {
             wait(sib, false);
         }
         println!("[client] TEST a program cannot put capabilities into a boot-time task or an unrelated program, but can into its parent (bits of refusals that failed: {m2:#x}): {}", verdict(m2 == 0));
+        // M4: user programs cannot use FP/SIMD (the registers are not switched between tasks), and TPIDR_EL0 is per task
+        let (c10, o10, _) = run_with_console3(Req::new().arg(10).heap(32), &race, b"");
+        let o10 = String::from_utf8_lossy(&o10).into_owned();
+        let (c11, _, _) = run_with_console3(Req::new().arg(11).heap(64).threads(1), &race, b"");
+        println!("[client] TEST a SIMD instruction in a user program ends it ({c10:#x}, survived {}), and TPIDR_EL0 is not shared between tasks (bits {c11:#x}): {}", o10.contains("survived"), verdict(c10 as u64 == EXIT_FAULTED && !o10.contains("survived") && c11 == 0));
         // L1: what other tasks hold is shown only to a holder of an Admin capability (the conductor has one)
         let l1 = run_with_console3(Req::new().arg(9).heap(64), &race, b"").0;
         let admin_ok = svc(21, 10, 0, 0, 0, 0)[0] == 0 && svc(21, 11, 0, 0, 0, 0)[0] == 0;

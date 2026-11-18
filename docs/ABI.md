@@ -11,6 +11,9 @@ Errors: `-1` no permission, `-2` bad capability (empty slot, wrong kind, revoked
 or the endpoint ended, `-5` invalid argument, `-6` no reply owed, `-7` no such call, `-8` out of memory, `-9` timed out,
 `-10` try again (non-blocking call would block).
 
+## Floating point
+User programs must not use floating-point or SIMD registers: `CPACR_EL1` traps them at EL0 and the program is ended (the registers are not saved between tasks). Build programs for a soft-float target (`aarch64-unknown-none-softfloat`). `TPIDR_EL0` is per task and starts at 0.
+
 ## Capabilities
 Every right to do anything is a capability in one of 32 slots of the task's table (slot 15 is the console). A capability
 has a kind and rights bits: send 1, receive 2, grant 4, map 8, write 16, info 32, memory-stats/compact/alloc/swap, kill,

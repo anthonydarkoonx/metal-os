@@ -15,7 +15,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | M1 | Medium (fixed) | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
 | M2 | Medium (fixed for programs) | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
 | M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
-| M4 | Medium | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
+| M4 | Medium (fixed) | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
 | M5 | Medium | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
 | M6 | Medium | The pager sees and supplies other programs' pages in the clear | The pager program |
 | M7 | Medium | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
@@ -121,7 +121,11 @@ Any driver can do this with one system call. That defeats the point of running d
 
 **Fix.** Return `E_INVAL` in `key_of`'s callers when `phys::is_ram_page` fails, and make `is_movable`, `owner_of`, `set_owner` and `free` range-check instead of indexing blindly.
 
-### M4. FP/SIMD state is not context-switched
+### M4. FP/SIMD state is not context-switched (fixed)
+
+**Fixed:** `CPACR_EL1.FPEN` is now `0b01` on every core (`boot.S`): EL0 may not use FP/SIMD (the instruction traps and the program is ended, `trap.rs`), EL1 still may. User programs must be built soft-float, as all in-tree ones are. `TPIDR_EL0` is saved and restored per task in `sched::dispatch` and cleared when a task is created or restarted. Regression test: `racetest` modes 10 and 11 in `make qemu-test` (a SIMD instruction must end the program; a thread's `TPIDR_EL0` must not show in, or be changed by, another task, which needs one core to show, so it is the `qemu-test-up` run that catches it). On the unfixed kernel on one core the SIMD instruction runs and the thread pointer leaks (bits `0x5`). Trapping instead of switching was chosen because nothing in the tree uses FP; a program that needs it would need lazy switching added.
+
+The original finding follows.
 
 `CPACR_EL1.FPEN` is set to 3 on every core (`boot.S:17`–`18`, `:174`–`175`), so EL0 may use `V0`–`V31`, `FPCR` and `FPSR`. `TrapFrame` holds only the general registers (`trap.rs:12`–`17`), and nothing else saves the rest. `TPIDR_EL0` is not saved either.
 

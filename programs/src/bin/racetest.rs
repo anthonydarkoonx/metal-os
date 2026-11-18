@@ -28,6 +28,8 @@ use metal_programs::*;
 //      memory capability to a boot-time task (task 2), to the sibling (first free slot, and a named slot) must be refused (-1); a
 //      grant to the parent must work. Exit code bits: 1 boot-time task not refused, 2 sibling not refused, 4 named slot in the
 //      sibling not refused, 8 parent refused.
+//   9  L1: SYSINFO pages 10, 11, 13 and 14 (what other tasks hold) need an Admin capability, which this program has not: each must
+//      answer -1, while page 0 works. Exit code: one bit per page that was not refused (1, 2, 4, 8), 16 if page 0 failed.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -268,6 +270,18 @@ program!("racetest", |c| {
         8 => {
             sleep(100);
             0
+        }
+        9 => {
+            let mut bits = 0;
+            for (i, page) in [10u64, 11, 13, 14].iter().enumerate() {
+                if svc(21, *page, 0, 0, 0, 0)[0] as i64 != -1 {
+                    bits |= 1 << i;
+                }
+            }
+            if svc(21, 0, 0, 0, 0, 0)[0] as i64 != 0 {
+                bits |= 16;
+            }
+            bits
         }
         7 => m2(c.arg >> 8, c.parent),
         4..=6 => m1(c.arg),

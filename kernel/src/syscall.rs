@@ -526,7 +526,17 @@ fn obj_name(o: u8) -> &'static str {
     }
 }
 
+/// Pages 10, 11, 13 and 14 show what other tasks hold and what was taken from them (slots, object numbers, rights, node numbers,
+/// the log of revoked capabilities). That is the task manager's business, so they need an `Admin` capability; without one a
+/// program could read, among other things, which slots of another program are free (SECURITY.md, L1).
+fn sysinfo_needs_admin(cur: usize, page: u64) -> bool {
+    matches!(page, 10 | 11 | 13 | 14) && !task::lock(cur).caps.iter().any(|c| c.kind == Kind::Admin && node_alive(c.node))
+}
+
 fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
+    if sysinfo_needs_admin(cur, page) {
+        return Out::Ret(E_PERM);
+    }
     let mut f = frame(cur);
     match page {
         0 => {

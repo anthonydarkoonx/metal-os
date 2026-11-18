@@ -266,6 +266,7 @@ qemu-test: kernel disk
 	 grep -q "TEST a thread.s copy of run-time memory cannot free it.*PASS" build.log && \
 	 grep -q "TEST MC_FREE refuses a shared-memory capability.*PASS" build.log && \
 	 grep -q "TEST a program cannot put capabilities into a boot-time task.*PASS" build.log && \
+	 grep -q "TEST SYSINFO pages that list other tasks. capabilities refuse.*PASS" build.log && \
 	 grep -q "TEST a map that races a revoke never leaves.*PASS" build.log && \
 	 grep -q "TEST pages released by HEAP_RELEASE are not reachable.*PASS" build.log && \
 	 grep -q "TEST stopping asks the ability to leave.*PASS" build.log && \

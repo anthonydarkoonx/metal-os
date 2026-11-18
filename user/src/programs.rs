@@ -505,6 +505,10 @@ pub fn tests() {
             wait(sib, false);
         }
         println!("[client] TEST a program cannot put capabilities into a boot-time task or an unrelated program, but can into its parent (bits of refusals that failed: {m2:#x}): {}", verdict(m2 == 0));
+        // L1: what other tasks hold is shown only to a holder of an Admin capability (the conductor has one)
+        let l1 = run_with_console3(Req::new().arg(9).heap(64), &race, b"").0;
+        let admin_ok = svc(21, 10, 0, 0, 0, 0)[0] == 0 && svc(21, 11, 0, 0, 0, 0)[0] == 0;
+        println!("[client] TEST SYSINFO pages that list other tasks' capabilities refuse a program without an Admin capability, and answer one that has it (program bits {l1:#x}, with Admin {admin_ok}): {}", verdict(l1 == 0 && admin_ok));
         let shm = svc(37, 1, 0, 0, 0, 0)[0] as i64;
         let freed = svc(MEMCTL, MEM_SLOT, 3, shm as u64, 0, 0)[0] as i64;
         let still = shm >= 0 && svc(4, shm as u64, 0xA000_0000, 1, 0, 0)[0] == 0;

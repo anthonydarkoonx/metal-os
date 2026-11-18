@@ -19,7 +19,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | M5 | Medium | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
 | M6 | Medium | The pager sees and supplies other programs' pages in the clear | The pager program |
 | M7 | Medium | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
-| L1–L10 | Low | See below | |
+| L1–L10 | Low | See below (L1 fixed) | |
 
 **How this was done.** Static review only. Nothing was built, booted or exploited, so every finding is a reading of the code, not a demonstrated attack. Line numbers refer to the commit above.
 
@@ -168,7 +168,7 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 
 ## Low
 
-**L1. `SYSINFO` exposes other tasks' authority.** Pages 10, 11, 13 and 14 return any task's capability slots, object ids, rights, node ids and revoke log to any caller (`syscall.rs:647`–`756`). The comment says it reveals nothing a task could not observe anyway; that does not hold for these pages. It also tells an attacker which slots are free for M2. Gate them behind the `Admin` capability.
+**L1 (fixed). `SYSINFO` exposes other tasks' authority.** *Fixed:* pages 10, 11, 13 and 14 now answer `E_PERM` unless the caller holds an `Admin` capability (`sysinfo_needs_admin`); regression test in `make qemu-test` (a program without one gets -1 on all four, the conductor, which has one, is answered; the unfixed kernel answers all four). The task manager, which gets an Admin copy from the console session, is unaffected; any other program that read these pages needs the `admin` permission now. Original finding: Pages 10, 11, 13 and 14 return any task's capability slots, object ids, rights, node ids and revoke log to any caller (`syscall.rs:647`–`756`). The comment says it reveals nothing a task could not observe anyway; that does not hold for these pages. It also tells an attacker which slots are free for M2. Gate them behind the `Admin` capability.
 
 **L2. `RESTORE_OF` can resurrect revoked authority.** The log stores the parent's node id and only checks that the id is alive (`syscall.rs:986`). If the granter revoked or died and the id was reused, the capability comes back under an unrelated node. Needs the admin to act; fixed by node generations (H1).
 

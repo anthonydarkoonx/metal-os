@@ -13,7 +13,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | H1 | High (fixed in `8ab56dc`) | Capability checks race with revocation; a mapping can outlive freed shared memory | Any two cooperating tasks, SMP only |
 | H2 | High (fixed in `8ab56dc`) | `HEAP_RELEASE` frees frames before flushing the TLB | Any program with a thread, SMP only |
 | M1 | Medium (fixed) | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
-| M2 | Medium | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
+| M2 | Medium (fixed for programs) | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
 | M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
 | M4 | Medium | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
 | M5 | Medium | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
@@ -96,7 +96,11 @@ All three need a `MemCtl` capability with `R_MEM_ALLOC`. Today only the conducto
 
 **Fix.** Record the root node for `Dma` objects as is done for `Shared`. Free frames and release the entry only when the root goes; a copy just goes. Make `MC_FREE` reject `Shared` objects.
 
-### M2. `CAP_GRANT` needs no consent from the receiver
+### M2. `CAP_GRANT` needs no consent from the receiver (fixed for programs)
+
+**Fixed:** a packaged or spawned program (not a boot-time service) may now `CAP_GRANT` only into its own program (its threads), into programs it started, and into the program that started it. A named destination slot is allowed only into a child (the parent's way of placing what a child expects). A grant into the parent never takes the parent's last 4 free slots. Regression test: `racetest` mode 7, a conductor check in `make qemu-test` (on the unfixed kernel all three refusals fail). Limits of the fix: boot-time tasks can still grant anywhere, a program can still fill all but 4 slots of its own parent, and there is no receiver opt-in, so a hostile parent can still squat slots in its children. Programs that shared memory with an unrelated program through `CAP_GRANT` must now route it through a common parent or delegate it at spawn.
+
+The original finding follows.
 
 `cap_grant` (`syscall.rs:1311`–`1347`) lets any holder of a grantable capability put a copy into any live task, in the first free slot or in a slot it names. Every program has a grantable capability, because `SHM_CREATE` is unprivileged and returns one with `R_GRANT`.
 

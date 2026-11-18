@@ -24,6 +24,12 @@ use metal_programs::*;
 //      thread (whose capability it is): a second mapping works, and the first one still holds what was written. Exit 0 = it did.
 //      (A MemCtl capability is in slot 1.)
 
+//   7  M2: CAP_GRANT goes only where it is wanted. The argument's upper bits name another program (a sibling, mode 8). Grants of a
+//      memory capability to a boot-time task (task 2), to the sibling (first free slot, and a named slot) must be refused (-1); a
+//      grant to the parent must work. Exit code bits: 1 boot-time task not refused, 2 sibling not refused, 4 named slot in the
+//      sibling not refused, 8 parent refused.
+//   8  the sibling: sleeps for a while, then ends.
+
 const BIG: usize = 0xA000_0000;
 const MEMCTL: u64 = 18;
 const MC_ALLOC: u64 = 2;
@@ -233,8 +239,37 @@ fn m1(mode: u64) -> u64 {
     0
 }
 
+fn m2(sibling: u64, parent: u64) -> u64 {
+    let s = shm_create(1);
+    if s < 0 {
+        return 100;
+    }
+    let s = s as u64;
+    let mut bits = 0;
+    let grant = |to: u64, dest: u64| svc(CAP_GRANT, s, to, 0xFFFF & !4, dest, 0)[0] as i64;
+    if grant(2, 0) != -1 {
+        bits |= 1;
+    }
+    if grant(sibling, 0) != -1 {
+        bits |= 2;
+    }
+    if grant(sibling, 8) != -1 {
+        bits |= 4;
+    }
+    if grant(parent, 0) < 0 {
+        bits |= 8;
+    }
+    revoke_self(s); // (takes the copy in the parent with it)
+    bits
+}
+
 program!("racetest", |c| {
-    match c.arg {
+    match c.arg & 0xFF {
+        8 => {
+            sleep(100);
+            0
+        }
+        7 => m2(c.arg >> 8, c.parent),
         4..=6 => m1(c.arg),
         1 => h1(),
         2 => h2(),

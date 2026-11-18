@@ -107,6 +107,8 @@ pub const E_NOMEM: i64 = -8;
 pub const E_TIMEDOUT: i64 = -9;
 
 pub const CONSOLE_SLOT: usize = 15;
+/// Free slots in a table that a program's `CAP_GRANT` into another program may not use up (see `cap_grant`).
+const GRANT_RESERVE_SLOTS: usize = 4;
 const MAX_LOG: usize = 256;
 
 pub enum Out {
@@ -1327,11 +1329,35 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
     if target >= MAX_TASKS || matches!(sched::state(target), State::Free | State::Dead) {
         return Out::Ret(E_INVAL);
     }
+    // A program (as opposed to a boot-time service) may put capabilities only where it has a reason to: into its own program (its
+    // threads), into the programs it started, and into the program that started it. Anyone else did not ask for it: a grant fills
+    // the receiver's table and can take the slot a program expects to find something in (SECURITY.md, M2). A named slot is the
+    // parent's way of giving a child what it expects in a fixed place; a child's grant to its parent never takes the parent's
+    // last `GRANT_RESERVE_SLOTS` free slots.
+    let mut reserve = 0;
+    if crate::spawn::is_program(task::aspace(cur)) {
+        let (me, them) = (task::aspace(cur), task::aspace(target));
+        let to_child = crate::spawn::parent_of(them) as usize == me;
+        let to_parent = crate::spawn::parent_of(me) as usize == them;
+        if them != me && !to_child && !to_parent {
+            return Out::Ret(E_PERM);
+        }
+        if dest != 0 && them != me && !to_child {
+            return Out::Ret(E_PERM);
+        }
+        if them != me {
+            reserve = GRANT_RESERVE_SLOTS;
+        }
+    }
     let mut t = task::lock(target); // only the target's table changes (the source is just read above)
     if !node_alive(c.node) {
         return Out::Ret(E_BADCAP); // revoked since the lookup (a revoke frees nodes with every task lock held): no copy may outlive it
     }
     let dst = if dest == 0 {
+        let free = |t: &task::Task| (0..NCAPS).filter(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None).count();
+        if free(&t) <= reserve {
+            return Out::Ret(E_NOMEM);
+        }
         let Some(d) = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None) else {
             return Out::Ret(E_NOMEM);
         };

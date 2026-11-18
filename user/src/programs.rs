@@ -498,6 +498,13 @@ pub fn tests() {
             .map(|&mode| run_with_console3(Req::new().arg(mode).heap(64).threads(1).give_masked(1, MEM_SLOT as u8, 0xFFFF & !4), &race, b"").0 as u64)
             .collect();
         println!("[client] TEST a thread's copy of run-time memory cannot free it (exit codes for CAP_REVOKE, thread end, MC_FREE: {m1:?}): {}", verdict(m1.iter().all(|&c| c == 0)));
+        // M2: a program may give capabilities only to its own program, the programs it started and the one that started it
+        let sib = Req::new().arg(8).heap(64).go(&race);
+        let m2 = if sib > 0 { run_with_console3(Req::new().arg(7 | (sib as u64) << 8).heap(64), &race, b"").0 } else { -1 };
+        if sib > 0 {
+            wait(sib, false);
+        }
+        println!("[client] TEST a program cannot put capabilities into a boot-time task or an unrelated program, but can into its parent (bits of refusals that failed: {m2:#x}): {}", verdict(m2 == 0));
         let shm = svc(37, 1, 0, 0, 0, 0)[0] as i64;
         let freed = svc(MEMCTL, MEM_SLOT, 3, shm as u64, 0, 0)[0] as i64;
         let still = shm >= 0 && svc(4, shm as u64, 0xA000_0000, 1, 0, 0)[0] == 0;

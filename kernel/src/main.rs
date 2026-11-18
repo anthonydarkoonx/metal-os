@@ -184,6 +184,7 @@ extern "C" fn kmain() -> ! {
         v(wxn),
         v(pan)
     );
+    kprintln!("[mem] TEST the reverse map holds the addresses of the whole user space (up to 256 GiB): {}", v(mem::rmap_selftest()));
     timer::init();
     sched::init();
     platform::init_devices();

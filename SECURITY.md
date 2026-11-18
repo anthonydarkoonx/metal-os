@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L6 to L10 are still open; L2 to L5 are fixed and removed. A second audit of `986fe66` follows: its only open finding is N8; N1 to N7 and N9 to N11 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L6 to L10 are still open; L2 to L5 are fixed and removed. A second audit of `986fe66` follows: every finding (N1 to N11) is fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -62,7 +62,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 # Second audit (2026-11-18, commit `986fe66`)
 
-Auditor: Claude (code review). **Status:** N1 to N7 and N9 to N11 are fixed and removed; N8 is open.
+Auditor: Claude (code review). **Status:** every finding of this audit (N1 to N11) is fixed and removed from this file; see `git log` for each fix.
 
 **How this was done.** Static review only, like the first audit: nothing was built, booted or exploited, so every finding is a reading of the code. The findings that depend on timing between cores are unproven until a test hits them. Line numbers refer to `986fe66`.
 
@@ -70,16 +70,8 @@ Auditor: Claude (code review). **Status:** N1 to N7 and N9 to N11 are fixed and 
 
 **Threat model.** As before: a program (role 32) is hostile. What it can reach depends on its manifest: `threads` (0 to 8) needs no permission; `permission = spawn` gives a spawn capability, an endpoint factory and a budget.
 
-| # | Severity | Finding | Who can trigger it |
-|---|---|---|---|
-| N8 | Low | See below | |
-
-## Low
-
-**N8. The reverse map cannot hold addresses above 64 GiB.** A movable frame records `tid << 24 | va >> 12` in 32 bits (`kernel/src/mem.rs:49`, `:188`), but position-independent images are placed up to 256 GiB (`PIE_HI`, `kernel/src/task.rs:74`). For about three quarters of the possible bases the address spills into the task number. Those image pages are never compacted or swapped (the check against the page table fails), and `try_evict` and `compact::migrate` lock a different task's slot; if that slot is a thread's, they walk its page-table root (the old N7 made that root stale; it is now 0 for a dead task, but a thread's own slot still has no root of its own). Widen the field.
-
 ## Suggested order of work
 
-1. N8, then L6 to L10 (these need decisions on policy).
+1. L6 to L10 (these need decisions on policy).
 
 Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), and the N3 hand-over: a program that ends while another program holds its shared memory must leave the memory charged to that holder (or end it when the holder cannot pay). The N3 fix has a test only for the thread case. L4 (a `CAP_GRANT` to a dying task) and L5 (a device window without the write right) were fixed without tests: L4 needs a grant landing at the moment of a death, and L5 needs a capability to a device window with the write right dropped, which no user program can make (the drivers' window capabilities have no grant right).

@@ -140,6 +140,7 @@ qemu-test: kernel disk
 	@$(WITH_PEER) sh -c 'timeout 260 $(QEMU) > build.log 2>&1'; rc=$$?; cat build.log; \
 	 grep -q "TEST zero-copy shared memory.*PASS" build.log && \
 	 grep -q "TEST async IPC_SEND.*PASS" build.log && \
+	 grep -q "TEST the reverse map holds the addresses of the whole user space.*PASS" build.log && \
 	 grep -q "TEST kernel pages are write-xor-execute.*: PASS; WXN on: PASS; PAN on.*: PASS" build.log && \
 	 grep -q "TEST one program cannot take more than its share.*PASS" build.log && \
 	 grep -q "TEST one program cannot fill an endpoint.s queue.*PASS" build.log && \

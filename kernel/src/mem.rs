@@ -45,8 +45,9 @@ pub enum FKind {
 pub struct MemState {
     owner: [u8; MAX_FRAMES],
     kind: [FKind; MAX_FRAMES],
-    /// For movable frames: `tid << 24 | (virtual address >> 12)`.
-    rmap: [u32; MAX_FRAMES],
+    /// For movable frames: `tid << 32 | (virtual address >> 12)`. (The page number of an address in the 39-bit user space takes 27 bits, more
+    /// than the 24 that fit beside a task number in 32: a position-independent image is placed as high as 256 GiB.)
+    rmap: [u64; MAX_FRAMES],
     nframes: usize,
     /// No free frame exists below `low_hint`, nor above `high_hint`.
     low_hint: usize,
@@ -91,7 +92,7 @@ impl MemState {
 
     pub fn rmap_at(&self, i: usize) -> (usize, usize) {
         let r = self.rmap[i];
-        ((r >> 24) as usize, ((r & 0x00FF_FFFF) as usize) << 12)
+        ((r >> 32) as usize, ((r & 0xFFFF_FFFF) as usize) << 12)
     }
 
     /// Relocation bookkeeping: `dst` takes over `src`'s role and `src` becomes free.
@@ -185,11 +186,21 @@ pub fn alloc_movable(owner: u8, tid: usize, va: usize) -> Option<usize> {
             i -= 1;
         }
         m.high_hint = i.saturating_sub(1);
-        m.rmap[i] = (tid as u32) << 24 | (va >> 12) as u32;
+        m.rmap[i] = (tid as u64) << 32 | (va >> 12) as u64;
         m.claim(i, owner, FKind::Movable)
     };
     zero(pa);
     Some(pa)
+}
+
+/// Boot-time check of the reverse map: a page at the top of the user address space (where a position-independent image can be placed) is
+/// recorded and read back as the same task and address.
+pub fn rmap_selftest() -> bool {
+    let (tid, va) = (crate::task::MAX_TASKS - 1, crate::task::PIE_HI - PAGE);
+    let Some(pa) = alloc_movable(OWNER_KERNEL, tid, va) else { return false };
+    let back = lock().rmap_at((pa - RAM_BASE) / PAGE);
+    free(pa);
+    back == (tid, va)
 }
 
 /// Is the frame at `pa` a private, relocatable user page (as opposed to shared or device memory, which never moves)?

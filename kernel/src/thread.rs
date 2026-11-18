@@ -43,6 +43,9 @@ pub fn wait(cur: usize, va: usize, expected: u32, timeout_ticks: u64) -> Wait {
     let space = task::aspace(cur);
     let t = lock(space); // the frame cannot move while we hold this
     let Some(pa) = crate::swap::translate(&t, space, va) else { return Wait::Ret(E_INVAL) };
+    if !is_ram_word(pa) {
+        return Wait::Ret(E_INVAL); // a device mapping: there is no frame to wait on
+    }
     let key = key_of(pa, va);
     let _table = TABLE.lock(R_WORDS);
     if crate::frame::phys::try_read_u32(pa) != Some(expected) {
@@ -57,6 +60,11 @@ pub fn wait(cur: usize, va: usize, expected: u32, timeout_ticks: u64) -> Wait {
     };
     sched::set_state(cur, State::WordWait(deadline));
     Wait::Blocked
+}
+
+/// Does the word at `pa` lie in a frame of RAM (not in a device mapping, which `translate` also resolves)?
+fn is_ram_word(pa: usize) -> bool {
+    crate::frame::phys::is_ram_page(pa & !(crate::mem::PAGE - 1))
 }
 
 /// What a word is waited on by: its address in the program for a private page, its physical address (odd, which no
@@ -102,6 +110,9 @@ pub fn wake(cur: usize, va: usize, count: usize) -> i64 {
     let key = {
         let t = lock(space);
         let Some(pa) = crate::swap::translate(&t, space, va) else { return 0 };
+        if !is_ram_word(pa) {
+            return E_INVAL; // a device mapping: nothing can be waiting there
+        }
         key_of(pa, va)
     };
     let _table = TABLE.lock(R_WORDS);
@@ -125,6 +136,9 @@ pub fn store_and_wake(t: &task::Task, space: usize, va: usize, value: u32) {
         return;
     }
     let Some(pa) = crate::swap::translate_writable(t, space, va) else { return }; // (a read-only page is never written for a program)
+    if !is_ram_word(pa) {
+        return; // a device mapping: nothing to store or wake
+    }
     let key = key_of(pa, va);
     let _table = TABLE.lock(R_WORDS);
     if !crate::frame::phys::try_write_u32(pa, value) {

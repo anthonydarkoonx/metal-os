@@ -194,12 +194,16 @@ pub fn alloc_movable(owner: u8, tid: usize, va: usize) -> Option<usize> {
 
 /// Is the frame at `pa` a private, relocatable user page (as opposed to shared or device memory, which never moves)?
 pub fn is_movable(pa: usize) -> bool {
-    lock().kind[(pa - RAM_BASE) / PAGE] == FKind::Movable
+    // (an address outside RAM, a device page for one, is no frame at all, and never movable)
+    let m = lock();
+    pa.checked_sub(RAM_BASE).map_or(false, |d| m.kind.get(d / PAGE).map_or(false, |&k| k == FKind::Movable))
 }
 
 /// Who owns the frame at `pa` (`OWNER_FREE` if nobody).
 pub fn owner_of(pa: usize) -> u8 {
-    lock().owner[(pa - RAM_BASE) / PAGE]
+    // (outside RAM there is no frame, so nobody owns it)
+    let m = lock();
+    pa.checked_sub(RAM_BASE).and_then(|d| m.owner.get(d / PAGE).copied()).unwrap_or(OWNER_FREE)
 }
 
 /// Hand a frame to another owner (shared memory that outlives the program that made it goes to the kernel).

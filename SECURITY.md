@@ -14,7 +14,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | H2 | High (fixed in `8ab56dc`) | `HEAP_RELEASE` frees frames before flushing the TLB | Any program with a thread, SMP only |
 | M1 | Medium | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
 | M2 | Medium | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
-| M3 | Medium | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
+| M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
 | M4 | Medium | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
 | M5 | Medium | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
 | M6 | Medium | The pager sees and supplies other programs' pages in the clear | The pager program |
@@ -101,7 +101,11 @@ All three need a `MemCtl` capability with `R_MEM_ALLOC`. Today only the conducto
 
 **Fix.** Restrict the target to the caller's own program, its children and its parent; or require the receiver to opt in (a receive slot it opens). Keep the exact-slot form for the parent only.
 
-### M3. `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel
+### M3. `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel (fixed)
+
+**Fixed:** `thread::wait`, `wake` and `store_and_wake` check that the word is in a RAM frame (`WAIT_WORD` and `WAKE_WORD` return `E_INVAL`; `THREAD_EXIT`'s store is skipped), and `mem::is_movable` and `mem::owner_of` range-check instead of indexing. `THREAD_EXIT` with a device address had the same bug. `set_owner` and `free` still index blindly. The block driver checks this at start-up (`[blk] TEST WAIT_WORD and WAKE_WORD on a device mapping are refused`, in `make qemu-test`); on the unfixed kernel it panics at `mem.rs:197`.
+
+The original finding follows.
 
 `thread::wait` and `thread::wake` translate the address and call `key_of` before any RAM check (`thread.rs:45`–`46`, `:104`–`105`). `key_of` calls `mem::is_movable(pa)`, which indexes the frame table with `(pa - RAM_BASE) / PAGE` (`mem.rs:196`–`198`). For an MMIO page (the virtio BARs sit below `RAM_BASE` on QEMU) the subtraction wraps and the bounds check panics.
 

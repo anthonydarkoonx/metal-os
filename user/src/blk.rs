@@ -83,6 +83,9 @@ fn blk_init() -> Result<Blk, &'static str> {
     if mem_map(1, MMIO_VA, true) != 0 || mem_map(2, RING_VA, true) != 0 || mem_map(7, CFG_VA, false) != 0 {
         return Err("mapping failed");
     }
+    // A word wait or wake on a device mapping must be refused (-5), not take the kernel down (SECURITY.md, M3).
+    let (w, k) = (svc(32, va(MMIO_VA) as u64, 0, 1, 0, 0)[0] as i64, svc(33, va(MMIO_VA) as u64, 1, 0, 0, 0)[0] as i64);
+    println!("[blk] TEST WAIT_WORD and WAKE_WORD on a device mapping are refused (wait {w}, wake {k}): {}", crate::verdict(w == -5 && k == -5));
     let (s1, _, bar_pages, _) = cap_info(1);
     let (s2, ring_pa, _, _) = cap_info(2);
     if s1 != 0 || s2 != 0 {

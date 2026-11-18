@@ -13,6 +13,21 @@ program!("spawner", |c| {
         p.fs = true;
         return 0xFFFF_FFFF - (-spawn(0, &p)) as u64;
     }
+    if c.arg == 2 {
+        // starts children with file-system sessions until refused: how many it got (the kernel limits a program's share)
+        let mut n = 0;
+        loop {
+            let mut p = Spawn::new(SLEEPER);
+            p.fs = true;
+            if spawn(0, &p) < 0 {
+                return n;
+            }
+            n += 1;
+            if n >= 8 {
+                return n;
+            }
+        }
+    }
     let a = spawn(0, &Spawn::new(SLEEPER));
     let b = spawn(0, &Spawn::new(SLEEPER));
     if a < 0 || b < 0 {

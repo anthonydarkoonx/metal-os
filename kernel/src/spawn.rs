@@ -342,6 +342,9 @@ pub const FS_EP_SLOT: usize = 8;
 pub const FS_PAGE_SLOT: usize = 9;
 /// Sessions with the VFS: pages the VFS server has mapped for programs (object ids `OBJ_SHM_VFS_PROG0 + k`).
 pub const FS_PAGES: usize = 8;
+/// File and network sessions one program may hold for the programs it starts, and the ones programs may never take.
+const SESSION_SHARE: usize = 5;
+const SESSION_RESERVE: usize = 2;
 const NO_FS: u8 = u8::MAX;
 static FS_PAGE: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(NO_FS) }; MAX_TASKS];
 static FS_GEN: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
@@ -493,6 +496,18 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     }
 
     let _one_at_a_time = SPAWNING.lock(R_SPAWNING);
+    // (a program that starts programs may not use up the sessions: it gets `SESSION_SHARE` of its own, and the last `SESSION_RESERVE`
+    // are for boot-time spawners; counted under the lock that serialises SPAWN)
+    if is_program(task::aspace(parent)) {
+        let pa = task::aspace(parent);
+        let mine = |per: &[AtomicU8; MAX_TASKS]| (FIRST_DYNAMIC_TASK..MAX_TASKS).filter(|&c| PARENT[c].load(Ordering::SeqCst) == pa as u8 && per[c].load(Ordering::SeqCst) != NO_FS).count();
+        let full = |pool: &AtomicU64, pages: usize| pool.load(Ordering::SeqCst).count_ones() as usize + SESSION_RESERVE >= pages;
+        if (flags & FLAG_FS != 0 && (mine(&FS_PAGE) >= SESSION_SHARE || full(&FS_POOL, FS_PAGES)))
+            || (flags & FLAG_NET != 0 && (mine(&NET_PAGE) >= SESSION_SHARE || full(&NET_POOL, NET_PAGES)))
+        {
+            return Err(E_FULL);
+        }
+    }
     let fs_page = if flags & FLAG_FS != 0 { Some(claim_fs_page().ok_or(E_FULL)?) } else { None };
     let net_page = if flags & FLAG_NET != 0 {
         match claim_net_page() {

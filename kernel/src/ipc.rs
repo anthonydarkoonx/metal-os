@@ -266,6 +266,11 @@ pub fn send(cur: usize, e: u8, m: Msg) -> Result<(), SendErr> {
     if ep.len == QLEN {
         return Err(SendErr::Full);
     }
+    // (one program, with all its threads, may not fill a shared server's queue: it gets half)
+    let prog = task::aspace(cur);
+    if crate::spawn::is_program(prog) && (0..ep.len).filter(|&k| task::aspace(ep.q[(ep.head + k) % QLEN].sender as usize) == prog).count() >= QLEN / 2 {
+        return Err(SendErr::Full);
+    }
     let at = (ep.head + ep.len) % QLEN;
     ep.q[at] = m;
     ep.len += 1;

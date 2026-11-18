@@ -40,6 +40,9 @@ use metal_programs::*;
 //      them. Exit code bits: 1 all seven threads were started (no limit), 2 none was.
 //   14 M7: one program's run-time endpoints are limited, however many threads make them (a factory capability is in slot 1): seven
 //      threads and this one create until refused. Exit code bits: 1 more than 4 were made, 2 none were.
+//   15 M7: one program may not fill an endpoint's queue (a factory capability is in slot 1): it makes an endpoint, queues messages
+//      to it until refused, and a thread of the same program then tries one more. Exit code bits: 1 not exactly 4 were queued
+//      (half of the queue of 8), 2 the thread's message was accepted.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -408,6 +411,37 @@ fn m7(mode: u64, limit: u32) -> u64 {
     bits
 }
 
+fn queue_share() -> u64 {
+    let ep = svc(27, 1, 0, 0, 0, 0)[0] as i64;
+    if ep < 0 {
+        return 90;
+    }
+    let mut n = 0;
+    while svc(1, ep as u64, 0, 0, 0, 0)[0] as i64 == 0 && n < 16 {
+        n += 1;
+    }
+    let mut bits = if n == 4 { 0 } else { 1 };
+    MODE.store(15, Release);
+    EPSLOT.store(ep as u32, Release);
+    if thread::create_with_kernel_stack(sender, 0, 1 << ep, 0) < 0 {
+        return 91;
+    }
+    thread::join(&DONES[0]);
+    if THREAD_SENT.load(Acquire) != 0 {
+        bits |= 2;
+    }
+    bits
+}
+static EPSLOT: AtomicU32 = AtomicU32::new(0);
+static THREAD_SENT: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn sender(_: u64) -> ! {
+    if svc(1, EPSLOT.load(Acquire) as u64, 0, 0, 0, 0)[0] as i64 == 0 {
+        THREAD_SENT.store(1, Release);
+    }
+    thread::exit(&DONES[0])
+}
+
 program!("racetest", |c| {
     match c.arg & 0xFF {
         8 => {
@@ -437,6 +471,7 @@ program!("racetest", |c| {
         12 => m7(12, 32),
         13 => m7(13, 0),
         14 => m7(14, 4),
+        15 => queue_share(),
         4..=6 => m1(c.arg),
         1 => h1(),
         2 => h2(),

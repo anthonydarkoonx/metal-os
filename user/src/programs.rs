@@ -518,6 +518,11 @@ pub fn tests() {
         let q12 = run_with_console3(Req::new().arg(12).heap(400).threads(7), &race, b"").0;
         let q13 = run_with_console3(Req::new().arg(13).heap(400).threads(7), &race, b"").0;
         let q14 = run_with_console3(Req::new().arg(14).heap(200).threads(7).give_masked(1, FACTORY_SLOT as u8, 0xFFFF & !4), &race, b"").0;
+        let q15 = run_with_console3(Req::new().arg(15).heap(64).threads(1).give_masked(1, FACTORY_SLOT as u8, 0xFFFF & !4), &race, b"").0;
+        // ... and more than its share of the file-system sessions for the programs it starts (5 of 8; the last 2 are the boot-time tasks')
+        let t = Req::new().arg(2).budget(3000).give(&[SPAWN_SLOT as u8]).go(&spawner);
+        let sessions = if t > 0 { wait(t, false) } else { -1 };
+        println!("[client] TEST one program cannot fill an endpoint's queue (failure bits {q15:#x}) or take more than 5 file sessions for its children (got {sessions}): {}", verdict(q15 == 0 && sessions == 5));
         println!("[client] TEST one program cannot take more than its share of memory objects, capability nodes and endpoints, with threads (failure bits {q12:#x}, {q13:#x}, {q14:#x}): {}", verdict(q12 == 0 && q13 == 0 && q14 == 0));
         // L1: what other tasks hold is shown only to a holder of an Admin capability (the conductor has one)
         let l1 = run_with_console3(Req::new().arg(9).heap(64), &race, b"").0;

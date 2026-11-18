@@ -64,6 +64,9 @@ use metal_programs::*;
 //      program registers as the pager, a thread of it calls both; each must be refused (-1). Exit code bits: 1 NEXT was not refused, 2 DONE was not.
 //   23 N10: two threads of one program that WAIT for the same dead child: exactly one may collect it. This one and a thread poll (WAIT without
 //      blocking) for a killed child, 40 times (a spawn capability is in slot 0, the thread gets it too). Exit 10 if both collected one.
+//   24 L3: the holding limit is checked and charged in one step. Seven threads and the main thread create 100 pages of shared memory at the same
+//      moment, 1500 times (the limit is 400 pages, the seven thread stacks take 112, so two fit); after each round the program must not hold more
+//      than its limit. Exit 10 if it did.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -775,6 +778,70 @@ fn n10() -> u64 {
     0
 }
 
+const L3_ROUNDS: u32 = 1500;
+const L3_THREADS: u32 = 7;
+static L3_GO: AtomicU32 = AtomicU32::new(0);
+static L3_MADE: AtomicU32 = AtomicU32::new(0);
+static L3_CLEAN_GO: AtomicU32 = AtomicU32::new(0);
+static L3_CLEANED: AtomicU32 = AtomicU32::new(0);
+static L3_DONE: [AtomicU32; L3_THREADS as usize] = [const { AtomicU32::new(0) }; L3_THREADS as usize];
+
+extern "C" fn l3_thread(i: u64) -> ! {
+    for round in 1..=L3_ROUNDS {
+        while L3_GO.load(Acquire) < round {
+            core::hint::spin_loop();
+        }
+        let s = shm_create(100);
+        L3_MADE.fetch_add(1, SeqCst);
+        while L3_CLEAN_GO.load(Acquire) < round {
+            core::hint::spin_loop();
+        }
+        if s >= 0 {
+            revoke_self(s as u64);
+        }
+        L3_CLEANED.fetch_add(1, SeqCst);
+    }
+    thread::exit(&L3_DONE[i as usize])
+}
+
+fn l3() -> u64 {
+    for i in 0..L3_THREADS as u64 {
+        if thread::create_with_kernel_stack(l3_thread, i, 0, 0) < 0 {
+            return 2;
+        }
+    }
+    let mut over = 0;
+    for round in 1..=L3_ROUNDS {
+        L3_MADE.store(0, Release);
+        L3_CLEANED.store(0, Release);
+        L3_GO.store(round, Release);
+        let s = shm_create(100);
+        L3_MADE.fetch_add(1, SeqCst);
+        while L3_MADE.load(Acquire) < L3_THREADS + 1 {
+            core::hint::spin_loop();
+        }
+        let q = quota();
+        if q.held > q.limit {
+            over += 1;
+        }
+        L3_CLEAN_GO.store(round, Release);
+        if s >= 0 {
+            revoke_self(s as u64);
+        }
+        while L3_CLEANED.load(Acquire) < L3_THREADS {
+            core::hint::spin_loop();
+        }
+    }
+    for d in L3_DONE.iter() {
+        thread::join(d);
+    }
+    if over > 0 {
+        println!("racetest: the program held more than its limit after {over} of {L3_ROUNDS} rounds");
+        return 10;
+    }
+    0
+}
+
 const FS_PAGE_SLOT: u64 = 9;
 
 fn session_page(fill: bool) -> u64 {
@@ -831,6 +898,7 @@ program!("racetest", |c| {
         21 => n6(),
         22 => n11(),
         23 => n10(),
+        24 => l3(),
         18 => session_page(true),
         19 => session_page(false),
         17 => n2(),

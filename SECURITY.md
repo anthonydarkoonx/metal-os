@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L3 to L10 are still open; L2 is fixed and removed. A second audit of `986fe66` follows: its only open finding is N8; N1 to N7 and N9 to N11 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L6 to L10 are still open; L2 to L5 are fixed and removed. A second audit of `986fe66` follows: its only open finding is N8; N1 to N7 and N9 to N11 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -10,7 +10,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 | # | Severity | Finding |
 |---|---|---|
-| L3 to L10 | Low | See below |
+| L6 to L10 | Low | See below |
 
 **How this was done.** Static review only. Nothing was built, booted or exploited, so every finding is a reading of the code, not a demonstrated attack. Line numbers refer to the commit above.
 
@@ -24,12 +24,6 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 ---
 
 ## Low
-
-**L3. Holding-limit check is not atomic.** `SHM_CREATE` and `MC_ALLOC` read `held_pages()` under a lock that is dropped before `reserve_contig` runs (`syscall.rs:1180`, `:1246`–`1247`), and `reserve_contig` itself loads, checks, then adds (`spawn.rs:134`–`140`). Threads racing each other can exceed the quota. Hold the lock across the call, or use a compare-exchange loop.
-
-**L4. `CAP_GRANT` to a dying task leaks a node.** The liveness check is made before the target's lock is taken (`syscall.rs:1320`–`1323`). A grant that lands after teardown is wiped by the next occupant without freeing its node. Recheck under the lock.
-
-**L5. The write right is ignored for MMIO objects.** `mem_map` maps device memory read-write whatever the capability says (`syscall.rs:428`–`432`). Refuse the map when `R_WRITE` is missing.
 
 **L6. `LOG` is an unfiltered, unlimited channel to the kernel console.** Any program can write raw bytes to the UART (`syscall.rs:1379`–`1399`): forged `[kernel]` lines, terminal escape sequences, or a flood. Prefix lines with the task id, strip control bytes, and rate-limit.
 
@@ -86,6 +80,6 @@ Auditor: Claude (code review). **Status:** N1 to N7 and N9 to N11 are fixed and 
 
 ## Suggested order of work
 
-1. L3 to L5 (quick), then N8 and the rest of the Low items.
+1. N8, then L6 to L10 (these need decisions on policy).
 
-Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), and the N3 hand-over: a program that ends while another program holds its shared memory must leave the memory charged to that holder (or end it when the holder cannot pay). The N3 fix has a test only for the thread case.
+Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), and the N3 hand-over: a program that ends while another program holds its shared memory must leave the memory charged to that holder (or end it when the holder cannot pay). The N3 fix has a test only for the thread case. L4 (a `CAP_GRANT` to a dying task) and L5 (a device window without the write right) were fixed without tests: L4 needs a grant landing at the moment of a death, and L5 needs a capability to a device window with the write right dropped, which no user program can make (the drivers' window capabilities have no grant right).

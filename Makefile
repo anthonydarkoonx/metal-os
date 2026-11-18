@@ -268,6 +268,7 @@ qemu-test: kernel disk
 	 grep -q "TEST a program sees files only with the files permission.*PASS" build.log && \
 	 grep -q "TEST a program starts programs only with the spawn permission.*PASS" build.log && \
 	 grep -q "TEST WAIT_WORD and WAKE_WORD on a device mapping are refused.*PASS" build.log && \
+	 grep -q "TEST threads creating shared memory at the same moment.*PASS" build.log && \
 	 grep -q "TEST only the pager.s first task may take its jobs.*PASS" build.log && \
 	 grep -q "TEST a dead child is collected by one of two threads.*PASS" build.log && \
 	 grep -q "TEST a revoked capability is not given back under a node that has been reused.*PASS" build.log && \

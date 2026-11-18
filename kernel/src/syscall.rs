@@ -404,6 +404,9 @@ fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
         return Out::Ret(E_PERM);
     }
     let Some(o) = obj::get(c.obj) else { return Out::Ret(E_BADCAP) };
+    if o.kind == ObjKind::Mmio && c.rights & R_WRITE == 0 {
+        return Out::Ret(E_PERM); // a device window is always mapped writable (below): without the write right it is not mapped at all
+    }
     // (`va` comes from userspace: a sum that wraps must not pass the window check)
     let auto = va == 0;
     if !auto && !crate::spawn::fixed_maps_allowed(task::aspace(cur)) {
@@ -967,6 +970,9 @@ fn revoke_of(cur: usize, admin: u64, target: u64, slot: u64) -> Out {
 /// Map a memory capability's object into program `space` at `va` again, after a revoke removed the mapping (writable if the capability may write).
 fn remap(space: usize, c: Cap, va: usize) -> bool {
     let Some(o) = obj::get(c.obj) else { return false };
+    if o.kind == ObjKind::Mmio && c.rights & R_WRITE == 0 {
+        return false; // (as in `MEM_MAP`)
+    }
     let mut t = task::lock(space);
     // (as in `MEM_MAP`: a revoke frees nodes with every task lock held, so a capability that is alive under this lock stays alive until it is
     // let go; one that was revoked since it was made must not leave a mapping behind)
@@ -1274,8 +1280,8 @@ fn shm_create(cur: usize, pages: usize) -> Out {
         return Out::Ret(E_INVAL);
     }
     let asp = task::aspace(cur);
-    let held = task::lock(asp).held_pages();
-    if !crate::spawn::reserve_contig(asp, held, pages) {
+    // (the task lock is held across the reservation, as `heap_grow` holds it across its own: the heap cannot grow between reading it and claiming)
+    if !crate::spawn::reserve_contig(asp, task::lock(asp).held_pages(), pages) {
         return Out::Ret(E_NOMEM);
     }
     let Some(list) = obj::shm_alloc(pages, mem::OWNER_TASK0 + asp as u8) else {
@@ -1351,6 +1357,7 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
     if target >= MAX_TASKS || matches!(sched::state(target), State::Free | State::Dead) {
         return Out::Ret(E_INVAL);
     }
+    let target_space = task::aspace(target); // (what the checks below were made for: looked at again under the target's lock)
     // A program (as opposed to a boot-time service) may put capabilities only where it has a reason to: into its own program (its
     // threads), into the programs it started, and into the program that started it. Anyone else did not ask for it: a grant fills
     // the receiver's table and can take the slot a program expects to find something in (SECURITY.md, M2). A named slot is the
@@ -1374,6 +1381,11 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
     let mut t = task::lock(target); // only the target's table changes (the source is just read above)
     if !c.alive() {
         return Out::Ret(E_BADCAP); // revoked since the lookup (a revoke frees nodes with every task lock held): no copy may outlive it
+    }
+    // The end of a task takes every task lock and wipes its table, so a target that is gone (or whose slot is somebody else's now) must be
+    // noticed here, under its lock: a capability put into a table that is wiped afterwards, or into a stranger's, would never be freed.
+    if matches!(sched::state(target), State::Free | State::Dead) || task::aspace(target) != target_space {
+        return Out::Ret(E_INVAL);
     }
     let dst = if dest == 0 {
         let free = |t: &task::Task| (0..NCAPS).filter(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None).count();

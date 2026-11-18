@@ -137,12 +137,11 @@ pub fn contig_pages(a: usize) -> usize {
 
 /// Claim `n` contiguous pages for program `a`, which holds `heap` heap pages (called under its task lock, like `heap_grow`).
 pub fn reserve_contig(a: usize, heap: usize, n: usize) -> bool {
-    let held = heap.saturating_add(CONTIG[a].load(Ordering::SeqCst));
-    if held.checked_add(n).map_or(true, |t| t > task::info(a).heap_quota) {
-        return false;
-    }
-    CONTIG[a].fetch_add(n, Ordering::SeqCst);
-    true
+    // (look, check and add as one step: with a separate load and add, two threads could both see room for one more and both take it)
+    let quota = task::info(a).heap_quota;
+    CONTIG[a]
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |c| heap.saturating_add(c).checked_add(n).filter(|&t| t <= quota).map(|_| c + n))
+        .is_ok()
 }
 
 pub fn release_contig(a: usize, n: usize) {

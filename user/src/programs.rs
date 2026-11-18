@@ -554,6 +554,12 @@ pub fn tests() {
     } else {
         println!("[client] TEST the race test program is in the system image: FAIL");
     }
+    // L3: the holding limit is checked and charged in one step, however many threads create at once
+    if race.len() >= 32 && sysinfo(0)[4] >= 2 {
+        let (c, o, _) = run_with_console3(Req::new().arg(24).heap(400).threads(7), &race, b"");
+        let o = String::from_utf8_lossy(&o).into_owned();
+        println!("[client] TEST threads creating shared memory at the same moment cannot take a program over its limit (exit code {c}{}): {}", if o.is_empty() { String::new() } else { alloc::format!(", {}", o.trim()) }, verdict(c == 0));
+    }
     // N11: a thread of the pager may not call into the pager's job interface
     if race.len() >= 32 {
         let c = run_with_console3(Req::new().arg(22).heap(64).threads(1).give_masked(1, MEM_SLOT as u8, 0xFFFF & !4), &race, b"").0;

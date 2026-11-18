@@ -626,6 +626,9 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
             if g.kind == Kind::None {
                 continue;
             }
+            if !node_alive(g.node) {
+                return Err(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock: see `cap_grant`)
+            }
             let node = mint_node(Some(g.node)).ok_or(E_NOMEM)?;
             t.caps[i] = Cap { node, ..*g };
             if g.kind == Kind::Endpoint && g.rights & R_RECV != 0 {
@@ -898,6 +901,10 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
             if g.kind == Kind::None {
                 continue;
             }
+            if !node_alive(g.node) {
+                drop(t);
+                return fail(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock)
+            }
             let Some(node) = mint_node(Some(g.node)) else { drop(t); return fail(E_NOMEM) };
             t.caps[i] = Cap { node, ..*g };
             if g.kind == Kind::Endpoint && g.rights & R_RECV != 0 {
@@ -968,10 +975,7 @@ fn make_thread_stack(leader: usize, tid: usize, bytes: usize) -> Result<usize, i
             mapped
         });
         if !ok {
-            for q in 0..p {
-                crate::swap::release_page(t.l1, base + q * PAGE);
-            }
-            mmu::flush_tlb();
+            crate::swap::release_pages(t.l1, base, p);
             return Err(E_NOMEM);
         }
     }
@@ -982,11 +986,8 @@ fn make_thread_stack(leader: usize, tid: usize, bytes: usize) -> Result<usize, i
 /// A thread that ends gives its stack back (`w` has every task locked; the program lives on).
 pub fn free_thread_stack(t: &mut task::Task, tid: usize) {
     for s in t.tstacks.iter_mut().filter(|s| s.1 != 0 && s.2 as usize == tid) {
-        for p in 0..s.1 {
-            crate::swap::release_page(t.l1, s.0 + p * PAGE);
-        }
+        crate::swap::release_pages(t.l1, s.0, s.1);
         *s = (0, 0, 0);
-        mmu::flush_tlb();
     }
 }
 

@@ -413,6 +413,12 @@ fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
     }
     let space = task::aspace(cur); // (a thread maps into its program's address space)
     let mut t = task::lock(space);
+    // A revoke frees nodes while holding every task lock, so a node that is alive here stays alive until this lock
+    // is released: the mapping below is recorded under it and the revoke will find and remove it. Without this
+    // check a revoke landing after `lookup` would leave a mapping of freed memory behind.
+    if !node_alive(c.node) {
+        return Out::Ret(E_BADCAP);
+    }
     let va = if auto {
         match pick_map_address(&t, o.pages) {
             Some(v) => v,
@@ -1074,15 +1080,8 @@ fn heap_release(cur: usize, first: usize, count: usize) -> Out {
     if first.checked_add(count).map_or(true, |e| e > t.heap_pages) {
         return Out::Ret(E_INVAL);
     }
-    let mut freed = 0;
-    for p in first..first + count {
-        let va = t.heap_base + p * mem::PAGE;
-        if crate::swap::release_page(t.l1, va) {
-            freed += 1;
-        }
-    }
-    mmu::flush_tlb();
-    Out::Ret(freed)
+    let freed = crate::swap::release_pages(t.l1, t.heap_base + first * mem::PAGE, count);
+    Out::Ret(freed as i64)
 }
 
 const MC_STATS: u64 = 0;
@@ -1321,6 +1320,9 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
         return Out::Ret(E_INVAL);
     }
     let mut t = task::lock(target); // only the target's table changes (the source is just read above)
+    if !node_alive(c.node) {
+        return Out::Ret(E_BADCAP); // revoked since the lookup (a revoke frees nodes with every task lock held): no copy may outlive it
+    }
     let dst = if dest == 0 {
         let Some(d) = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None) else {
             return Out::Ret(E_NOMEM);
@@ -1359,13 +1361,16 @@ fn cap_revoke(cur: usize, slot: u64, itself: bool) -> Out {
             if o.kind == ObjKind::Shared {
                 // the creator's capability: the object ends, for every holder. A holder's copy just goes.
                 if o.root == c.node {
-                    let n = World::lock().revoke_subtree(c.node, true);
+                    // (the object is freed under the same lock as the revoke, so no one can map it in between)
+                    let mut w = World::lock();
+                    let n = w.revoke_subtree(c.node, true);
                     obj::shm_destroy(c.obj);
                     return Out::Ret(n as i64);
                 }
                 return Out::Ret(World::lock().revoke_subtree(c.node, true) as i64);
             }
-            let n = World::lock().revoke_subtree(c.node, true);
+            let mut w = World::lock();
+            let n = w.revoke_subtree(c.node, true);
             for i in 0..o.pages {
                 mem::free(o.pa + i * mem::PAGE);
             }

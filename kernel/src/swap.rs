@@ -320,28 +320,55 @@ fn translate_for(t: &task::Task, tid: usize, va: usize, write: bool) -> Option<u
     None
 }
 
-/// Free the page at `va` whether it is in a frame or in the store (the task's lock is held). False if nothing
-/// was mapped there.
-pub fn release_page(l1: usize, va: usize) -> bool {
-    match mmu::inspect(l1, va) {
-        Page::Resident { pa, .. } => {
-            mmu::unmap_user(l1, va);
-            mem::free(pa);
-            true
+/// Free `count` pages starting at `first` (page-aligned, stepping by one page), whether each is in a frame or in the
+/// store (the task's lock is held). Returns how many had something mapped.
+///
+/// A frame goes back to the allocator only after the TLB flush that follows its unmapping: another core
+/// running a thread of the same program may still hold a translation for it, and a frame freed too early can be handed to
+/// another program while that thread can still read and write it. Frames are collected in batches.
+pub fn release_pages(l1: usize, first: usize, count: usize) -> usize {
+    const BATCH: usize = 64;
+    let mut pending = [0usize; BATCH];
+    let mut n = 0;
+    let mut released = 0;
+    let drain = |pending: &[usize]| {
+        if !pending.is_empty() {
+            mmu::flush_tlb(); // no core can reach these frames any more
+            for &pa in pending {
+                mem::free(pa);
+            }
         }
-        Page::Swapped(_) | Page::Disk(_) => {
-            crate::pager::cancel_write(l1, Some(va));
-            if let Some((h, disk)) = mmu::clear_swapped(l1, va) {
-                if disk {
-                    crate::pager::free_slot(h);
-                } else {
-                    discard(h);
+    };
+    for p in 0..count {
+        let va = first + p * PAGE;
+        match mmu::inspect(l1, va) {
+            Page::Resident { pa, .. } => {
+                mmu::unmap_user(l1, va);
+                pending[n] = pa;
+                n += 1;
+                released += 1;
+                if n == BATCH {
+                    drain(&pending[..n]);
+                    n = 0;
                 }
             }
-            true
+            Page::Swapped(_) | Page::Disk(_) => {
+                crate::pager::cancel_write(l1, Some(va));
+                if let Some((h, disk)) = mmu::clear_swapped(l1, va) {
+                    if disk {
+                        crate::pager::free_slot(h);
+                    } else {
+                        discard(h);
+                    }
+                }
+                released += 1;
+            }
+            Page::Absent => {}
         }
-        Page::Absent => false,
     }
+    drain(&pending[..n]);
+    mmu::flush_tlb(); // (also covers the entries that were swapped out)
+    released
 }
 
 /// A task is being torn down: its store entries go with its frames.

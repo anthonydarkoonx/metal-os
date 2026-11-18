@@ -689,7 +689,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             }
             match crate::cap::revoked_nth(t, n) {
                 (Some(r), _) => {
-                    (f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]) = (r.id as u64, r.slot as u64, r.kind as u8 as u64, r.obj as u64, r.rights as u64 | ((if r.parent == crate::cap::NO_PARENT { crate::spawn::session_cap_ok(t, r.slot as usize, r.kind, r.obj, r.rights) } else { node_alive(r.parent) }) as u64) << 16);
+                    (f.x[1], f.x[2], f.x[3], f.x[4], f.x[5]) = (r.id as u64, r.slot as u64, r.kind as u8 as u64, r.obj as u64, r.rights as u64 | ((if r.parent == crate::cap::NO_PARENT { crate::spawn::session_cap_ok(t, r.slot as usize, r.kind, r.obj, r.rights) } else { crate::cap::node_is(r.parent, r.parent_gen) }) as u64) << 16);
                     Out::Ret(0)
                 }
                 _ => Out::Ret(E_INVAL),
@@ -956,7 +956,7 @@ fn revoke_of(cur: usize, admin: u64, target: u64, slot: u64) -> Out {
     }
     // (kept in a log first, so that it can be given back: what it hung under, or, for the session capabilities the kernel made itself, that it is
     // exactly what the session has; and where it was mapped, so that the mapping can come back too)
-    let parent = crate::cap::parent_of(c.node).or_else(|| crate::spawn::session_cap_ok(t, slot as usize, c.kind, c.obj, c.rights).then_some(crate::cap::NO_PARENT));
+    let parent = crate::cap::parent_of(c.node).or_else(|| crate::spawn::session_cap_ok(t, slot as usize, c.kind, c.obj, c.rights).then_some((crate::cap::NO_PARENT, 0)));
     if let Some(parent) = parent {
         let map = task::lock(task::aspace(t)).maps.iter().find(|m| m.used && m.node == c.node).map_or((0, 0), |m| (m.va, m.pages));
         crate::cap::log_revoked(t, slot as usize, c, parent, map);
@@ -968,6 +968,11 @@ fn revoke_of(cur: usize, admin: u64, target: u64, slot: u64) -> Out {
 fn remap(space: usize, c: Cap, va: usize) -> bool {
     let Some(o) = obj::get(c.obj) else { return false };
     let mut t = task::lock(space);
+    // (as in `MEM_MAP`: a revoke frees nodes with every task lock held, so a capability that is alive under this lock stays alive until it is
+    // let go; one that was revoked since it was made must not leave a mapping behind)
+    if !c.alive() {
+        return false;
+    }
     if (0..o.pages).any(|p| mmu::is_present(t.l1, va + p * mem::PAGE)) {
         return false;
     }
@@ -1002,7 +1007,7 @@ fn restore_of(cur: usize, admin: u64, target: u64, id: u64) -> Out {
     let Some(r) = crate::cap::revoked_by_id(t, id as u32) else { return Out::Ret(E_BADCAP) };
     // what it hung under must still be there (a session capability the kernel made itself: the session must still be exactly this), and so must the object
     let root = r.parent == crate::cap::NO_PARENT;
-    let gone = if root { !crate::spawn::session_cap_ok(t, r.slot as usize, r.kind, r.obj, r.rights) } else { !node_alive(r.parent) };
+    let gone = if root { !crate::spawn::session_cap_ok(t, r.slot as usize, r.kind, r.obj, r.rights) } else { !crate::cap::node_is(r.parent, r.parent_gen) };
     if gone {
         return Out::Ret(E_DEAD);
     }
@@ -1015,12 +1020,18 @@ fn restore_of(cur: usize, admin: u64, target: u64, id: u64) -> Out {
         return Out::Ret(E_DEAD);
     }
     let mut tl = task::lock(t);
+    // (the program may have ended since the checks above: the end of a task, which takes every task lock, forgets its log entries, so one that
+    // is still there under this lock means the task is the same one)
+    if crate::cap::revoked_by_id(t, id as u32).is_none() {
+        return Out::Ret(E_DEAD);
+    }
     let slot = r.slot as usize;
     if slot >= NCAPS || (slot == CONSOLE_SLOT && r.kind != Kind::Console) || tl.caps[slot].kind != Kind::None {
         return Out::Ret(E_FULL); // (the program may have put something else there)
     }
-    let node = if root { crate::cap::mint_node(None) } else { crate::cap::mint_restored(r.parent) };
-    let Some(node) = node else { return Out::Ret(E_NOMEM) };
+    let node = if root { crate::cap::mint_node(None) } else { crate::cap::mint_restored((r.parent, r.parent_gen)) };
+    // (a parent that was revoked since the check above, and its number given out again, is refused here: checked under the node-table lock)
+    let Some(node) = node else { return Out::Ret(if !root && !crate::cap::node_is(r.parent, r.parent_gen) { E_DEAD } else { E_NOMEM }) };
     let cap = Cap::new(r.kind, r.obj, r.rights, node);
     tl.caps[slot] = cap;
     drop(tl);

@@ -554,6 +554,26 @@ pub fn tests() {
     } else {
         println!("[client] TEST the race test program is in the system image: FAIL");
     }
+    // L2 and N9: RESTORE_OF puts a capability back only under the node it hung under, not under whatever has taken that node's number since
+    {
+        let sh = svc(37, 1, 0, 0, 0, 0)[0] as i64;
+        let t = if sh >= 0 { Req::new().arg(0).give_masked(0, sh as u8, 0xFFFF & !4).go(&sleeper) } else { -1 };
+        if t > 0 {
+            let went = svc(40, ADMIN_SLOT, t as u64, 0, 0, 0)[0] as i64; // (the program's copy: logged with the node it hung under)
+            let id = svc(21, 14, t as u64, 0, 0, 0)[1];
+            svc(CAP_REVOKE, sh as u64, 1, 0, 0, 0); // frees that node ...
+            let fill: Vec<i64> = (0..3).map(|_| svc(37, 1, 0, 0, 0, 0)[0] as i64).collect(); // ... and these take the lowest free numbers again
+            let back = svc(41, ADMIN_SLOT, t as u64, id, 0, 0)[0] as i64;
+            for f in fill.iter().filter(|&&f| f >= 0) {
+                svc(CAP_REVOKE, *f as u64, 1, 0, 0, 0);
+            }
+            kill(t);
+            wait(t, false);
+            println!("[client] TEST a revoked capability is not given back under a node that has been reused (revoked {went}, restore answered {back}): {}", verdict(went >= 1 && back == -4));
+        } else {
+            println!("[client] TEST a revoked capability is not given back under a node that has been reused (setup failed): FAIL");
+        }
+    }
     // N6: a program that ends while a thread of it is in SPAWN leaves no embryo behind (the count of live tasks is the same afterwards)
     if race.len() >= 32 && sysinfo(0)[4] >= 2 {
         let live0 = sysinfo(1)[3] as i64;

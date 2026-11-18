@@ -204,11 +204,15 @@ pub fn mint_granted(parent: (NodeId, u32), granter: usize) -> Option<Minted> {
     Some(take(&mut t, i, parent.0, g, if charged { program as u8 } else { NO_GRANTER }))
 }
 
-/// The node `n` hangs under, if it is in use and has one.
-pub fn parent_of(n: NodeId) -> Option<NodeId> {
+/// The node `n` hangs under and its generation, if `n` is in use and has one.
+pub fn parent_of(n: NodeId) -> Option<(NodeId, u32)> {
     let t = NODE_TABLE.lock(R_NODES);
     let node = t.get(n as usize)?;
-    (node.used && node.parent != NO_PARENT).then_some(node.parent)
+    if !node.used || node.parent == NO_PARENT {
+        return None;
+    }
+    let p = t.get(node.parent as usize)?;
+    p.used.then_some((node.parent, p.gen))
 }
 
 /// A capability that was revoked from a program by `REVOKE_OF`, kept so that the same one can be given back (`RESTORE_OF`): only what is in
@@ -223,6 +227,8 @@ pub struct Revoked {
     pub rights: Rights,
     /// The node it hung under, or `NO_PARENT` for a capability the kernel made itself (a file or network session of a program).
     pub parent: NodeId,
+    /// The generation of that node when the capability was revoked: a node that was freed and made again under the same number is not it.
+    pub parent_gen: u32,
     /// Where the program had it mapped (0 pages: not mapped), so that giving it back can map it again.
     pub map_va: usize,
     pub map_pages: usize,
@@ -239,12 +245,12 @@ struct Log {
 static REVOKED: SpinLock<Log> = SpinLock::new(Log { entries: [None; REVOKED_LOG], next: 0, next_id: 1 });
 
 /// Remember a revoked capability of `task` (the oldest entry goes when the log is full); returns its id.
-pub fn log_revoked(task: usize, slot: usize, c: Cap, parent: NodeId, map: (usize, usize)) -> u32 {
+pub fn log_revoked(task: usize, slot: usize, c: Cap, parent: (NodeId, u32), map: (usize, usize)) -> u32 {
     let mut l = REVOKED.lock(R_NODES);
     let id = l.next_id;
     l.next_id = l.next_id.wrapping_add(1).max(1);
     let at = l.next;
-    l.entries[at] = Some(Revoked { id, task: task as u8, slot: slot as u8, kind: c.kind, obj: c.obj, rights: c.rights, parent, map_va: map.0, map_pages: map.1 });
+    l.entries[at] = Some(Revoked { id, task: task as u8, slot: slot as u8, kind: c.kind, obj: c.obj, rights: c.rights, parent: parent.0, parent_gen: parent.1, map_va: map.0, map_pages: map.1 });
     l.next = (at + 1) % REVOKED_LOG;
     id
 }
@@ -291,13 +297,13 @@ pub fn forget_revoked(tid: usize) {
 
 /// A node for a capability given back by `RESTORE_OF`: a child of `parent`, not counted against anyone's grant quota (the restorer is the trusted
 /// administrator, and each give-back replaces a node a revoke freed), but never taking the nodes kept in reserve for restarting a service.
-pub fn mint_restored(parent: NodeId) -> Option<Minted> {
+pub fn mint_restored(parent: (NodeId, u32)) -> Option<Minted> {
     let mut t = NODE_TABLE.lock(R_NODES);
-    if t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE {
+    if !parent_ok(&t, parent) || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    Some(take(&mut t, i, parent, NO_GRANTER, NO_GRANTER))
+    Some(take(&mut t, i, parent.0, NO_GRANTER, NO_GRANTER))
 }
 
 /// A task is gone: what it granted stays with the receivers, but no longer counts against the task id's next owner.

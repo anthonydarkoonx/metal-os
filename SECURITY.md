@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N8 to N11 are open; N1 to N7 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L3 to L10 are still open; L2 is fixed and removed. A second audit of `986fe66` follows: its findings N8, N10 and N11 are open; N1 to N7 and N9 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -10,7 +10,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 | # | Severity | Finding |
 |---|---|---|
-| L2 to L10 | Low | See below |
+| L3 to L10 | Low | See below |
 
 **How this was done.** Static review only. Nothing was built, booted or exploited, so every finding is a reading of the code, not a demonstrated attack. Line numbers refer to the commit above.
 
@@ -24,8 +24,6 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 ---
 
 ## Low
-
-**L2. `RESTORE_OF` can resurrect revoked authority.** The log stores the parent's node id and only checks that the id is alive (`syscall.rs:986`). If the granter revoked or died and the id was reused, the capability comes back under an unrelated node. Needs the admin to act; fixed by node generations, which now exist for capabilities but not yet for the log's parent id (`Revoked.parent`): store the generation there too.
 
 **L3. Holding-limit check is not atomic.** `SHM_CREATE` and `MC_ALLOC` read `held_pages()` under a lock that is dropped before `reserve_contig` runs (`syscall.rs:1180`, `:1246`–`1247`), and `reserve_contig` itself loads, checks, then adds (`spawn.rs:134`–`140`). Threads racing each other can exceed the quota. Hold the lock across the call, or use a compare-exchange loop.
 
@@ -70,7 +68,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 # Second audit (2026-11-18, commit `986fe66`)
 
-Auditor: Claude (code review). **Status:** N1 to N7 are fixed and removed; everything else in this section is open.
+Auditor: Claude (code review). **Status:** N1 to N7 and N9 are fixed and removed; everything else in this section is open.
 
 **How this was done.** Static review only, like the first audit: nothing was built, booted or exploited, so every finding is a reading of the code. The findings that depend on timing between cores are unproven until a test hits them. Line numbers refer to `986fe66`.
 
@@ -80,13 +78,11 @@ Auditor: Claude (code review). **Status:** N1 to N7 are fixed and removed; every
 
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
-| N8–N11 | Low | See below | |
+| N8, N10, N11 | Low | See below | |
 
 ## Low
 
 **N8. The reverse map cannot hold addresses above 64 GiB.** A movable frame records `tid << 24 | va >> 12` in 32 bits (`kernel/src/mem.rs:49`, `:188`), but position-independent images are placed up to 256 GiB (`PIE_HI`, `kernel/src/task.rs:74`). For about three quarters of the possible bases the address spills into the task number. Those image pages are never compacted or swapped (the check against the page table fails), and `try_evict` and `compact::migrate` lock a different task's slot; if that slot is a thread's, they walk its page-table root (the old N7 made that root stale; it is now 0 for a dead task, but a thread's own slot still has no root of its own). Widen the field.
-
-**N9. `RESTORE_OF` restores without rechecking.** `restore_of` checks that the target is alive before taking its lock (`kernel/src/syscall.rs:998`, `:1016`), installs the capability, drops the lock, and `remap` maps without checking `node_alive` (`:967`–`990`). A revoke of the parent in between leaves a mapping of memory the program no longer holds (the same race as the old N1, which node generations closed for `SPAWN`, `THREAD_CREATE`, `CAP_GRANT` and `MEM_MAP`; this path still checks the bare node number); a target that died in between gets a capability whose node leaks. Needs the admin to act.
 
 **N10. Check-then-act in `WAIT` and `TASK_START`.** `wait` decides under the caller's own lock (`kernel/src/spawn.rs:772`), so two threads of one parent can both release the same zombie; if a `SPAWN` takes the slot in between, the second release clears the new program's parent and session. `task_start` can set a just-killed embryo `Ready` after it died (`:753`), and the next dispatch hits the `switch_to` assert (the old N4 crash). Both windows are a few instructions wide.
 
@@ -94,6 +90,6 @@ Auditor: Claude (code review). **Status:** N1 to N7 are fixed and removed; every
 
 ## Suggested order of work
 
-1. The Low items: N9 with L2 (finish the generation fix), then N10 and N11, then the rest.
+1. N10 and N11, then L3 to L5 (quick), N8, and the rest of the Low items.
 
 Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), and the N3 hand-over: a program that ends while another program holds its shared memory must leave the memory charged to that holder (or end it when the holder cannot pay). The N3 fix has a test only for the thread case.

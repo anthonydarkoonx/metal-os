@@ -43,6 +43,14 @@ use metal_programs::*;
 //   15 M7: one program may not fill an endpoint's queue (a factory capability is in slot 1): it makes an endpoint, queues messages
 //      to it until refused, and a thread of the same program then tries one more. Exit code bits: 1 not exactly 4 were queued
 //      (half of the queue of 8), 2 the thread's message was accepted.
+//   16 N1: a node number freed by a revoke is handed out again at once, so a copy of a capability that was read before the revoke must not
+//      look alive after it. Thread A calls THREAD_CREATE with a copy of a shared-memory capability while the main thread revokes the
+//      object (after a random delay) and creates a new one; the main thread arranged that the copy's node is the lowest free number, so
+//      the console node that THREAD_CREATE makes for thread B takes it. B then maps the capability it was given: the new object must not
+//      be mapped. Exit code: 0 = never, 10 = B mapped an object through a revoked capability, other = setup failed. (Needs 2 extra threads.)
+//   17 N2: TASK_LOAD of an embryo that is killed while it loads. A thread loads 200 pages into an embryo; the main thread kills and collects
+//      the embryo meanwhile (after a random delay). The load must stop with an error: if it comes back successful after the embryo has been
+//      collected, it went on writing the page tables of a dead task. Exit code: 0 = never, 10 = it did. (A spawn capability is in slot 0.)
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -442,6 +450,161 @@ extern "C" fn sender(_: u64) -> ! {
     thread::exit(&DONES[0])
 }
 
+const ROUNDS16: usize = 60;
+static GO16: AtomicU32 = AtomicU32::new(0);
+static CHECK16: AtomicU32 = AtomicU32::new(0);
+static SLOT16: AtomicU32 = AtomicU32::new(0);
+static A_RES: AtomicU32 = AtomicU32::new(0);
+static B_RES: AtomicU32 = AtomicU32::new(0);
+static DONE16: [AtomicU32; 2 * ROUNDS16] = [const { AtomicU32::new(0) }; 2 * ROUNDS16];
+static ROUND16: AtomicU32 = AtomicU32::new(0);
+
+/// Thread B of N1: once the main thread says the object is replaced, map the capability it was given (slot of S).
+extern "C" fn n1_b(_: u64) -> ! {
+    let round = ROUND16.load(Acquire);
+    while CHECK16.load(Acquire) != round {
+        core::hint::spin_loop();
+    }
+    let r = map(SLOT16.load(Acquire) as u64, BIG + 0x20000, true);
+    B_RES.store(if r == 0 { 1 } else { 2 }, Release);
+    thread::exit(&DONE16[2 * round as usize + 1])
+}
+
+/// Thread A of N1: at the signal, start thread B with a copy of what it holds (slot of S).
+extern "C" fn n1_a(_: u64) -> ! {
+    let round = ROUND16.load(Acquire);
+    while GO16.load(Acquire) != round {
+        core::hint::spin_loop();
+    }
+    let slot = SLOT16.load(Acquire);
+    let r = thread::create_with_kernel_stack(n1_b, 0, 1 << slot, 0);
+    A_RES.store(if r >= 0 { 1 } else { 2 }, Release);
+    thread::exit(&DONE16[2 * round as usize])
+}
+
+fn n1() -> u64 {
+    let u = shm_create(1);
+    if u < 0 {
+        return 2;
+    }
+    let mut r = 0x9E37_79B9_7F4A_7C15u64;
+    for round in 1..ROUNDS16 as u32 {
+        // Two throw-away objects take the two lowest free node numbers, then the one under test; freeing the first two makes
+        // those numbers the lowest free ones again, so thread A's console node and its copy of S (node of S's copy < S's own) take them.
+        let (x1, x2, s) = (shm_create(1), shm_create(1), shm_create(1));
+        if x1 < 0 || x2 < 0 || s < 0 {
+            return 3;
+        }
+        revoke_self(x1 as u64);
+        revoke_self(x2 as u64);
+        ROUND16.store(round, Release);
+        SLOT16.store(s as u32, Release);
+        A_RES.store(0, Release);
+        B_RES.store(0, Release);
+        if thread::create_with_kernel_stack(n1_a, 0, 1 << s, 0) < 0 {
+            return 4;
+        }
+        // (these two take the object-table entries the throw-aways left, so that the new object after the revoke gets S's entry)
+        let (y1, y2) = (shm_create(1), shm_create(1));
+        if y1 < 0 || y2 < 0 {
+            return 5;
+        }
+        GO16.store(round, Release);
+        for _ in 0..(rng(&mut r) % 3000) {
+            core::hint::spin_loop();
+        }
+        revoke_self(s as u64);
+        let s2 = shm_create(1);
+        CHECK16.store(round, Release);
+        thread::join(&DONE16[2 * round as usize]);
+        if A_RES.load(Acquire) == 1 {
+            thread::join(&DONE16[2 * round as usize + 1]);
+        }
+        let bug = B_RES.load(Acquire) == 1;
+        for x in [y1, y2, s2] {
+            if x >= 0 {
+                revoke_self(x as u64);
+            }
+        }
+        if bug {
+            println!("racetest: a revoked capability mapped a new object in round {round}");
+            return 10;
+        }
+    }
+    revoke_self(u as u64);
+    0
+}
+
+const N2_PAGES: usize = 200;
+const ROUNDS17: usize = 40;
+static START17: AtomicU32 = AtomicU32::new(0);
+static ORDER17: AtomicU32 = AtomicU32::new(0);
+static RES17: AtomicU32 = AtomicU32::new(0);
+static LATE17: AtomicU32 = AtomicU32::new(0);
+static SRC17: AtomicUsize = AtomicUsize::new(0);
+static ROUND17: AtomicU32 = AtomicU32::new(0);
+static DONE17: [AtomicU32; ROUNDS17 + 1] = [const { AtomicU32::new(0) }; ROUNDS17 + 1];
+
+extern "C" fn loader(child: u64) -> ! {
+    let mut lr = [0u8; 24];
+    lr[0..8].copy_from_slice(&0x8000_0000u64.to_le_bytes());
+    lr[8..16].copy_from_slice(&(SRC17.load(Acquire) as u64).to_le_bytes());
+    lr[16..20].copy_from_slice(&(N2_PAGES as u32).to_le_bytes());
+    lr[20..24].copy_from_slice(&1u32.to_le_bytes()); // read + write
+    START17.store(1, Release);
+    let r = svc(28, child, lr.as_ptr() as u64, 0, 0, 0)[0] as i64;
+    // (a load that comes back successful after the embryo was killed and collected went on writing a dead task's tables)
+    LATE17.store((r == 0 && ORDER17.load(Acquire) == 1) as u32, Release);
+    RES17.store(if r == 0 { 1 } else { 2 }, Release);
+    thread::exit(&DONE17[ROUND17.load(Acquire) as usize])
+}
+
+fn n2() -> u64 {
+    let src = heap_grow(N2_PAGES as u64);
+    if src < 0 {
+        return 2;
+    }
+    SRC17.store(src as usize, Release);
+    let mut r = 0x2545_F491_4F6C_DD1Du64;
+    let mut late = 0;
+    for round in 1..=ROUNDS17 as u32 {
+        let mut req = [0u8; 96];
+        req[0..4].copy_from_slice(&2u32.to_le_bytes());
+        for i in 0..8 {
+            req[64 + 4 * i] = NONE as u8; // (nothing is handed over)
+        }
+        let child = svc(SPAWN, 0, req.as_ptr() as u64, 0, 0, 0)[0] as i64;
+        if child < 0 {
+            println!("racetest: SPAWN failed ({child}) in round {round}");
+            return 3;
+        }
+        START17.store(0, Release);
+        ORDER17.store(0, Release);
+        RES17.store(0, Release);
+        LATE17.store(0, Release);
+        ROUND17.store(round, Release);
+        if thread::create_with_kernel_stack(loader, child as u64, 0, 0) < 0 {
+            return 4;
+        }
+        while START17.load(Acquire) == 0 {
+            core::hint::spin_loop();
+        }
+        for _ in 0..(rng(&mut r) % 40_000) {
+            core::hint::spin_loop();
+        }
+        kill(child as u64);
+        wait(child as u64, false);
+        ORDER17.store(1, Release);
+        thread::join(&DONE17[round as usize]);
+        late += LATE17.load(Acquire);
+    }
+    if late > 0 {
+        println!("racetest: TASK_LOAD went on loading into a collected embryo in {late} rounds");
+        return 10;
+    }
+    0
+}
+
 program!("racetest", |c| {
     match c.arg & 0xFF {
         8 => {
@@ -472,6 +635,8 @@ program!("racetest", |c| {
         13 => m7(13, 0),
         14 => m7(14, 4),
         15 => queue_share(),
+        16 => n1(),
+        17 => n2(),
         4..=6 => m1(c.arg),
         1 => h1(),
         2 => h2(),

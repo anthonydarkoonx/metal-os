@@ -537,10 +537,20 @@ pub fn tests() {
             svc(CAP_REVOKE, s as u64, 1, 0, 0, 0);
         }
         println!("[client] TEST pages released by HEAP_RELEASE are not reachable through a stale translation after they are freed (12 rounds, {ran} reached the release, {leaks} saw another program's data): {}", verdict(leaks == 0 && ran > 0));
+        // N1: a copy of a capability that was read before a revoke is not alive after it, even when its node number has been handed out again
+        let (n1, o1, _) = run_with_console3(Req::new().arg(16).heap(64).threads(2), &race, b"");
+        let o1 = String::from_utf8_lossy(&o1).into_owned();
+        println!("[client] TEST a capability copy read before a revoke stays dead when its node number is reused (exit code {n1}{}): {}", if o1.is_empty() { String::new() } else { alloc::format!(", {}", o1.trim()) }, verdict(n1 == 0));
+        // N2: TASK_LOAD stops when the embryo it is loading is killed and collected, instead of writing the page tables of a dead task
+        let (n2, o2, _) = run_with_console3(Req::new().arg(17).heap(260).budget(1500).threads(1).give(&[SPAWN_SLOT as u8]), &race, b"");
+        let o2 = String::from_utf8_lossy(&o2).into_owned();
+        println!("[client] TEST TASK_LOAD stops when its embryo is killed and collected (exit code {n2}{}): {}", if o2.is_empty() { String::new() } else { alloc::format!(", {}", o2.trim()) }, verdict(n2 == 0));
     } else if race.len() >= 32 {
         // (the H1 and H2 races need a second core to happen at all)
         println!("[client] TEST a map that races a revoke never leaves a mapping of freed shared memory behind (skipped: one core): PASS");
         println!("[client] TEST pages released by HEAP_RELEASE are not reachable through a stale translation after they are freed (skipped: one core): PASS");
+        println!("[client] TEST a capability copy read before a revoke stays dead when its node number is reused (skipped: one core): PASS");
+        println!("[client] TEST TASK_LOAD stops when its embryo is killed and collected (skipped: one core): PASS");
     } else {
         println!("[client] TEST the race test program is in the system image: FAIL");
     }

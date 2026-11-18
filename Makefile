@@ -275,6 +275,8 @@ qemu-test: kernel disk
 	 grep -q "TEST SYSINFO pages that list other tasks. capabilities refuse.*PASS" build.log && \
 	 grep -q "TEST a map that races a revoke never leaves.*PASS" build.log && \
 	 grep -q "TEST pages released by HEAP_RELEASE are not reachable.*PASS" build.log && \
+	 grep -q "TEST a capability copy read before a revoke stays dead.*PASS" build.log && \
+	 grep -q "TEST TASK_LOAD stops when its embryo is killed.*PASS" build.log && \
 	 grep -q "TEST stopping asks the ability to leave.*PASS" build.log && \
 	 grep -q "TEST stopping what is not running is refused.*PASS" build.log && \
 	 grep -q "TEST a program's storage is private.*PASS" build.log && \

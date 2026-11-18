@@ -888,6 +888,10 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
     if sp == 0 && stack_bytes > THREAD_STACK_MAX {
         return Err(E_INVAL);
     }
+    // A program that is being ended (its first task is gone, or this thread is condemned) gets no new threads.
+    if matches!(sched::state(leader), State::Dead | State::Free) || sched::is_doomed(cur) {
+        return Err(E_PERM);
+    }
     let class = task::info(leader).class;
     // What the caller hands over, read once.
     let mut give = [Cap::NONE; NCAPS];
@@ -951,6 +955,12 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
             }
         }
     }
+    // The creator's own root, not the leader's: when the program's first task has died and its threads are only condemned, the leader's published
+    // root is 0, and a thread made with it would stop the kernel the first time a core ran it. The creator is running in the space, so its root is good.
+    let root = task::l1_of(cur);
+    if root == 0 {
+        return fail(E_PERM);
+    }
     // no stack given: the kernel makes one, at a random place between unmapped pages, charged to the program
     let sp = if sp == 0 {
         match make_thread_stack(leader, tid, stack_bytes) {
@@ -960,7 +970,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
     } else {
         sp
     };
-    task::set_l1(tid, task::l1_of(leader));
+    task::set_l1(tid, root);
     let mut f = frame(tid);
     *f = TrapFrame::ZERO;
     f.x[0] = arg;

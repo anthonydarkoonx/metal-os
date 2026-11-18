@@ -201,6 +201,11 @@ pub fn set_irq_deadline(tid: usize, deadline: u64) {
     IRQ_DEADLINE[tid].store(deadline, Ordering::SeqCst);
 }
 
+/// Has `tid` been condemned and not yet killed?
+pub fn is_doomed(tid: usize) -> bool {
+    DOOMED[tid].load(Ordering::SeqCst)
+}
+
 pub fn clear_doom(tid: usize) {
     DOOMED[tid].store(false, Ordering::SeqCst);
 }

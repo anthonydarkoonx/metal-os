@@ -704,7 +704,12 @@ impl World {
     fn reclaim_space(&mut self, leader: usize) -> usize {
         let t = &mut self.tasks[leader];
         t.maps = [MapRec { used: false, va: 0, pages: 0, node: 0 }; MAX_MAPS];
-        crate::swap::release_task(t.l1); // pages in the swap store go with the frames
+        if t.l1 != 0 {
+            crate::swap::release_task(t.l1); // pages in the swap store go with the frames
+        }
+        // The tables are freed with the frames below: nothing may walk them again. (Every user of `l1` already reads 0 as "no address space"; a
+        // restarted service or a new program gets a root of its own from `build` or `spawn`.)
+        t.l1 = 0;
         let n = mem::free_owned(owner(leader));
         crate::spawn::forget_usage(leader);
         mmu::flush_tlb();

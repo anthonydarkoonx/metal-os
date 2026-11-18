@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N3 to N11 are open; N1 and N2 (the two High ones) are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N3, N5, N6 and N8 to N11 are open; N1, N2, N4 and N7 are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -70,7 +70,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 # Second audit (2026-11-18, commit `986fe66`)
 
-Auditor: Claude (code review). **Status:** N1 and N2 are fixed and removed; everything else in this section is open.
+Auditor: Claude (code review). **Status:** N1, N2, N4 and N7 are fixed and removed; everything else in this section is open.
 
 **How this was done.** Static review only, like the first audit: nothing was built, booted or exploited, so every finding is a reading of the code. The findings that depend on timing between cores are unproven until a test hits them. Line numbers refer to `986fe66`.
 
@@ -81,10 +81,8 @@ Auditor: Claude (code review). **Status:** N1 and N2 are fixed and removed; ever
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
 | N3 | Medium | Shared memory orphaned by a thread's exit is charged to nobody | A program with 1 thread |
-| N4 | Medium | A thread created after the program's first task died gets page-table root 0: kernel panic | A program with 2 threads; SMP only |
 | N5 | Medium | File and network session pages go to the next program uncleared | Any program with `files` or `network` |
 | N6 | Medium | `SPAWN` racing the first task's exit leaves an embryo nobody owns | A program with `spawn` and 1 thread; SMP only |
-| N7 | Low to Medium | Dead task slots keep their old page-table root | Mostly needs out-of-memory, a hostile pager or the admin |
 | N8–N11 | Low | See below | |
 
 ## Medium
@@ -100,14 +98,6 @@ The same steps get around the per-program limits on memory objects and capabilit
 A parent and a child program can do the same without threads (the child grants to its parent and exits).
 
 **Fix.** Charge an orphan to its holders (split, or to the first holder), or orphan only when the whole program ends and free what a thread created when the thread ends, as the ABI already says ("what a thread creates is its own: it goes when the thread ends").
-
-### N4. A thread created after the first task died gets page-table root 0
-
-When a program's first task dies while threads remain, `die_as` zeroes its published root (`L1[tid].store(0)`, `kernel/src/task.rs:772`); the threads are condemned but keep running until their next kernel entry, and one that is already in `thread_create` finishes the call. It gives the new thread `task::l1_of(leader)`, which is now 0 (`kernel/src/spawn.rs:939`), and makes it runnable.
-
-The new thread is not condemned until its creator dies, a few tens of microseconds later. A core that dispatches it before that calls `switch_to(0)`, which asserts (`kernel/src/mmu.rs:583`), and the kernel stops. A second program that keeps the other cores in `YIELD` makes the early dispatch likely.
-
-**Fix.** Copy the creating task's own root (`l1_of(cur)`), and refuse `THREAD_CREATE` when the leader is dead or the caller is condemned. Keep the assert.
 
 ### N5. Session pages go to the next program uncleared
 
@@ -127,31 +117,19 @@ Each time, a task slot is lost for good (there are 37), with about 20 frames and
 
 **Fix.** Give a slot under construction a state of its own, or have `spawn` check, before it sets `Embryo`, that the parent is alive and still the parent, and undo otherwise.
 
-### N7. Dead task slots keep their old page-table root
-
-`reclaim_space` frees a program's page tables but leaves `Task.l1` pointing at them (`kernel/src/task.rs:704`–`712`); only `spawn`'s failure path and the next successful `spawn` or `build` change it. A slot reused by a thread keeps the stale value for as long as the thread lives. Several places then walk freed tables:
-
-- **`spawn`'s failure path** (`kernel/src/spawn.rs:595`–`598`). If `new_space` fails (out of memory), `fail` calls `swap::release_task` on the previous occupant's root. If the old tables are intact, the swap-store entries and disk slots they name are released a second time; by then they may belong to other programs, which lose a page or, after the entry is reused once more, read another program's page. If the tables were reused, `table()` may panic. N3 makes out-of-memory reachable on purpose.
-- **`pager::lose_page`** (`kernel/src/pager.rs:406`). No liveness check: a pager that reports a failed read for a program that has died makes the kernel walk the old tables, and clear a descriptor and free a disk slot if it finds a match.
-- **`pager::kick`** (`kernel/src/pager.rs:517`–`520`). It checks that the pager is alive and then waits for its lock; if the pager was dying, the store goes through the freed tables into a freed frame.
-- **`remap` after `RESTORE_OF`** (`kernel/src/syscall.rs:967`). See N9.
-
-**Fix.** Set `t.l1 = 0` in `reclaim_space` (every user already treats 0 as "no address space") and check liveness under the lock, not before it.
-
 ## Low
 
-**N8. The reverse map cannot hold addresses above 64 GiB.** A movable frame records `tid << 24 | va >> 12` in 32 bits (`kernel/src/mem.rs:49`, `:188`), but position-independent images are placed up to 256 GiB (`PIE_HI`, `kernel/src/task.rs:74`). For about three quarters of the possible bases the address spills into the task number. Those image pages are never compacted or swapped (the check against the page table fails), and `try_evict` and `compact::migrate` lock a different task's slot; if that slot is a thread's, they walk its stale root (N7). Widen the field.
+**N8. The reverse map cannot hold addresses above 64 GiB.** A movable frame records `tid << 24 | va >> 12` in 32 bits (`kernel/src/mem.rs:49`, `:188`), but position-independent images are placed up to 256 GiB (`PIE_HI`, `kernel/src/task.rs:74`). For about three quarters of the possible bases the address spills into the task number. Those image pages are never compacted or swapped (the check against the page table fails), and `try_evict` and `compact::migrate` lock a different task's slot; if that slot is a thread's, they walk its page-table root (the old N7 made that root stale; it is now 0 for a dead task, but a thread's own slot still has no root of its own). Widen the field.
 
 **N9. `RESTORE_OF` restores without rechecking.** `restore_of` checks that the target is alive before taking its lock (`kernel/src/syscall.rs:998`, `:1016`), installs the capability, drops the lock, and `remap` maps without checking `node_alive` (`:967`–`990`). A revoke of the parent in between leaves a mapping of memory the program no longer holds (the same race as the old N1, which node generations closed for `SPAWN`, `THREAD_CREATE`, `CAP_GRANT` and `MEM_MAP`; this path still checks the bare node number); a target that died in between gets a capability whose node leaks. Needs the admin to act.
 
-**N10. Check-then-act in `WAIT` and `TASK_START`.** `wait` decides under the caller's own lock (`kernel/src/spawn.rs:772`), so two threads of one parent can both release the same zombie; if a `SPAWN` takes the slot in between, the second release clears the new program's parent and session. `task_start` can set a just-killed embryo `Ready` after it died (`:753`), and the next dispatch hits the assert of N4. Both windows are a few instructions wide.
+**N10. Check-then-act in `WAIT` and `TASK_START`.** `wait` decides under the caller's own lock (`kernel/src/spawn.rs:772`), so two threads of one parent can both release the same zombie; if a `SPAWN` takes the slot in between, the second release clears the new program's parent and session. `task_start` can set a just-killed embryo `Ready` after it died (`:753`), and the next dispatch hits the `switch_to` assert (the old N4 crash). Both windows are a few instructions wide.
 
 **N11. A pager with a thread panics the kernel.** `pager::register` checks that the pager has no threads only when it registers (`kernel/src/pager.rs:186`). `SCRATCH` is a `Global`, whose `get` panics at once on an overlapping borrow (`kernel/src/sync.rs:297`); `next`, `start_write` and `open_into` take it under different locks, so two pager threads can overlap.
 
 ## Suggested order of work
 
-1. N7 and N4: one line each, and N7 removes a whole class of walks of freed tables.
-2. N3 and N5: no race needed, any program with the right manifest can do them today.
-3. N6, then the Low items.
+1. N3 and N5: no race needed, any program with the right manifest can do them today.
+2. N6, then the Low items.
 
-Tests worth adding to `racetest`: a thread spawning with a capability its first task revokes (N1, now fixed: no test yet), `KILL` during `TASK_LOAD` (N2, now fixed: no test yet), a thread orphaning memory in a loop while the parent watches `QUOTA` (N3), a program reading its session page before its first call (N5).
+Tests worth adding to `racetest`: a thread creating a thread after the first task died (N4, fixed without a test), a failed `SPAWN` after a program's death (N7, fixed without a test), a thread orphaning memory in a loop while the parent watches `QUOTA` (N3), a program reading its session page before its first call (N5).

@@ -2,14 +2,16 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
+**Status:** H1 and H2 were fixed in `8ab56dc`. Everything else is still open. The line numbers below refer to the audited commit and have moved in the files the fix touched (`syscall.rs`, `spawn.rs`, `swap.rs`).
+
 ## Summary
 
-The kernel is in better shape than most prototypes: the design is capability-based, 15 modules forbid `unsafe`, physical memory access is bounds-checked, and user programs get strict W^X. The audit still found two high-severity problems that an unprivileged program can reach on a multi-core machine, both of which end with a program holding a writable mapping of physical memory it no longer owns.
+The kernel is in better shape than most prototypes: the design is capability-based, 15 modules forbid `unsafe`, physical memory access is bounds-checked, and user programs get strict W^X. The audit found two high-severity problems that an unprivileged program could reach on a multi-core machine, both of which end with a program holding a writable mapping of physical memory it no longer owns. Both are now fixed (see below).
 
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
-| H1 | High | Capability checks race with revocation; a mapping can outlive freed shared memory | Any two cooperating tasks, SMP only |
-| H2 | High | `HEAP_RELEASE` frees frames before flushing the TLB | Any program with a thread, SMP only |
+| H1 | High (fixed in `8ab56dc`) | Capability checks race with revocation; a mapping can outlive freed shared memory | Any two cooperating tasks, SMP only |
+| H2 | High (fixed in `8ab56dc`) | `HEAP_RELEASE` frees frames before flushing the TLB | Any program with a thread, SMP only |
 | M1 | Medium | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
 | M2 | Medium | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
 | M3 | Medium | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
@@ -32,7 +34,11 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 ## High
 
-### H1. Capability checks race with revocation
+### H1. Capability checks race with revocation (fixed in `8ab56dc`)
+
+**Fixed:** `MEM_MAP`, `CAP_GRANT`, `SPAWN` delegation and `THREAD_CREATE` now recheck `node_alive` under a task lock before they install or mint anything. `cap_revoke` frees shared and dynamic memory under the same world lock as the revoke. Not done: the generation counter on nodes, so L2 stays open. `make fuzz` passes, but no test races a map against a revoke yet.
+
+The original finding follows.
 
 `syscall::lookup` copies the capability out under the task lock and releases the lock before the caller acts on it (`kernel/src/syscall.rs:121`). The comment calls a late revoke harmless. That is true for one IPC message, but not for calls that create lasting state:
 
@@ -54,7 +60,11 @@ The window is short but retryable: the revoker only has to take the mapper's tas
 - Move `shm_destroy` (and the frees in `MC_FREE` and `cap_revoke`) under the same world lock as the revoke.
 - Give nodes a generation counter and store it in `Cap`, `MapRec` and the revoke log, so a reused node id can never match a stale reference (this also fixes L2).
 
-### H2. `HEAP_RELEASE` frees frames before flushing the TLB
+### H2. `HEAP_RELEASE` frees frames before flushing the TLB (fixed in `8ab56dc`)
+
+**Fixed:** the new `swap::release_pages` unmaps a batch of pages, flushes the TLB, and only then frees the frames. `heap_release`, `free_thread_stack` and the failure path of `make_thread_stack` use it. No test yet touches heap pages while a sibling thread releases them.
+
+The original finding follows.
 
 `heap_release` (`syscall.rs:1072`–`1086`) calls `swap::release_page` for each page, which unmaps and immediately frees the frame (`swap.rs:327`–`330`). The TLB flush comes once, after the loop.
 
@@ -191,7 +201,7 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 
 ## Suggested order of work
 
-1. H1 and H2: both are small, local changes (a recheck under the lock; flush before free).
+1. ~~H1 and H2~~ (done in `8ab56dc`; node generations from H1 are still open and would also close L2).
 2. M1 and M3: lifetime rules for dynamic objects and the range checks in `mem.rs`.
 3. M2 and L1: decide who may grant to whom, then hide the introspection pages.
 4. M4 and M5: FP trapping or switching, kernel page permissions, PAN.

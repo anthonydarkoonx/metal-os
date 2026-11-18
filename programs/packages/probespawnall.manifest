@@ -4,5 +4,5 @@ version = 1.0.0
 heap_pages = 48
 permission = allfiles
 permission = spawn
-spawn_pages = 64
+spawn_pages = 128
 ability = main service bin/probe

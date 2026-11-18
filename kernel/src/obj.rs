@@ -25,6 +25,8 @@ pub struct MemObj {
     pub root: crate::cap::NodeId,
     /// Shared memory: where the list of its frames is (`ceil(pages / 1024)` kernel pages of `u32` frame numbers).
     pub list: usize,
+    /// Run-time objects: the program (address space) charged a slot of the object table for it (`NO_OWNER` for the kernel's).
+    pub owner: u8,
 }
 
 pub const OBJ_SHARED: u8 = 0;
@@ -87,7 +89,7 @@ pub const IRQ_NET: u8 = 2;
 /// (ids are `u8`; the first 56 are the boot-time objects, the rest are created at run time)
 const NOBJ: usize = 256;
 static OBJS: SpinLock<[MemObj; NOBJ]> =
-    SpinLock::new([MemObj { kind: ObjKind::Unused, pa: 0, pages: 0, aux: 0, root: 0, list: 0 }; NOBJ]);
+    SpinLock::new([MemObj { kind: ObjKind::Unused, pa: 0, pages: 0, aux: 0, root: 0, list: 0, owner: NO_OWNER }; NOBJ]);
 
 /// All streams a driver role's devices sit behind (the input driver has two: keyboard and pointer).
 pub fn sids_of_role(role: u8) -> [Option<u16>; 2] {
@@ -99,7 +101,7 @@ pub fn get(i: u8) -> Option<MemObj> {
 }
 
 pub(crate) fn set(i: u8, kind: ObjKind, pa: usize, pages: usize, aux: usize) {
-    OBJS.lock(R_OBJ)[i as usize] = MemObj { kind, pa, pages, aux, root: 0, list: 0 };
+    OBJS.lock(R_OBJ)[i as usize] = MemObj { kind, pa, pages, aux, root: 0, list: 0, owner: NO_OWNER };
 }
 
 /// The page the kernel reads the virtio-rng device through (see `virtio_rng.rs`).
@@ -121,12 +123,35 @@ pub fn init() {
 pub const FIRST_PLATFORM_OBJ: u8 = 52;
 const FIRST_DYNAMIC: usize = 64;
 
+const NO_OWNER: u8 = u8::MAX;
+/// Most run-time objects one program may have, and the object-table entries programs may never take (boot-time services make
+/// objects too, and must not find the table full because programs filled it).
+pub const PROGRAM_OBJ_QUOTA: usize = 32;
+const OBJ_RESERVE: usize = 16;
+
+fn owner_tag(owner: usize) -> u8 {
+    if crate::spawn::is_program(owner) { owner as u8 } else { NO_OWNER }
+}
+
+fn over_quota(t: &[MemObj], owner: usize) -> bool {
+    if !crate::spawn::is_program(owner) {
+        return false;
+    }
+    let o = owner as u8;
+    let dynamic = &t[FIRST_DYNAMIC..];
+    dynamic.iter().filter(|x| x.kind != ObjKind::Unused && x.owner == o).count() >= PROGRAM_OBJ_QUOTA
+        || dynamic.iter().filter(|x| x.kind == ObjKind::Unused).count() <= OBJ_RESERVE
+}
+
 /// Register a contiguous DMA-style object created at run time. `root` is the node of the creator's capability: the object
 /// lives as long as that capability does (a copy of the capability, such as a thread's, never ends it).
-pub fn alloc_dynamic(pa: usize, pages: usize, root: crate::cap::NodeId) -> Option<u8> {
+pub fn alloc_dynamic(pa: usize, pages: usize, root: crate::cap::NodeId, owner: usize) -> Option<u8> {
     let mut t = OBJS.lock(R_OBJ);
+    if over_quota(&t[..], owner) {
+        return None;
+    }
     let i = (FIRST_DYNAMIC..NOBJ).find(|&i| t[i].kind == ObjKind::Unused)?;
-    t[i] = MemObj { kind: ObjKind::Dma, pa, pages, aux: 0, root, list: 0 };
+    t[i] = MemObj { kind: ObjKind::Dma, pa, pages, aux: 0, root, list: 0, owner: owner_tag(owner) };
     Some(i as u8)
 }
 
@@ -212,8 +237,11 @@ pub fn shm_frame(o: &MemObj, p: usize) -> usize {
 /// Register a shared object whose frames `shm_alloc` returned.
 pub fn shm_register(pages: usize, creator: usize, root: crate::cap::NodeId, list: usize) -> Option<u8> {
     let mut t = OBJS.lock(R_OBJ);
+    if over_quota(&t[..], creator) {
+        return None;
+    }
     let i = (FIRST_DYNAMIC..NOBJ).find(|&i| t[i].kind == ObjKind::Unused)?;
-    t[i] = MemObj { kind: ObjKind::Shared, pa: 0, pages, aux: creator, root, list };
+    t[i] = MemObj { kind: ObjKind::Shared, pa: 0, pages, aux: creator, root, list, owner: owner_tag(creator) };
     Some(i as u8)
 }
 
@@ -235,6 +263,7 @@ pub fn shm_orphan(i: u8) {
     }
     crate::spawn::release_contig(o.aux, o.pages);
     o.aux = SHM_ORPHAN;
+    o.owner = NO_OWNER;
     o.root = crate::cap::NO_PARENT;
     ORPHANS.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
 }

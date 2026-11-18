@@ -34,6 +34,12 @@ use metal_programs::*;
 //      they must not be usable). Prints "survived" if it ran; the program is expected to fault.
 //   11 M4: TPIDR_EL0 belongs to the task: this one sets A, a thread sets B and gives up the CPU many times, and a new thread starts
 //      with 0. Exit code bits: 1 the thread did not start with 0, 2 the thread lost its own value, 4 this task's value was changed.
+//   12 M7: one program's run-time memory objects (SHM_CREATE) are limited, however many threads make them: seven threads and this one
+//      create until refused. Exit code bits: 1 more than PROGRAM_OBJ_QUOTA (32) were made, 2 none were.
+//   13 M7: one program's capability nodes are limited: this one holds 31 capabilities and starts seven threads that each copy all of
+//      them. Exit code bits: 1 all seven threads were started (no limit), 2 none was.
+//   14 M7: one program's run-time endpoints are limited, however many threads make them (a factory capability is in slot 1): seven
+//      threads and this one create until refused. Exit code bits: 1 more than 4 were made, 2 none were.
 //   8  the sibling: sleeps for a while, then ends.
 
 const BIG: usize = 0xA000_0000;
@@ -314,6 +320,94 @@ fn m2(sibling: u64, parent: u64) -> u64 {
     bits
 }
 
+const T_COUNT: usize = 7;
+static DONES: [AtomicU32; T_COUNT] = [const { AtomicU32::new(0) }; T_COUNT];
+static MADE: AtomicU32 = AtomicU32::new(0);
+/// How many threads have finished making things, and the signal for them to end (what a thread made goes with it when it ends).
+static ARRIVED: AtomicU32 = AtomicU32::new(0);
+static RELEASE: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn maker(i: u64) -> ! {
+    match MODE.load(Acquire) {
+        12 => {
+            while shm_create(1) >= 0 {
+                MADE.fetch_add(1, SeqCst);
+            }
+        }
+        14 => {
+            while svc(27, 1, 0, 0, 0, 0)[0] as i64 >= 0 {
+                MADE.fetch_add(1, SeqCst);
+            }
+        }
+        _ => {} // 13: the copies are the test
+    }
+    ARRIVED.fetch_add(1, SeqCst);
+    while RELEASE.load(Acquire) == 0 {
+        thread::wait_word(&RELEASE, 0, 0);
+    }
+    thread::exit(&DONES[i as usize])
+}
+
+fn m7(mode: u64, limit: u32) -> u64 {
+    MODE.store(mode as u32, Release);
+    let mut held = 0;
+    if mode == 13 {
+        // (fill the table of capabilities: the slots the program was given are taken already)
+        while shm_create(1) >= 0 {
+            held += 1;
+        }
+        if held < 16 {
+            return 90; // (the setup: capabilities to copy)
+        }
+    }
+    let mut started = 0;
+    for i in 0..T_COUNT {
+        let mask = if mode == 13 { u32::MAX & !(1 << 31) } else { 1 << 1 };
+        if thread::create_with_kernel_stack(maker, i as u64, mask, 0) >= 0 {
+            started += 1;
+        } else {
+            DONES[i].store(1, Release);
+        }
+    }
+    if mode != 13 {
+        // this thread makes its share too
+        loop {
+            let ok = if mode == 12 { shm_create(1) >= 0 } else { svc(27, 1, 0, 0, 0, 0)[0] as i64 >= 0 };
+            if !ok {
+                break;
+            }
+            MADE.fetch_add(1, SeqCst);
+        }
+    }
+    // (what a thread made is gone when it ends: count while they all still stand)
+    while ARRIVED.load(Acquire) < started {
+        sleep(1);
+    }
+    let made = MADE.load(SeqCst);
+    RELEASE.store(1, Release);
+    thread::wake_word(&RELEASE, T_COUNT);
+    for d in DONES.iter() {
+        thread::join(d);
+    }
+    let mut bits = 0;
+    if mode == 13 {
+        if started == T_COUNT as u32 {
+            bits |= 1;
+        }
+        if started == 0 {
+            bits |= 2;
+        }
+    } else {
+        if made > limit {
+            bits |= 1;
+        }
+        if made == 0 {
+            bits |= 2;
+        }
+    }
+    bits
+}
+
 program!("racetest", |c| {
     match c.arg & 0xFF {
         8 => {
@@ -340,6 +434,9 @@ program!("racetest", |c| {
             0
         }
         11 => tpidr(),
+        12 => m7(12, 32),
+        13 => m7(13, 0),
+        14 => m7(14, 4),
         4..=6 => m1(c.arg),
         1 => h1(),
         2 => h2(),

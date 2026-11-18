@@ -310,7 +310,7 @@ fn ep_create(cur: usize, slot: u64) -> Out {
     }
     let mut t = task::lock(cur);
     let Some(free) = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None) else { return Out::Ret(E_NOMEM) };
-    let Some(node) = mint_node(None) else { return Out::Ret(E_NOMEM) };
+    let Some(node) = mint_for(task::aspace(cur), None) else { return Out::Ret(E_NOMEM) };
     match ipc::claim_dynamic(cur, node) {
         Some(e) => {
             t.caps[free] = Cap { kind: Kind::Endpoint, obj: e, rights: R_SEND | R_RECV | R_GRANT, node };
@@ -1197,8 +1197,8 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
             };
             let mut t = task::lock(cur);
             let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
-            let node = mint_node(None);
-            let obj = node.and_then(|n| obj::alloc_dynamic(pa, pages, n));
+            let node = crate::cap::mint_for(asp, None);
+            let obj = node.and_then(|n| obj::alloc_dynamic(pa, pages, n, asp));
             match (free_slot, node, obj) {
                 (Some(s), Some(n), Some(o)) => {
                     t.caps[s] = Cap { kind: Kind::Memory, obj: o, rights: R_MAP | R_WRITE | R_INFO, node: n };
@@ -1272,7 +1272,7 @@ fn shm_create(cur: usize, pages: usize) -> Out {
     };
     let mut t = task::lock(cur);
     let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
-    let node = mint_node(None);
+    let node = crate::cap::mint_for(asp, None);
     let object = node.and_then(|n| obj::shm_register(pages, asp, n, list));
     match (free_slot, node, object) {
         (Some(s), Some(n), Some(o)) => {

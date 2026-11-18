@@ -514,6 +514,11 @@ pub fn tests() {
         let o10 = String::from_utf8_lossy(&o10).into_owned();
         let (c11, _, _) = run_with_console3(Req::new().arg(11).heap(64).threads(1), &race, b"");
         println!("[client] TEST a SIMD instruction in a user program ends it ({c10:#x}, survived {}), and TPIDR_EL0 is not shared between tasks (bits {c11:#x}): {}", o10.contains("survived"), verdict(c10 as u64 == EXIT_FAULTED && !o10.contains("survived") && c11 == 0));
+        // M7: a program's share of the global tables (memory objects, capability nodes, endpoints) is limited, however many threads it has
+        let q12 = run_with_console3(Req::new().arg(12).heap(400).threads(7), &race, b"").0;
+        let q13 = run_with_console3(Req::new().arg(13).heap(400).threads(7), &race, b"").0;
+        let q14 = run_with_console3(Req::new().arg(14).heap(200).threads(7).give_masked(1, FACTORY_SLOT as u8, 0xFFFF & !4), &race, b"").0;
+        println!("[client] TEST one program cannot take more than its share of memory objects, capability nodes and endpoints, with threads (failure bits {q12:#x}, {q13:#x}, {q14:#x}): {}", verdict(q12 == 0 && q13 == 0 && q14 == 0));
         // L1: what other tasks hold is shown only to a holder of an Admin capability (the conductor has one)
         let l1 = run_with_console3(Req::new().arg(9).heap(64), &race, b"").0;
         let admin_ok = svc(21, 10, 0, 0, 0, 0)[0] == 0 && svc(21, 11, 0, 0, 0, 0)[0] == 0;

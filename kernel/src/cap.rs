@@ -88,6 +88,8 @@ struct Node {
     parent: NodeId,
     /// The task that created this node with `CAP_GRANT` (`NO_PARENT` if it was not made by a grant, or the granter is gone).
     granter: u8,
+    /// The program (address space) charged for this node when it was made for one (`mint_for`), else `NO_GRANTER`.
+    owner: u8,
 }
 
 /// Most nodes one task may have outstanding through `CAP_GRANT`, and the nodes `CAP_GRANT` may never take: the rest are for
@@ -98,12 +100,32 @@ pub const GRANT_RESERVE: usize = 48;
 /// Mirror of `used`, readable without the lock: every IPC checks its capability is alive.
 static ALIVE: [AtomicBool; NODES] = [const { AtomicBool::new(false) }; NODES];
 
-static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, parent: NO_PARENT, granter: NO_GRANTER }; NODES]);
+static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, parent: NO_PARENT, granter: NO_GRANTER, owner: NO_GRANTER }; NODES]);
 
 pub fn mint_node(parent: Option<NodeId>) -> Option<NodeId> {
     let mut t = NODE_TABLE.lock(R_NODES);
     let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent: parent.unwrap_or(NO_PARENT), granter: NO_GRANTER };
+    t[i] = Node { used: true, parent: parent.unwrap_or(NO_PARENT), granter: NO_GRANTER, owner: NO_GRANTER };
+    ALIVE[i].store(true, Ordering::Release);
+    Some(i as NodeId)
+}
+
+/// Most nodes one program (all its threads together) may hold that it made for itself: its own memory and endpoints, its threads'
+/// copies of capabilities, what it gives the programs it starts. Programs may also never take the last `GRANT_RESERVE` nodes:
+/// those are for restarting a boot service (which cannot fail) and for starting programs.
+pub const PROGRAM_NODE_QUOTA: usize = 192;
+
+/// A node for `owner`, a program's address space (charged to it, and refused over `PROGRAM_NODE_QUOTA` or into the reserve), or
+/// for anything else (a boot-time task: unlimited, as `mint_node`).
+pub fn mint_for(owner: usize, parent: Option<NodeId>) -> Option<NodeId> {
+    let charged = crate::spawn::is_program(owner);
+    let o = owner as u8;
+    let mut t = NODE_TABLE.lock(R_NODES);
+    if charged && (t.iter().filter(|n| n.used && n.owner == o).count() >= PROGRAM_NODE_QUOTA || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE) {
+        return None;
+    }
+    let i = t.iter().position(|n| !n.used)?;
+    t[i] = Node { used: true, parent: parent.unwrap_or(NO_PARENT), granter: NO_GRANTER, owner: if charged { o } else { NO_GRANTER } };
     ALIVE[i].store(true, Ordering::Release);
     Some(i as NodeId)
 }
@@ -117,7 +139,7 @@ pub fn mint_granted(parent: NodeId, granter: usize) -> Option<NodeId> {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent, granter: g };
+    t[i] = Node { used: true, parent, granter: g, owner: NO_GRANTER };
     ALIVE[i].store(true, Ordering::Release);
     Some(i as NodeId)
 }
@@ -215,7 +237,7 @@ pub fn mint_restored(parent: NodeId) -> Option<NodeId> {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent, granter: NO_GRANTER };
+    t[i] = Node { used: true, parent, granter: NO_GRANTER, owner: NO_GRANTER };
     ALIVE[i].store(true, Ordering::Release);
     Some(i as NodeId)
 }

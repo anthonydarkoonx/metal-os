@@ -620,7 +620,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
         t.callee = None;
         t.caps = [Cap::NONE; NCAPS];
         sched::forget_recv_endpoints(tid);
-        let node = mint_node(None).ok_or(E_NOMEM)?;
+        let node = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
         t.caps[crate::syscall::CONSOLE_SLOT] = Cap { kind: Kind::Console, obj: 0, rights: 0, node };
         for (i, g) in give.iter().enumerate() {
             if g.kind == Kind::None {
@@ -629,24 +629,24 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
             if !node_alive(g.node) {
                 return Err(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock: see `cap_grant`)
             }
-            let node = mint_node(Some(g.node)).ok_or(E_NOMEM)?;
+            let node = crate::cap::mint_for(pa, Some(g.node)).ok_or(E_NOMEM)?;
             t.caps[i] = Cap { node, ..*g };
             if g.kind == Kind::Endpoint && g.rights & R_RECV != 0 {
                 sched::note_recv_endpoint(tid, g.obj);
             }
         }
         if net_page.is_some() {
-            let n1 = mint_node(None).ok_or(E_NOMEM)?;
+            let n1 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
             t.caps[NET_EP_SLOT] = Cap { kind: Kind::Endpoint, obj: crate::ipc::EP_NET, rights: R_SEND, node: n1 };
         }
         if let Some(k) = net_page {
-            let n2 = mint_node(None).ok_or(E_NOMEM)?;
+            let n2 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
             t.caps[NET_PAGE_SLOT] = Cap { kind: Kind::Memory, obj: crate::obj::OBJ_SHM_NET_PROG0 + k, rights: R_MAP | R_WRITE, node: n2 };
         }
         if let Some(k) = fs_page {
-            let n1 = mint_node(None).ok_or(E_NOMEM)?;
+            let n1 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
             t.caps[FS_EP_SLOT] = Cap { kind: Kind::Endpoint, obj: crate::ipc::EP_VFS, rights: R_SEND, node: n1 };
-            let n2 = mint_node(None).ok_or(E_NOMEM)?;
+            let n2 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
             t.caps[FS_PAGE_SLOT] = Cap { kind: Kind::Memory, obj: crate::obj::OBJ_SHM_VFS_PROG0 + k, rights: R_MAP | R_WRITE, node: n2 };
         }
         Ok(())
@@ -895,7 +895,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
         t.reply_to = None;
         t.callee = None;
         sched::forget_recv_endpoints(tid);
-        let Some(node) = mint_node(None) else { drop(t); return fail(E_NOMEM) };
+        let Some(node) = crate::cap::mint_for(leader, None) else { drop(t); return fail(E_NOMEM) };
         t.caps[crate::syscall::CONSOLE_SLOT] = Cap { kind: Kind::Console, obj: 0, rights: 0, node };
         for (i, g) in give.iter().enumerate() {
             if g.kind == Kind::None {
@@ -905,7 +905,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
                 drop(t);
                 return fail(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock)
             }
-            let Some(node) = mint_node(Some(g.node)) else { drop(t); return fail(E_NOMEM) };
+            let Some(node) = crate::cap::mint_for(leader, Some(g.node)) else { drop(t); return fail(E_NOMEM) };
             t.caps[i] = Cap { node, ..*g };
             if g.kind == Kind::Endpoint && g.rights & R_RECV != 0 {
                 sched::note_recv_endpoint(tid, g.obj);

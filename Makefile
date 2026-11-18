@@ -141,6 +141,7 @@ qemu-test: kernel disk
 	 grep -q "TEST zero-copy shared memory.*PASS" build.log && \
 	 grep -q "TEST async IPC_SEND.*PASS" build.log && \
 	 grep -q "TEST kernel pages are write-xor-execute.*: PASS; WXN on: PASS; PAN on.*: PASS" build.log && \
+	 grep -q "TEST one program cannot take more than its share.*PASS" build.log && \
 	 grep -q "TEST capability revoke.*PASS" build.log && \
 	 grep -q "TEST capability grants are bounded.*PASS" build.log && \
 	 grep -q "TEST the stack is fully usable.*PASS" build.log && \

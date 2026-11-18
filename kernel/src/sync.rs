@@ -26,6 +26,8 @@ pub const R_COMPACT: u16 = 10;
 pub const R_EP: u16 = 100;
 pub const R_TASK: u16 = 200;
 pub const R_RING: u16 = 270;
+/// Claiming a run-time endpoint (ipc.rs `claim_dynamic`: the quota is counted and the claim made under it). Under a task lock.
+pub const R_EPCLAIM: u16 = 330;
 /// Real-time admission (per-core reserved shares). Taken when a task dies, i.e. under the task locks.
 pub const R_RT: u16 = 336;
 pub const R_NODES: u16 = 340;

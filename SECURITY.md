@@ -18,7 +18,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 | M4 | Medium (fixed) | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
 | M5 | Medium (fixed) | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
 | M6 | Medium | The pager sees and supplies other programs' pages in the clear | The pager program |
-| M7 | Medium | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
+| M7 | Medium (fixed for objects, nodes and endpoints) | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
 | L1–L10 | Low | See below (L1 fixed) | |
 
 **How this was done.** Static review only. Nothing was built, booted or exploited, so every finding is a reading of the code, not a demonstrated attack. Line numbers refer to the commit above.
@@ -154,7 +154,9 @@ A buggy or hostile pager can read any eligible program's swapped pages and repla
 
 **Fix.** Encrypt and authenticate each page in the kernel with a per-boot key before it leaves (AEAD keyed by slot and a counter), and never write back executable pages.
 
-### M7. Global tables have no per-program quotas
+### M7. Global tables have no per-program quotas (fixed for three of the five tables)
+
+**Fixed:** run-time memory objects (32 per program, `obj::PROGRAM_OBJ_QUOTA`), capability nodes (192 per program, `cap::PROGRAM_NODE_QUOTA`, charged to the program that makes them: its own memory and endpoints, its threads' copies, what it gives its children) and run-time endpoints (4 per program instead of per task, counted under a lock so that threads cannot race past it). A "program" is the address space, so threads share one allowance. Programs also cannot take the last 16 object entries, 48 nodes or 4 endpoints (reserves for boot services), so the `expect("capability nodes exhausted")` in `install` can no longer be reached by a program filling the table; boot-time tasks are unlimited, as before. Test: `racetest` modes 12–14 start seven threads that create until refused and count while all of them are alive (a thread's objects go when it ends); `make qemu-test` requires the line "one program cannot take more than its share ..."; the unfixed kernel fails all three (failure bits 1, 1, 1). **Not fixed:** the endpoint queue (one sender can still fill a shared server's 8 slots) and the file and network session tables (8 each, any holder of the spawn right); `install` still panics if boot-time tasks themselves ever run the table out. Several programs together can still exhaust a table (192 nodes each, 1024 in all, less the reserve). Original finding:
 
 Several fixed-size tables are shared by everyone, and one program can use them up:
 
@@ -223,6 +225,6 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 2. M1 and M3: lifetime rules for dynamic objects and the range checks in `mem.rs`.
 3. M2 and L1: decide who may grant to whom, then hide the introspection pages.
 4. ~~M4 and M5~~ (done: FP trapping, kernel page permissions, WXN, PAN).
-5. M7, then the Low items.
+5. M7 (mostly done: queue fairness and sessions remain), then the Low items.
 
 Tests for H1 and H2 now exist (`racetest`, in `make qemu-test`, since threads exist only for programs and `make fuzz` runs a single task). Still worth adding: a driver-role task calling `WAIT_WORD` on its register window (M3).

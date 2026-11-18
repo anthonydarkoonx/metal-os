@@ -62,7 +62,7 @@ task (`CAP_GRANT`) or to a program it starts (the spawn request).
 | 38 | SHM_INFO | memory capability slot (map right) → pages of the shared object it names, plus `1 << 32` if its creator has gone and `1 << 33` if the slot holds the creator's capability and no copy is held any more |
 | 39 | TASK_BASE | embryo's task id → the address its image area starts at: `0x8000_0000`, or a random page in `0x2_0000_0000..0x40_0000_0000` (about 26 bits of choice) if it was spawned with flags bit 3 (position-independent; the loader relocates the image to that base before `TASK_LOAD`) |
 | 37 | SHM_CREATE | pages (1..=4096) → slot of a new memory capability (map, write, grant) for fresh zeroed memory that can be shared with other programs (see Shared memory) |
-| 27 | EP_CREATE | factory capability slot → slot of a new endpoint capability (send+receive+grant); at most 4 per task, 16 in the system |
+| 27 | EP_CREATE | factory capability slot → slot of a new endpoint capability (send+receive+grant); at most 4 per program, 16 in the system |
 
 ## Programs
 The kernel knows no executable format. `SPAWN` makes an embryo, the parent fills the image area (0x8000_0000 up to the
@@ -133,7 +133,7 @@ parent's budget. Allocation past a limit returns `-8` to the program that asked;
 ## Shared memory
 `SHM_CREATE(pages)` makes memory that programs share. It is not a privilege: the pages count against the creator's holding
 limit (like `MC_ALLOC`; `-8` over it) and the capability needs a free slot (`-3` when there is none, or no capability node or
-object-table entry; at most 200 such objects exist in the system). The memory is zeroed and made of single frames, so it never
+object-table entry; at most 192 such objects exist in the system, 32 per program). The memory is zeroed and made of single frames, so it never
 needs a contiguous run, and it is pinned: it never moves or swaps, so every holder sees the same physical pages and
 `WAIT_WORD`/`WAKE_WORD` on its words wake across programs.
 
@@ -155,8 +155,15 @@ check what it maps) with bit 32 set when its creator is gone and bit 33 when `sl
 it is held any more: the creator can tell that its partners are gone.
 
 **Capability slots.** A new capability (`SHM_CREATE`, `CAP_GRANT`, `EP_CREATE`) goes to the first free slot of the table,
-except slot 15, which holds the console. There are 254 capability nodes in the system (a node is one capability and the
+except slot 15, which holds the console. There are 1024 capability nodes in the system (a node is one capability and the
 copies derived from it).
+
+**Per-program limits on shared tables.** A program (its threads together) may hold at most 32 run-time memory objects
+(`SHM_CREATE`, `MC_ALLOC`), at most 192 capability nodes it made for itself (its own memory and endpoints, its threads' copies, what it
+gives the programs it starts), and at most 4 run-time endpoints. Programs also never take the last 16 object-table entries, the last 48
+capability nodes or the last 4 endpoints: those stay for boot-time services. Over a limit the call fails as if the table were full
+(`-3`, `E_FULL` or `E_NOMEM` as before). What a thread creates is its own: it goes when the thread ends, so a program that wants memory or
+endpoints to outlive its threads makes them in the first thread.
 
 ## Threads
 A *thread* is a task that runs in another task's address space. `SPAWN` request `flags` bits 8..11 give a program an

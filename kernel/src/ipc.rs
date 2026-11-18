@@ -12,7 +12,7 @@
 //!    of delivery/queueing, in atomics, so the scheduler never has to look here.
 #![forbid(unsafe_code)]
 use crate::sched::{self, NO_PRIO};
-use crate::sync::{Guard, SpinLock, R_EP};
+use crate::sync::{Guard, SpinLock, R_EP, R_EPCLAIM};
 use crate::task::{self, frame, State};
 use core::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
 use crate::cap::NodeId;
@@ -91,8 +91,10 @@ const NO_OWNER_NODE: NodeId = NodeId::MAX;
 static EP_NODE: [AtomicU16; NEP] = [const { AtomicU16::new(NO_OWNER_NODE) }; NEP];
 /// ... and the task that created it (for its quota).
 static EP_TASK: [AtomicU8; NEP] = [const { AtomicU8::new(NO_OWNER) }; NEP];
-/// Most run-time endpoints one task may own at a time.
+/// Most run-time endpoints one program (all its threads together) may own at a time, and the ones programs may never take.
 pub const MAX_OWNED_EPS: usize = 4;
+const EP_RESERVE: usize = 4;
+static CLAIM: SpinLock<()> = SpinLock::new(());
 
 /// The capability node that is the root of endpoint `e` (the creator's own capability), if it is in use.
 pub fn root_node(e: u8) -> Option<NodeId> {
@@ -112,8 +114,16 @@ pub fn dynamic_owner(e: u8) -> Option<u8> {
 /// Claim a free run-time endpoint for `task`, owned by capability node `node`. None if the task is at its quota or
 /// none is free.
 pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u8> {
-    let owned = (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| EP_NODE[e].load(Ordering::SeqCst) != NO_OWNER_NODE && EP_TASK[e].load(Ordering::SeqCst) == task as u8).count();
-    if owned >= MAX_OWNED_EPS {
+    let _claiming = CLAIM.lock(R_EPCLAIM); // (threads of one program race: the count and the claim are one step)
+    let prog = task::aspace(task);
+    let in_use = |e: usize| EP_NODE[e].load(Ordering::SeqCst) != NO_OWNER_NODE;
+    if crate::spawn::is_program(prog) {
+        let owned = (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| in_use(e) && task::aspace(EP_TASK[e].load(Ordering::SeqCst) as usize) == prog).count();
+        let free = (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| !in_use(e)).count();
+        if owned >= MAX_OWNED_EPS || free <= EP_RESERVE {
+            return None;
+        }
+    } else if (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| in_use(e) && EP_TASK[e].load(Ordering::SeqCst) == task as u8).count() >= MAX_OWNED_EPS {
         return None;
     }
     for e in EP_FIRST_DYNAMIC as usize..NEP {

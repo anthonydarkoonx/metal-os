@@ -280,7 +280,7 @@ pub fn members(leader: usize) -> impl Iterator<Item = usize> {
 
 fn install(t: &mut Task, tid: usize, slot: usize, kind: Kind, obj: u8, rights: Rights) {
     let node = mint_node(None).expect("capability nodes exhausted");
-    t.caps[slot] = Cap { kind, obj, rights, node };
+    t.caps[slot] = Cap::new(kind, obj, rights, node);
     if kind == Kind::Endpoint && rights & R_RECV != 0 {
         sched::note_recv_endpoint(tid, obj);
     }
@@ -635,7 +635,7 @@ impl World {
         let mut ids = [0u8; 16];
         for k in 0..obj::shm_orphans(&mut ids) {
             let id = ids[k];
-            let held = self.tasks.iter().any(|t| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && node_alive(c.node)));
+            let held = self.tasks.iter().any(|t| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()));
             if !held {
                 obj::shm_destroy(id);
             }
@@ -647,7 +647,7 @@ impl World {
     fn reset(&mut self, tid: usize) {
         for slot in 0..NCAPS {
             let c = self.tasks[tid].caps[slot];
-            if c.kind != Kind::None && node_alive(c.node) {
+            if c.kind != Kind::None && c.alive() {
                 // memory from MC_ALLOC is private to its task (the capability has no GRANT right): its frames go
                 // below with the rest, but the object-table entry would stay taken for ever (found by the fuzzer)
                 if c.kind == Kind::Memory && obj::is_dynamic(c.obj) {
@@ -673,7 +673,7 @@ impl World {
                         _ => obj::release(c.obj),
                     }
                 }
-                if node_alive(c.node) {
+                if c.alive() {
                     self.revoke_subtree(c.node, true);
                 }
             }

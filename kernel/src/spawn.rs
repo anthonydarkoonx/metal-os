@@ -24,7 +24,7 @@ use crate::sched;
 use crate::sync::{SpinLock, R_SPAWNING};
 use crate::task::{self, frame, lock, MapRec, State, World, FIRST_DYNAMIC_TASK, MAX_TASKS, IMAGE_END, STACK_PAGES, USER_BASE};
 use crate::trap::TrapFrame;
-use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use metal_sched::Class;
 
 pub const ROLE_PROGRAM: u8 = 32;
@@ -54,6 +54,11 @@ pub const E_FULL: i64 = crate::syscall::E_FULL;
 pub const E_NOMEM: i64 = crate::syscall::E_NOMEM;
 pub const E_PERM: i64 = crate::syscall::E_PERM;
 pub const E_AGAIN: i64 = -10;
+
+/// Counts up each time the slot is made into a new program (`spawn`, before it becomes an embryo). `task_load` runs for a long time and
+/// lets go of the child's lock between pages; it remembers the epoch it started in, so that a child that was killed, collected and
+/// replaced by another embryo of the same parent is not mistaken for the one it was loading.
+static EPOCH: [AtomicU32; MAX_TASKS] = [const { AtomicU32::new(0) }; MAX_TASKS];
 
 static PARENT: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(NO_PARENT) }; MAX_TASKS];
 static EXIT_CODE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(EXIT_FAULTED) }; MAX_TASKS];
@@ -485,7 +490,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
             }
             let mask = u16::from_le_bytes([rq[66 + 4 * i], rq[67 + 4 * i]]);
             let c = *t.caps.get(slot as usize).ok_or(crate::syscall::E_BADCAP)?;
-            if c.kind == Kind::None || !node_alive(c.node) || slot as usize == crate::syscall::CONSOLE_SLOT {
+            if c.kind == Kind::None || !c.alive() || slot as usize == crate::syscall::CONSOLE_SLOT {
                 return Err(crate::syscall::E_BADCAP);
             }
             if c.rights & R_GRANT == 0 {
@@ -556,6 +561,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     let mut name = [0u8; 8];
     name.copy_from_slice(if rq[56..64].iter().any(|&b| b != 0) { &rq[56..64] } else { b"program\0" });
     task::set_dynamic_info(tid, ROLE_PROGRAM, &name, class, heap, budget);
+    EPOCH[tid].fetch_add(1, Ordering::SeqCst);
     PARENT[tid].store(pa as u8, Ordering::SeqCst);
     CHARGE[tid].store(cost, Ordering::SeqCst);
     DELEGATED[tid].store(0, Ordering::SeqCst);
@@ -635,34 +641,36 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
         t.callee = None;
         t.caps = [Cap::NONE; NCAPS];
         sched::forget_recv_endpoints(tid);
+        // What was handed over must still be what it was when it was read, before anything is made: a node number freed by a revoke is handed out again
+        // at once (to the console node below, or to another program), so "is it alive" alone is not enough; `mint_for` checks the generation too.
+        if give.iter().any(|g| g.kind != Kind::None && !g.alive()) {
+            return Err(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock: see `cap_grant`)
+        }
         let node = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-        t.caps[crate::syscall::CONSOLE_SLOT] = Cap { kind: Kind::Console, obj: 0, rights: 0, node };
+        t.caps[crate::syscall::CONSOLE_SLOT] = Cap::new(Kind::Console, 0, 0, node);
         for (i, g) in give.iter().enumerate() {
             if g.kind == Kind::None {
                 continue;
             }
-            if !node_alive(g.node) {
-                return Err(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock: see `cap_grant`)
-            }
-            let node = crate::cap::mint_for(pa, Some(g.node)).ok_or(E_NOMEM)?;
-            t.caps[i] = Cap { node, ..*g };
+            let node = crate::cap::mint_for(pa, Some(g.parent_ref())).ok_or(if g.alive() { E_NOMEM } else { crate::syscall::E_BADCAP })?;
+            t.caps[i] = g.under(g.rights, node);
             if g.kind == Kind::Endpoint && g.rights & R_RECV != 0 {
                 sched::note_recv_endpoint(tid, g.obj);
             }
         }
         if net_page.is_some() {
             let n1 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-            t.caps[NET_EP_SLOT] = Cap { kind: Kind::Endpoint, obj: crate::ipc::EP_NET, rights: R_SEND, node: n1 };
+            t.caps[NET_EP_SLOT] = Cap::new(Kind::Endpoint, crate::ipc::EP_NET, R_SEND, n1);
         }
         if let Some(k) = net_page {
             let n2 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-            t.caps[NET_PAGE_SLOT] = Cap { kind: Kind::Memory, obj: crate::obj::OBJ_SHM_NET_PROG0 + k, rights: R_MAP | R_WRITE, node: n2 };
+            t.caps[NET_PAGE_SLOT] = Cap::new(Kind::Memory, crate::obj::OBJ_SHM_NET_PROG0 + k, R_MAP | R_WRITE, n2);
         }
         if let Some(k) = fs_page {
             let n1 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-            t.caps[FS_EP_SLOT] = Cap { kind: Kind::Endpoint, obj: crate::ipc::EP_VFS, rights: R_SEND, node: n1 };
+            t.caps[FS_EP_SLOT] = Cap::new(Kind::Endpoint, crate::ipc::EP_VFS, R_SEND, n1);
             let n2 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-            t.caps[FS_PAGE_SLOT] = Cap { kind: Kind::Memory, obj: crate::obj::OBJ_SHM_VFS_PROG0 + k, rights: R_MAP | R_WRITE, node: n2 };
+            t.caps[FS_PAGE_SLOT] = Cap::new(Kind::Memory, crate::obj::OBJ_SHM_VFS_PROG0 + k, R_MAP | R_WRITE, n2);
         }
         Ok(())
     })();
@@ -687,9 +695,16 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
 /// caller's memory, with permission `perm`. Request (24 bytes): `va` u64, `src_va` u64, `pages` u32, `perm` u32
 /// (0 read+execute, 1 read+write, 2 read-only). A page can be loaded once, and never both writable and executable.
 pub fn task_load(parent: usize, child: usize, req_va: usize) -> Result<(), i64> {
-    if !embryo_of(parent, child) {
-        return Err(E_INVAL);
-    }
+    // The embryo, its page-table root and its epoch, read together under its lock. A kill of the embryo takes every task lock when it frees
+    // the address space, and an embryo is only ever freed after it has been made runnable and killed (so it is not an embryo any more),
+    // so while the lock is held and `embryo_of` is true, the tables are intact; see the loop below.
+    let (epoch, l1) = {
+        let t = lock(child.min(MAX_TASKS - 1));
+        if !embryo_of(parent, child) {
+            return Err(E_INVAL);
+        }
+        (EPOCH[child].load(Ordering::SeqCst), t.l1)
+    };
     let mut rq = [0u8; 24];
     if !copy_from_user(parent, req_va, &mut rq) {
         return Err(E_INVAL);
@@ -720,14 +735,19 @@ pub fn task_load(parent: usize, child: usize, req_va: usize) -> Result<(), i64> 
         uncharge(pa, pages);
         return Err(E_INVAL);
     }
-    let (own, l1) = (task::owner(child), lock(child).l1);
+    let own = task::owner(child);
     let mut page = [0u8; PAGE];
     for i in 0..pages {
         if !copy_from_user(parent, src_va.checked_add(i * PAGE).ok_or(E_INVAL)?, &mut page) {
             return Err(E_INVAL);
         }
         let pva = va + i * PAGE;
-        let _t = lock(child); // the compactor must not see the frame between its allocation and its mapping
+        let t = lock(child); // the compactor must not see the frame between its allocation and its mapping
+        // The child may have been killed (by a thread of the parent, or by the parent's death) since the last page: its tables are then freed, and
+        // may be somebody else's. It may even have been collected and its slot made into a new embryo of this parent. Either way this load is over.
+        if EPOCH[child].load(Ordering::SeqCst) != epoch || !embryo_of(parent, child) || t.l1 != l1 {
+            return Err(E_INVAL);
+        }
         let pa = mem::alloc_movable(own, child, pva).ok_or(E_NOMEM)?;
         crate::frame::phys::copy_to(pa, &page[..PAGE]);
         mmu::map_user(l1, pva, pa, perm_map, own).map_err(|_| E_NOMEM)?;
@@ -876,7 +896,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
         for slot in 0..NCAPS {
             let c = t.caps[slot];
             // (an empty slot in the mask is skipped, so "everything I hold" is a valid mask)
-            if slot != crate::syscall::CONSOLE_SLOT && mask & (1 << slot) != 0 && c.kind != Kind::None && node_alive(c.node) {
+            if slot != crate::syscall::CONSOLE_SLOT && mask & (1 << slot) != 0 && c.kind != Kind::None && c.alive() {
                 give[slot] = c;
             }
         }
@@ -910,18 +930,22 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
         t.reply_to = None;
         t.callee = None;
         sched::forget_recv_endpoints(tid);
+        // (everything handed over is checked before the first node is made: see `spawn`)
+        if give.iter().any(|g| g.kind != Kind::None && !g.alive()) {
+            drop(t);
+            return fail(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock)
+        }
         let Some(node) = crate::cap::mint_for(leader, None) else { drop(t); return fail(E_NOMEM) };
-        t.caps[crate::syscall::CONSOLE_SLOT] = Cap { kind: Kind::Console, obj: 0, rights: 0, node };
+        t.caps[crate::syscall::CONSOLE_SLOT] = Cap::new(Kind::Console, 0, 0, node);
         for (i, g) in give.iter().enumerate() {
             if g.kind == Kind::None {
                 continue;
             }
-            if !node_alive(g.node) {
+            let Some(node) = crate::cap::mint_for(leader, Some(g.parent_ref())) else {
                 drop(t);
-                return fail(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock)
-            }
-            let Some(node) = crate::cap::mint_for(leader, Some(g.node)) else { drop(t); return fail(E_NOMEM) };
-            t.caps[i] = Cap { node, ..*g };
+                return fail(if g.alive() { E_NOMEM } else { crate::syscall::E_BADCAP });
+            };
+            t.caps[i] = g.under(g.rights, node);
             if g.kind == Kind::Endpoint && g.rights & R_RECV != 0 {
                 sched::note_recv_endpoint(tid, g.obj);
             }

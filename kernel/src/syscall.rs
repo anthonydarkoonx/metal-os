@@ -122,7 +122,7 @@ pub enum Out {
 /// still win the race, like any revoke that lands just after a successful check.)
 pub fn lookup(tid: usize, slot: u64, kind: Kind, need: Rights) -> Result<Cap, i64> {
     let c = *task::lock(tid).caps.get(slot as usize).ok_or(E_BADCAP)?;
-    if c.kind != kind || !node_alive(c.node) {
+    if c.kind != kind || !c.alive() {
         return Err(E_BADCAP);
     }
     if c.rights & need != need {
@@ -133,7 +133,7 @@ pub fn lookup(tid: usize, slot: u64, kind: Kind, need: Rights) -> Result<Cap, i6
 
 fn lookup_any(tid: usize, slot: u64) -> Result<Cap, i64> {
     let c = *task::lock(tid).caps.get(slot as usize).ok_or(E_BADCAP)?;
-    if c.kind == Kind::None || !node_alive(c.node) {
+    if c.kind == Kind::None || !c.alive() {
         return Err(E_BADCAP);
     }
     Ok(c)
@@ -310,10 +310,11 @@ fn ep_create(cur: usize, slot: u64) -> Out {
     }
     let mut t = task::lock(cur);
     let Some(free) = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None) else { return Out::Ret(E_NOMEM) };
-    let Some(node) = mint_for(task::aspace(cur), None) else { return Out::Ret(E_NOMEM) };
+    let Some(minted) = mint_for(task::aspace(cur), None) else { return Out::Ret(E_NOMEM) };
+    let node = minted.id;
     match ipc::claim_dynamic(cur, node) {
         Some(e) => {
-            t.caps[free] = Cap { kind: Kind::Endpoint, obj: e, rights: R_SEND | R_RECV | R_GRANT, node };
+            t.caps[free] = Cap::new(Kind::Endpoint, e, R_SEND | R_RECV | R_GRANT, minted);
             sched::note_recv_endpoint(cur, e);
             Out::Ret(free as i64)
         }
@@ -418,7 +419,7 @@ fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
     // A revoke frees nodes while holding every task lock, so a node that is alive here stays alive until this lock
     // is released: the mapping below is recorded under it and the revoke will find and remove it. Without this
     // check a revoke landing after `lookup` would leave a mapping of freed memory behind.
-    if !node_alive(c.node) {
+    if !c.alive() {
         return Out::Ret(E_BADCAP);
     }
     let va = if auto {
@@ -530,7 +531,7 @@ fn obj_name(o: u8) -> &'static str {
 /// the log of revoked capabilities). That is the task manager's business, so they need an `Admin` capability; without one a
 /// program could read, among other things, which slots of another program are free (SECURITY.md, L1).
 fn sysinfo_needs_admin(cur: usize, page: u64) -> bool {
-    matches!(page, 10 | 11 | 13 | 14) && !task::lock(cur).caps.iter().any(|c| c.kind == Kind::Admin && node_alive(c.node))
+    matches!(page, 10 | 11 | 13 | 14) && !task::lock(cur).caps.iter().any(|c| c.kind == Kind::Admin && c.alive())
 }
 
 fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
@@ -670,7 +671,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                 return Out::Ret(E_INVAL);
             }
             let mut c = task::lock(t).caps[slot];
-            if !node_alive(c.node) {
+            if !c.alive() {
                 c = Cap::NONE; // (revoked: as good as empty)
             }
             f.x[1] = c.kind as u8 as u64;
@@ -703,7 +704,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                 return Out::Ret(E_INVAL);
             }
             let c = task::lock(t).caps[slot];
-            if c.kind == Kind::None || !node_alive(c.node) {
+            if c.kind == Kind::None || !c.alive() {
                 return Out::Ret(E_BADCAP);
             }
             let mut marked = [false; crate::cap::NODES];
@@ -946,7 +947,7 @@ fn revoke_of(cur: usize, admin: u64, target: u64, slot: u64) -> Out {
         return Out::Ret(E_INVAL);
     }
     let c = task::lock(t).caps[slot as usize];
-    if c.kind == Kind::None || !node_alive(c.node) {
+    if c.kind == Kind::None || !c.alive() {
         return Out::Ret(E_BADCAP);
     }
     let root = is_creator_root(t, slot as usize, &c);
@@ -1020,7 +1021,7 @@ fn restore_of(cur: usize, admin: u64, target: u64, id: u64) -> Out {
     }
     let node = if root { crate::cap::mint_node(None) } else { crate::cap::mint_restored(r.parent) };
     let Some(node) = node else { return Out::Ret(E_NOMEM) };
-    let cap = Cap { kind: r.kind, obj: r.obj, rights: r.rights, node };
+    let cap = Cap::new(r.kind, r.obj, r.rights, node);
     tl.caps[slot] = cap;
     drop(tl);
     // a memory capability that was mapped is mapped again where it was
@@ -1198,10 +1199,10 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
             let mut t = task::lock(cur);
             let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
             let node = crate::cap::mint_for(asp, None);
-            let obj = node.and_then(|n| obj::alloc_dynamic(pa, pages, n, asp));
+            let obj = node.and_then(|n| obj::alloc_dynamic(pa, pages, n.id, asp));
             match (free_slot, node, obj) {
                 (Some(s), Some(n), Some(o)) => {
-                    t.caps[s] = Cap { kind: Kind::Memory, obj: o, rights: R_MAP | R_WRITE | R_INFO, node: n };
+                    t.caps[s] = Cap::new(Kind::Memory, o, R_MAP | R_WRITE | R_INFO, n);
                     Out::Ret(s as i64)
                 }
                 (_, n, o) => {
@@ -1211,7 +1212,7 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
                         mem::free(pa + i * mem::PAGE);
                     }
                     if let Some(n) = n {
-                        free_node(n);
+                        free_node(n.id);
                     }
                     if let Some(o) = o {
                         obj::release(o);
@@ -1273,10 +1274,10 @@ fn shm_create(cur: usize, pages: usize) -> Out {
     let mut t = task::lock(cur);
     let free_slot = (0..NCAPS).find(|&i| i != CONSOLE_SLOT && t.caps[i].kind == Kind::None);
     let node = crate::cap::mint_for(asp, None);
-    let object = node.and_then(|n| obj::shm_register(pages, asp, n, list));
+    let object = node.and_then(|n| obj::shm_register(pages, asp, n.id, list));
     match (free_slot, node, object) {
         (Some(s), Some(n), Some(o)) => {
-            t.caps[s] = Cap { kind: Kind::Memory, obj: o, rights: R_MAP | R_WRITE | R_GRANT, node: n };
+            t.caps[s] = Cap::new(Kind::Memory, o, R_MAP | R_WRITE | R_GRANT, n);
             Out::Ret(s as i64)
         }
         (_, n, o) => {
@@ -1284,7 +1285,7 @@ fn shm_create(cur: usize, pages: usize) -> Out {
             crate::spawn::release_contig(asp, pages);
             obj::shm_release_frames(list, pages, pages);
             if let Some(n) = n {
-                free_node(n);
+                free_node(n.id);
             }
             if let Some(o) = o {
                 obj::release(o);
@@ -1360,7 +1361,7 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
         }
     }
     let mut t = task::lock(target); // only the target's table changes (the source is just read above)
-    if !node_alive(c.node) {
+    if !c.alive() {
         return Out::Ret(E_BADCAP); // revoked since the lookup (a revoke frees nodes with every task lock held): no copy may outlive it
     }
     let dst = if dest == 0 {
@@ -1382,10 +1383,11 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
         }
         want
     };
-    let Some(node) = crate::cap::mint_granted(c.node, cur) else { return Out::Ret(E_NOMEM) };
+    // (the source is checked again inside `mint_granted`, under the node-table lock that makes the copy: node and generation)
+    let Some(node) = crate::cap::mint_granted(c.parent_ref(), cur) else { return Out::Ret(if c.alive() { E_NOMEM } else { E_BADCAP }) };
     // rights can only shrink; GRANT is not passed on unless explicitly masked in
     let rights = c.rights & mask;
-    t.caps[dst] = Cap { rights, node, ..c };
+    t.caps[dst] = c.under(rights, node);
     if c.kind == Kind::Endpoint && rights & R_RECV != 0 {
         sched::note_recv_endpoint(target, c.obj);
     }

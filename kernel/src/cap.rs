@@ -2,7 +2,7 @@
 //! revoking a capability atomically kills everything derived from it.
 #![forbid(unsafe_code)]
 use crate::sync::{SpinLock, R_NODES};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 pub const NCAPS: usize = 32;
 /// A capability node's number; `NO_PARENT` (the largest value) means "no parent". (Widened from `u8` on the ROCK 3C, whose boot-time services and drivers
@@ -72,10 +72,40 @@ pub struct Cap {
     pub obj: u8,
     pub rights: Rights,
     pub node: NodeId,
+    /// The generation of `node` this capability was made under. A node number is reused as soon as it is freed, so a copy of a
+    /// capability that was revoked (and whose number was handed out again) must not look alive: `alive` compares both.
+    pub gen: u32,
 }
 
 impl Cap {
-    pub const NONE: Cap = Cap { kind: Kind::None, obj: 0, rights: 0, node: 0 };
+    pub const NONE: Cap = Cap { kind: Kind::None, obj: 0, rights: 0, node: 0, gen: 0 };
+
+    /// This capability's node is still the one it was made under (not revoked, and not revoked and reused).
+    pub fn alive(&self) -> bool {
+        node_is(self.node, self.gen)
+    }
+
+    /// A capability of `kind` on object `obj`, hanging under the node `n` that was just made.
+    pub fn new(kind: Kind, obj: u8, rights: Rights, n: Minted) -> Cap {
+        Cap { kind, obj, rights, node: n.id, gen: n.gen }
+    }
+
+    /// The same capability under a new node (a copy), with `rights`.
+    pub fn under(&self, rights: Rights, n: Minted) -> Cap {
+        Cap { rights, node: n.id, gen: n.gen, ..*self }
+    }
+
+    /// The identity of this capability's node, to give as the parent of a new one.
+    pub fn parent_ref(&self) -> (NodeId, u32) {
+        (self.node, self.gen)
+    }
+}
+
+/// A node that was just made: its number and generation.
+#[derive(Clone, Copy)]
+pub struct Minted {
+    pub id: NodeId,
+    pub gen: u32,
 }
 
 pub const NO_PARENT: NodeId = NodeId::MAX;
@@ -90,6 +120,8 @@ struct Node {
     granter: u8,
     /// The program (address space) charged for this node when it was made for one (`mint_for`), else `NO_GRANTER`.
     owner: u8,
+    /// Counts up each time this number is handed out (0 is never alive), and is kept while the number is free.
+    gen: u32,
 }
 
 /// Most nodes one task may have outstanding through `CAP_GRANT`, and the nodes `CAP_GRANT` may never take: the rest are for
@@ -99,15 +131,32 @@ pub const GRANT_RESERVE: usize = 48;
 
 /// Mirror of `used`, readable without the lock: every IPC checks its capability is alive.
 static ALIVE: [AtomicBool; NODES] = [const { AtomicBool::new(false) }; NODES];
+/// Mirror of `Node::gen` for the same reason. Stored before `ALIVE` goes true, so a reader that sees a node alive sees at least the generation it was made with.
+static GEN: [AtomicU32; NODES] = [const { AtomicU32::new(0) }; NODES];
 
-static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, parent: NO_PARENT, granter: NO_GRANTER, owner: NO_GRANTER }; NODES]);
+static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, parent: NO_PARENT, granter: NO_GRANTER, owner: NO_GRANTER, gen: 0 }; NODES]);
 
-pub fn mint_node(parent: Option<NodeId>) -> Option<NodeId> {
-    let mut t = NODE_TABLE.lock(R_NODES);
-    let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent: parent.unwrap_or(NO_PARENT), granter: NO_GRANTER, owner: NO_GRANTER };
+/// Take node `i` (free, found under the table lock `t`) as a new node and publish it.
+fn take(t: &mut [Node; NODES], i: usize, parent: NodeId, granter: u8, owner: u8) -> Minted {
+    let gen = t[i].gen.wrapping_add(1).max(1);
+    t[i] = Node { used: true, parent, granter, owner, gen };
+    GEN[i].store(gen, Ordering::Release);
     ALIVE[i].store(true, Ordering::Release);
-    Some(i as NodeId)
+    Minted { id: i as NodeId, gen }
+}
+
+/// Is `p` (a node and the generation it was read under) still that node? Called under the table lock, with the minting that depends on it.
+fn parent_ok(t: &[Node; NODES], p: (NodeId, u32)) -> bool {
+    t.get(p.0 as usize).is_some_and(|n| n.used && n.gen == p.1)
+}
+
+pub fn mint_node(parent: Option<(NodeId, u32)>) -> Option<Minted> {
+    let mut t = NODE_TABLE.lock(R_NODES);
+    if parent.is_some_and(|p| !parent_ok(&t, p)) {
+        return None;
+    }
+    let i = t.iter().position(|n| !n.used)?;
+    Some(take(&mut t, i, parent.map_or(NO_PARENT, |p| p.0), NO_GRANTER, NO_GRANTER))
 }
 
 /// Most nodes one program (all its threads together) may hold that it made for itself: its own memory and endpoints, its threads'
@@ -117,31 +166,35 @@ pub const PROGRAM_NODE_QUOTA: usize = 192;
 
 /// A node for `owner`, a program's address space (charged to it, and refused over `PROGRAM_NODE_QUOTA` or into the reserve), or
 /// for anything else (a boot-time task: unlimited, as `mint_node`).
-pub fn mint_for(owner: usize, parent: Option<NodeId>) -> Option<NodeId> {
+pub fn mint_for(owner: usize, parent: Option<(NodeId, u32)>) -> Option<Minted> {
     let charged = crate::spawn::is_program(owner);
     let o = owner as u8;
     let mut t = NODE_TABLE.lock(R_NODES);
+    // (the parent is checked here, under the table lock that makes the node: a parent that was revoked since the caller read it, and whose number
+    // has been handed out again, is refused, whatever else happened in between)
+    if parent.is_some_and(|p| !parent_ok(&t, p)) {
+        return None;
+    }
     if charged && (t.iter().filter(|n| n.used && n.owner == o).count() >= PROGRAM_NODE_QUOTA || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE) {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent: parent.unwrap_or(NO_PARENT), granter: NO_GRANTER, owner: if charged { o } else { NO_GRANTER } };
-    ALIVE[i].store(true, Ordering::Release);
-    Some(i as NodeId)
+    Some(take(&mut t, i, parent.map_or(NO_PARENT, |p| p.0), NO_GRANTER, if charged { o } else { NO_GRANTER }))
 }
 
 /// A node made by `CAP_GRANT` from task `granter`: refused when the task already has `GRANT_QUOTA` outstanding, or when
 /// fewer than `GRANT_RESERVE` nodes would be left for everyone else.
-pub fn mint_granted(parent: NodeId, granter: usize) -> Option<NodeId> {
+pub fn mint_granted(parent: (NodeId, u32), granter: usize) -> Option<Minted> {
     let mut t = NODE_TABLE.lock(R_NODES);
     let g = granter as u8;
+    if !parent_ok(&t, parent) {
+        return None;
+    }
     if t.iter().filter(|n| n.used && n.granter == g).count() >= GRANT_QUOTA || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent, granter: g, owner: NO_GRANTER };
-    ALIVE[i].store(true, Ordering::Release);
-    Some(i as NodeId)
+    Some(take(&mut t, i, parent.0, g, NO_GRANTER))
 }
 
 /// The node `n` hangs under, if it is in use and has one.
@@ -231,15 +284,13 @@ pub fn forget_revoked(tid: usize) {
 
 /// A node for a capability given back by `RESTORE_OF`: a child of `parent`, not counted against anyone's grant quota (the restorer is the trusted
 /// administrator, and each give-back replaces a node a revoke freed), but never taking the nodes kept in reserve for restarting a service.
-pub fn mint_restored(parent: NodeId) -> Option<NodeId> {
+pub fn mint_restored(parent: NodeId) -> Option<Minted> {
     let mut t = NODE_TABLE.lock(R_NODES);
     if t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    t[i] = Node { used: true, parent, granter: NO_GRANTER, owner: NO_GRANTER };
-    ALIVE[i].store(true, Ordering::Release);
-    Some(i as NodeId)
+    Some(take(&mut t, i, parent, NO_GRANTER, NO_GRANTER))
 }
 
 /// A task is gone: what it granted stays with the receivers, but no longer counts against the task id's next owner.
@@ -264,6 +315,11 @@ pub fn detach_children(root: NodeId) {
 
 pub fn node_alive(n: NodeId) -> bool {
     ALIVE[n as usize].load(Ordering::Acquire)
+}
+
+/// Is node `n` alive and still the generation `gen`? (A node revoked and made again under the same number is not.)
+pub fn node_is(n: NodeId, gen: u32) -> bool {
+    node_alive(n) && GEN[n as usize].load(Ordering::Acquire) == gen
 }
 
 pub fn free_node(n: NodeId) {

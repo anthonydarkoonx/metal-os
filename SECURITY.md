@@ -2,7 +2,7 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings (N1 to N11) are all open, and N1 reopens the H1 race. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings N3 to N11 are open; N1 and N2 (the two High ones) are fixed and removed. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
@@ -25,7 +25,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 ## Low
 
-**L2. `RESTORE_OF` can resurrect revoked authority.** The log stores the parent's node id and only checks that the id is alive (`syscall.rs:986`). If the granter revoked or died and the id was reused, the capability comes back under an unrelated node. Needs the admin to act; fixed by node generations (see N1).
+**L2. `RESTORE_OF` can resurrect revoked authority.** The log stores the parent's node id and only checks that the id is alive (`syscall.rs:986`). If the granter revoked or died and the id was reused, the capability comes back under an unrelated node. Needs the admin to act; fixed by node generations, which now exist for capabilities but not yet for the log's parent id (`Revoked.parent`): store the generation there too.
 
 **L3. Holding-limit check is not atomic.** `SHM_CREATE` and `MC_ALLOC` read `held_pages()` under a lock that is dropped before `reserve_contig` runs (`syscall.rs:1180`, `:1246`–`1247`), and `reserve_contig` itself loads, checks, then adds (`spawn.rs:134`–`140`). Threads racing each other can exceed the quota. Hold the lock across the call, or use a compare-exchange loop.
 
@@ -70,7 +70,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 # Second audit (2026-11-18, commit `986fe66`)
 
-Auditor: Claude (code review). **Status:** everything in this section is open.
+Auditor: Claude (code review). **Status:** N1 and N2 are fixed and removed; everything else in this section is open.
 
 **How this was done.** Static review only, like the first audit: nothing was built, booted or exploited, so every finding is a reading of the code. The findings that depend on timing between cores are unproven until a test hits them. Line numbers refer to `986fe66`.
 
@@ -80,58 +80,12 @@ Auditor: Claude (code review). **Status:** everything in this section is open.
 
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
-| N1 | High | A revoked capability comes back to life in `SPAWN` and `THREAD_CREATE` (reopens the earlier H1 race, fixed in `8ab56dc`) | A program with 2 threads, or 1 thread and `spawn`; SMP only |
-| N2 | High | `TASK_LOAD` keeps writing the page tables of an embryo that was killed | A program with `spawn` and 1 thread; SMP only |
 | N3 | Medium | Shared memory orphaned by a thread's exit is charged to nobody | A program with 1 thread |
 | N4 | Medium | A thread created after the program's first task died gets page-table root 0: kernel panic | A program with 2 threads; SMP only |
 | N5 | Medium | File and network session pages go to the next program uncleared | Any program with `files` or `network` |
 | N6 | Medium | `SPAWN` racing the first task's exit leaves an embryo nobody owns | A program with `spawn` and 1 thread; SMP only |
 | N7 | Low to Medium | Dead task slots keep their old page-table root | Mostly needs out-of-memory, a hostile pager or the admin |
 | N8–N11 | Low | See below | |
-
-## High
-
-### N1. A revoked capability comes back to life in `SPAWN` and `THREAD_CREATE`
-
-The earlier fix for the revocation race (`8ab56dc`) rechecks `node_alive` under a task lock. That is only sound if a node number that was alive at the first look and is alive at the recheck is the same node. It need not be: `mint_for` hands out the lowest free number (`kernel/src/cap.rs:127`) and nodes have no generation (the generation counter that fix left undone).
-
-`SPAWN` and `THREAD_CREATE` make it easy, because they mint a node themselves between the first look and the recheck:
-
-- `spawn` reads the capabilities to hand over (`kernel/src/spawn.rs:478`–`496`), builds the child, mints the child's console node (`:638`) and only then rechecks (`:644`).
-- `thread_create` does the same (`:873`–`883`, `:913`, `:919`).
-
-The attack:
-
-1. The first task creates shared memory and starts a thread with a copy of the capability. It arranges, by creating and revoking two throw-away objects first, that the copy's node number is lower than the root's.
-2. The thread passes its copy to `SPAWN` (or to `THREAD_CREATE`).
-3. The first task revokes the object with `CAP_REVOKE` flag 1 while the thread is in that call. The revoke holds every task lock, so the thread waits for it at its next `lock(tid)`; the timing is forced by the locks, not by luck. In `spawn` the gap is the whole body of the call.
-4. The revoke frees the root's node and the copy's node, and the object. The thread continues, mints the console node, and gets the copy's old number (the lowest free one). The recheck passes.
-5. The new program (or thread) holds a memory capability with the map and write rights for an object number that no longer exists, under a live node.
-
-Object numbers are reused too, first free first (`kernel/src/obj.rs:153`, `:243`). So the forged capability names whatever memory object is created next in that entry, the attacker's or another program's, and `MEM_MAP` maps it writable.
-
-It gets worse on the way out. The mapping is recorded under the forged capability's node (`kernel/src/syscall.rs:451`), which is not in the new object's tree. When the object's creator revokes it, `revoke_subtree` removes only mappings recorded under marked nodes (`kernel/src/task.rs:610`–`620`), `shm_destroy` frees the frames, and the mapping stays. The attacker does not need a victim: it creates the object itself, maps it through the forged capability, and revokes it. It then has a writable view of freed frames at the bottom of RAM, which is where the next page table is allocated from. That is the worst case of the original race: a writable mapping of freed physical memory.
-
-`CAP_GRANT` and `MEM_MAP` have the same weakness in principle (a third party must re-mint the number in a much shorter gap).
-
-**Fix.**
-- Give nodes a generation and store it in `Cap`, `MapRec` and the revoke log; `node_alive` compares it. This also closes L2.
-- Give object-table entries a generation too, or never reuse an entry while any capability names it.
-- In `spawn` and `thread_create`, recheck the source nodes before minting anything.
-
-### N2. `TASK_LOAD` keeps writing the page tables of an embryo that was killed
-
-`task_load` checks that the child is an embryo once, at the start (`kernel/src/spawn.rs:690`), reads its page-table root once (`:723`), and then loads up to 2048 pages in a loop (`:725`–`739`). Each iteration takes the child's lock but checks nothing.
-
-A second thread of the parent calls `KILL` on the embryo during the loop. The embryo is made runnable, the next core kills it (`kernel/src/sched.rs:1497`), and `reclaim_space` frees every frame it owned, page tables included (`kernel/src/task.rs:704`). The loop goes on calling `map_user` with the freed root:
-
-- If the freed tables have not been reused, the writes land in free frames and the newly allocated pages leak.
-- If a freed table frame has been reused, the kernel writes a table pointer or a page descriptor into someone else's frame: another program's page table, a shared-memory frame list, an SMMU table.
-- If the attacker's own shared memory reuses the old root (shared-memory frames come from the same low region), the kernel reads attacker-written entries as page tables. `table()` only checks that a pointer is a RAM frame, so the attacker steers the write to a frame of its choice; it also reads back the physical addresses the kernel writes.
-
-The window is the whole loop, and the attacker controls both sides.
-
-**Fix.** Under `lock(child)` in every iteration, recheck that the child is still an embryo of the caller and re-read `l1`. Or make `KILL` of an embryo and `TASK_LOAD` exclude each other.
 
 ## Medium
 
@@ -188,7 +142,7 @@ Each time, a task slot is lost for good (there are 37), with about 20 frames and
 
 **N8. The reverse map cannot hold addresses above 64 GiB.** A movable frame records `tid << 24 | va >> 12` in 32 bits (`kernel/src/mem.rs:49`, `:188`), but position-independent images are placed up to 256 GiB (`PIE_HI`, `kernel/src/task.rs:74`). For about three quarters of the possible bases the address spills into the task number. Those image pages are never compacted or swapped (the check against the page table fails), and `try_evict` and `compact::migrate` lock a different task's slot; if that slot is a thread's, they walk its stale root (N7). Widen the field.
 
-**N9. `RESTORE_OF` restores without rechecking.** `restore_of` checks that the target is alive before taking its lock (`kernel/src/syscall.rs:998`, `:1016`), installs the capability, drops the lock, and `remap` maps without checking `node_alive` (`:967`–`990`). A revoke of the parent in between leaves a mapping of memory the program no longer holds (the same race as N1); a target that died in between gets a capability whose node leaks. Needs the admin to act.
+**N9. `RESTORE_OF` restores without rechecking.** `restore_of` checks that the target is alive before taking its lock (`kernel/src/syscall.rs:998`, `:1016`), installs the capability, drops the lock, and `remap` maps without checking `node_alive` (`:967`–`990`). A revoke of the parent in between leaves a mapping of memory the program no longer holds (the same race as the old N1, which node generations closed for `SPAWN`, `THREAD_CREATE`, `CAP_GRANT` and `MEM_MAP`; this path still checks the bare node number); a target that died in between gets a capability whose node leaks. Needs the admin to act.
 
 **N10. Check-then-act in `WAIT` and `TASK_START`.** `wait` decides under the caller's own lock (`kernel/src/spawn.rs:772`), so two threads of one parent can both release the same zombie; if a `SPAWN` takes the slot in between, the second release clears the new program's parent and session. `task_start` can set a just-killed embryo `Ready` after it died (`:753`), and the next dispatch hits the assert of N4. Both windows are a few instructions wide.
 
@@ -196,9 +150,8 @@ Each time, a task slot is lost for good (there are 37), with about 20 frames and
 
 ## Suggested order of work
 
-1. N1 (node and object generations) and N2: both end with a program writing memory it does not own.
-2. N7 and N4: one line each, and N7 removes a whole class of walks of freed tables.
-3. N3 and N5: no race needed, any program with the right manifest can do them today.
-4. N6, then the Low items.
+1. N7 and N4: one line each, and N7 removes a whole class of walks of freed tables.
+2. N3 and N5: no race needed, any program with the right manifest can do them today.
+3. N6, then the Low items.
 
-Tests worth adding to `racetest`: a thread spawning with a capability its first task revokes (N1), `KILL` during `TASK_LOAD` (N2), a thread orphaning memory in a loop while the parent watches `QUOTA` (N3), a program reading its session page before its first call (N5).
+Tests worth adding to `racetest`: a thread spawning with a capability its first task revokes (N1, now fixed: no test yet), `KILL` during `TASK_LOAD` (N2, now fixed: no test yet), a thread orphaning memory in a loop while the parent watches `QUOTA` (N3), a program reading its session page before its first call (N5).

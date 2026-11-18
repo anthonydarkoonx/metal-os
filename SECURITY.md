@@ -2,24 +2,15 @@
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 
-**Status:** H1 and H2 were fixed in `8ab56dc`; M1 to M7 and L1 are fixed (see each). The other Low items are still open. A second audit of `986fe66` is at the end of this file: its findings (N1 to N11) are all open, and N1 reopens H1. The line numbers below refer to the audited commit and have moved in the files the fix touched (`syscall.rs`, `spawn.rs`, `swap.rs`).
+**Status:** this file lists only open findings. Everything the first audit found at High and Medium (H1, H2, M1 to M7) and L1 has been fixed and removed; see `git log` for the fixes. The Low items L2 to L10 are still open. A second audit of `986fe66` follows: its findings (N1 to N11) are all open, and N1 reopens the H1 race. Line numbers in the first audit refer to the audited commit (`6406422`) and have moved.
 
 ## Summary
 
-The kernel is in better shape than most prototypes: the design is capability-based, 15 modules forbid `unsafe`, physical memory access is bounds-checked, and user programs get strict W^X. The audit found two high-severity problems that an unprivileged program could reach on a multi-core machine, both of which end with a program holding a writable mapping of physical memory it no longer owns. Both are now fixed (see below).
+The kernel is in better shape than most prototypes: the design is capability-based, 15 modules forbid `unsafe`, physical memory access is bounds-checked, and user programs get strict W^X. The first audit found two high-severity problems, seven medium ones and ten low ones; all High and Medium findings and L1 are fixed and removed from this file. Open from that audit:
 
-| # | Severity | Finding | Who can trigger it |
-|---|---|---|---|
-| H1 | High (fixed in `8ab56dc`) | Capability checks race with revocation; a mapping can outlive freed shared memory | Any two cooperating tasks, SMP only |
-| H2 | High (fixed in `8ab56dc`) | `HEAP_RELEASE` frees frames before flushing the TLB | Any program with a thread, SMP only |
-| M1 | Medium (fixed) | Run-time memory objects can be freed through a derived capability | Holder of `MemCtl` with `R_MEM_ALLOC` |
-| M2 | Medium (fixed for programs) | `CAP_GRANT` puts capabilities into any task's table without its consent | Any program |
-| M3 | Medium (fixed) | `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel | Any driver |
-| M4 | Medium (fixed) | FP/SIMD registers are enabled for EL0 but never context-switched | Any program |
-| M5 | Medium (fixed) | All RAM is writable and executable at EL1; no PAN, no WXN | Hardening gap |
-| M6 | Medium (fixed) | The pager sees and supplies other programs' pages in the clear | The pager program |
-| M7 | Medium (fixed) | Global kernel tables have no per-program quotas | Any program (some need threads or spawn) |
-| L1–L10 | Low | See below (L1 fixed) | |
+| # | Severity | Finding |
+|---|---|---|
+| L2 to L10 | Low | See below |
 
 **How this was done.** Static review only. Nothing was built, booted or exploited, so every finding is a reading of the code, not a demonstrated attack. Line numbers refer to the commit above.
 
@@ -32,155 +23,9 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 ---
 
-## High
-
-### H1. Capability checks race with revocation (fixed in `8ab56dc`)
-
-**Fixed:** `MEM_MAP`, `CAP_GRANT`, `SPAWN` delegation and `THREAD_CREATE` now recheck `node_alive` under a task lock before they install or mint anything. `cap_revoke` frees shared and dynamic memory under the same world lock as the revoke. Not done: the generation counter on nodes, so L2 stays open. Regression test: `racetest` mode 1 (`programs/src/bin/racetest.rs`, run by `make qemu-test`) maps while the main thread revokes; on the unfixed kernel it finds a stale mapping in round 1.
-
-The original finding follows.
-
-`syscall::lookup` copies the capability out under the task lock and releases the lock before the caller acts on it (`kernel/src/syscall.rs:121`). The comment calls a late revoke harmless. That is true for one IPC message, but not for calls that create lasting state:
-
-- **`MEM_MAP`** (`syscall.rs:396` lookup, `:415` lock, `:433` map). A revoke that completes between the lookup and the lock clears the capability and unmaps everything, then `mem_map` maps the object anyway and records the mapping under a dead node. Nothing rechecks `node_alive`.
-- **`CAP_GRANT`** (`syscall.rs:1312` lookup, `:1339` mint). The new node is minted under a parent that may already be freed, so the copy survives the revoke.
-- **`SPAWN` delegation** (`spawn.rs:475`–`493` read, `:629` mint) and **`THREAD_CREATE`** (`spawn.rs:855`–`865`, `:901`) have the same gap.
-
-The worst case is shared memory. `cap_revoke` drops the world lock after `revoke_subtree` and only then calls `shm_destroy` (`syscall.rs:1362`–`1363`), which frees the frames and the frame list. A racing `MEM_MAP` then:
-
-1. reads frame numbers from the freed list page (`obj::shm_frame`, `obj.rs:206`), and
-2. maps those freed frames read-write into the caller.
-
-The caller keeps a writable view of frames the allocator will hand to someone else, including page tables. If the freed list page is reallocated to the attacker first, the frame numbers are attacker-chosen.
-
-The window is short but retryable: the revoker only has to take the mapper's task lock in the gap, and the attacker controls both sides. One thread creates and revokes, another maps; or two programs cooperate, since `CAP_GRANT` needs no channel (see M2). It also hits the documented compositor pattern, where a server destroys memory a client still holds. It needs two cores; `make run` defaults to `SMP=4`.
-
-**Fix.**
-- Recheck `node_alive(c.node)` after taking the task lock that the install happens under. `revoke_subtree` holds every task lock while it frees nodes, so a check under any task lock is race-free.
-- Move `shm_destroy` (and the frees in `MC_FREE` and `cap_revoke`) under the same world lock as the revoke.
-- Give nodes a generation counter and store it in `Cap`, `MapRec` and the revoke log, so a reused node id can never match a stale reference (this also fixes L2).
-
-### H2. `HEAP_RELEASE` frees frames before flushing the TLB (fixed in `8ab56dc`)
-
-**Fixed:** the new `swap::release_pages` unmaps a batch of pages, flushes the TLB, and only then frees the frames. `heap_release`, `free_thread_stack` and the failure path of `make_thread_stack` use it. Regression test: `racetest` mode 2 reads released pages through a sibling thread while another program allocates; on the unfixed kernel it sees the other program's data in 9 of 12 runs.
-
-The original finding follows.
-
-`heap_release` (`syscall.rs:1072`–`1086`) calls `swap::release_page` for each page, which unmaps and immediately frees the frame (`swap.rs:327`–`330`). The TLB flush comes once, after the loop.
-
-A second thread of the same program on another core still has TLB entries for those pages. Freed movable frames go back to the top of RAM, exactly where the next `alloc_movable` looks, so another program's fresh heap or stack page is likely to land on one. Until the flush, the sibling thread can read and write it.
-
-The attacker controls the window: `count` can be the whole heap (up to 16 384 pages), and every iteration takes the allocator lock.
-
-The same order appears in `spawn::free_thread_stack` (`spawn.rs:983`–`990`) and the failure path of `make_thread_stack` (`spawn.rs:971`–`974`).
-
-**Fix.** Unmap all pages, flush, then free. `swap::try_evict` already does it in that order (`swap.rs:145`–`163`).
-
----
-
-## Medium
-
-### M1. Run-time memory objects can be freed through a derived capability (fixed)
-
-**Fixed:** `MC_ALLOC` objects now record the node of the creator's capability as their root (`obj::alloc_dynamic`). `CAP_REVOKE` (flag 1) and `MC_FREE` free the frames and the object-table entry only when the capability is the root; on a copy only the copy goes. Thread exit (`World::reset`) releases the entry only for the root. `MC_FREE` rejects shared memory with `E_INVAL`. Regression tests: `racetest` modes 4 to 6 (a thread ends the object through its copy: revoke, thread end, `MC_FREE`) and a conductor check that `MC_FREE` refuses a shared-memory capability, both in `make qemu-test`. On the unfixed kernel all three thread cases fail and the shared-memory `MC_FREE` panics at `mem.rs:221`. Not fixed here: `CAP_REVOKE` on a creator's run-time memory capability does not give the pages back to the program's holding quota (`MC_FREE` does).
-
-The original finding follows.
-
-An `MC_ALLOC` object should live as long as its creator's capability. Three paths free it through a copy instead. The copy comes from `THREAD_CREATE`, which duplicates capabilities without requiring the grant right (`spawn.rs:861`).
-
-- **`CAP_REVOKE` with flag 1 from a thread** (`syscall.rs:1368`–`1373`). Only the thread's subtree is revoked, then all frames are freed and the object released. The leader's capability and mapping stay live, pointing at freed frames.
-- **Thread exit** (`task.rs:671`). `World::reset` releases the object-table entry for any non-shared dynamic object the dying task holds, copy or not. The id is reused by the next `SHM_CREATE` or `MC_ALLOC`, and the leader's old capability (map, write, info) now names someone else's memory.
-- **`MC_FREE` on a shared-memory capability** (`syscall.rs:1212`–`1231`). It accepts any dynamic object, with no rights or root check. For a `Shared` object `o.pa` is 0, so `mem::owner_of(0)` indexes far out of bounds (`mem.rs:201`) and the kernel panics.
-
-All three need a `MemCtl` capability with `R_MEM_ALLOC`. Today only the conductor, the fuzzer and test programs hold one, which is why this is Medium and not High.
-
-**Fix.** Record the root node for `Dma` objects as is done for `Shared`. Free frames and release the entry only when the root goes; a copy just goes. Make `MC_FREE` reject `Shared` objects.
-
-### M2. `CAP_GRANT` needs no consent from the receiver (fixed for programs)
-
-**Fixed:** a packaged or spawned program (not a boot-time service) may now `CAP_GRANT` only into its own program (its threads), into programs it started, and into the program that started it. A named destination slot is allowed only into a child (the parent's way of placing what a child expects). A grant into the parent never takes the parent's last 4 free slots. Regression test: `racetest` mode 7, a conductor check in `make qemu-test` (on the unfixed kernel all three refusals fail). Limits of the fix: boot-time tasks can still grant anywhere, a program can still fill all but 4 slots of its own parent, and there is no receiver opt-in, so a hostile parent can still squat slots in its children. Programs that shared memory with an unrelated program through `CAP_GRANT` must now route it through a common parent or delegate it at spawn.
-
-The original finding follows.
-
-`cap_grant` (`syscall.rs:1311`–`1347`) lets any holder of a grantable capability put a copy into any live task, in the first free slot or in a slot it names. Every program has a grantable capability, because `SHM_CREATE` is unprivileged and returns one with `R_GRANT`.
-
-- **Slot exhaustion.** One attacker can fill all 31 free slots of a victim (the grant quota is 40). The victim's `EP_CREATE`, `SHM_CREATE` and legitimate grants then fail. Targets include the VFS server, `netd` and the program manager.
-- **Slot squatting.** Programs find capabilities by convention. A program started without a console endpoint has slot 7 empty and falls back to `LOG` (`programs/src/lib.rs:306`–`311`). An attacker who grants its own endpoint into slot 7 receives that program's output and feeds its input. Embryos can be targeted before they start.
-
-**Fix.** Restrict the target to the caller's own program, its children and its parent; or require the receiver to opt in (a receive slot it opens). Keep the exact-slot form for the parent only.
-
-### M3. `WAIT_WORD`/`WAKE_WORD` on a device mapping panics the kernel (fixed)
-
-**Fixed:** `thread::wait`, `wake` and `store_and_wake` check that the word is in a RAM frame (`WAIT_WORD` and `WAKE_WORD` return `E_INVAL`; `THREAD_EXIT`'s store is skipped), and `mem::is_movable` and `mem::owner_of` range-check instead of indexing. `THREAD_EXIT` with a device address had the same bug. `set_owner` and `free` still index blindly. The block driver checks this at start-up (`[blk] TEST WAIT_WORD and WAKE_WORD on a device mapping are refused`, in `make qemu-test`); on the unfixed kernel it panics at `mem.rs:197`.
-
-The original finding follows.
-
-`thread::wait` and `thread::wake` translate the address and call `key_of` before any RAM check (`thread.rs:45`–`46`, `:104`–`105`). `key_of` calls `mem::is_movable(pa)`, which indexes the frame table with `(pa - RAM_BASE) / PAGE` (`mem.rs:196`–`198`). For an MMIO page (the virtio BARs sit below `RAM_BASE` on QEMU) the subtraction wraps and the bounds check panics.
-
-Any driver can do this with one system call. That defeats the point of running drivers as restartable, fault-isolated tasks.
-
-**Fix.** Return `E_INVAL` in `key_of`'s callers when `phys::is_ram_page` fails, and make `is_movable`, `owner_of`, `set_owner` and `free` range-check instead of indexing blindly.
-
-### M4. FP/SIMD state is not context-switched (fixed)
-
-**Fixed:** `CPACR_EL1.FPEN` is now `0b01` on every core (`boot.S`): EL0 may not use FP/SIMD (the instruction traps and the program is ended, `trap.rs`), EL1 still may. User programs must be built soft-float, as all in-tree ones are. `TPIDR_EL0` is saved and restored per task in `sched::dispatch` and cleared when a task is created or restarted. Regression test: `racetest` modes 10 and 11 in `make qemu-test` (a SIMD instruction must end the program; a thread's `TPIDR_EL0` must not show in, or be changed by, another task, which needs one core to show, so it is the `qemu-test-up` run that catches it). On the unfixed kernel on one core the SIMD instruction runs and the thread pointer leaks (bits `0x5`). Trapping instead of switching was chosen because nothing in the tree uses FP; a program that needs it would need lazy switching added.
-
-The original finding follows.
-
-`CPACR_EL1.FPEN` is set to 3 on every core (`boot.S:17`–`18`, `:174`–`175`), so EL0 may use `V0`–`V31`, `FPCR` and `FPSR`. `TrapFrame` holds only the general registers (`trap.rs:12`–`17`), and nothing else saves the rest. `TPIDR_EL0` is not saved either.
-
-- Two programs that are otherwise isolated can talk through the vector registers.
-- Any program that uses FP or NEON (a hard-float ELF, or assembly crypto) leaks its register contents to the next task on that core and gets its own state corrupted.
-
-The in-tree programs are built soft-float, so they are not affected today; the loader accepts any AArch64 ELF.
-
-**Fix.** Either trap EL0 FP use (`FPEN = 0b01`) and kill or lazily switch, or save and restore the FP state and `TPIDR_EL0` in `dispatch`.
-
-### M5. No write-xor-execute in the kernel; no PAN (fixed)
-
-**Fixed.** `linker.ld` now ends the code and the read-only data on page boundaries (`__text_end`, `__ro_end`). `mmu::init` maps the image with 4 KiB pages: code read + execute, read-only data read-only, data, `.bss` and the stacks read + write and `PXN`; every other RAM block is `PXN` too, so the only executable RAM at EL1 is the kernel's own code. `SCTLR_EL1.WXN` is set, and where the CPU has PAN (`ID_AA64MMFR1_EL1.PAN`) `SPAN` is cleared and `PSTATE.PAN` set on every core. The relocations are applied before the MMU comes on, so read-only data is safe. Test: the kernel walks its own tables and registers at boot (`mmu::audit`) and prints `[mmu] TEST kernel pages are write-xor-execute ...: PASS; WXN on: PASS; PAN on ...: PASS`, which `make qemu-test` requires; the unfixed kernel prints FAIL three times. Checked on QEMU `-cpu max` (PAN present) and `-cpu cortex-a72` (no PAN: the check passes trivially, the kernel boots). Limits: PAN is off on CPUs without it (Cortex-A72 and older); the audit checks the boot core's registers, not each secondary's; the kernel's page-table walker `table()` and the pager still reach frames through the identity map, which is the intended path. The board's own `linker.ld` needs the two new symbols (see `docs/BOARD-SYNC.md`). Original finding:
-
-The RAM identity map is built with `ATTR_NORMAL | SH_INNER | AF | UXN` (`mmu.rs:78`, `:86`, `:102`): writable and executable at EL1 for every frame, including kernel text and every user page. `SCTLR_EL1.WXN` and `PSTATE.PAN` are never set (`mmu.rs:139`–`145`).
-
-On its own this is not exploitable. Combined with any kernel write primitive (H1, H2, M1) it removes the remaining obstacles: kernel text can be patched, and user-controlled frames are executable at EL1 through their identity-mapped address.
-
-**Fix.** Map kernel text read-only and executable, everything else `PXN`. Set PAN: the kernel never dereferences user virtual addresses, so it costs nothing.
-
-### M6. The pager is trusted with every program's memory (fixed)
-
-**Fixed.** Every page is sealed before the pager is handed it: ChaCha20-Poly1305 (new crate `libs/metal-aead`, checked against the RFC 8439 vector and five more made by an independent implementation, and against forgeries) under a key drawn from `rand::secure_fill` when the first page is written and never leaving the kernel; the nonce is a counter that is never reused; the disk slot, the program and the address are the associated data, so a page cannot be moved to another slot or program. The tag stays in the kernel (per slot). When a page comes back it is checked before a frame is given its bytes; one that fails is lost like a failed read (the program faults when it touches it) and counted in the failure count. Executable pages are never written back (`mmu::find_swapped` skips them), so the pager cannot touch a program's code. Without real entropy (`secure_fill` refuses) nothing is written back. Tests in `make qemu-test` with a misbehaving pager (`programs/src/bin/pager.rs` modes 1 and 2): a snooping pager finds none of the victim's plaintext in the 48 pages it writes and a good pager then gets them all back right; a pager that changes a byte of every page it returns gets the program stopped, never wrong data. The unfixed kernel fails both (48 of 48 pages in plaintext; the victim read wrong bytes). **Limits:** the pager still learns which pages are written, when, and how many (and can drop or delay them: availability is not protected, only confidentiality and integrity); it can replay a page's old ciphertext only into the same slot, where the tag no longer matches, so that fails too, but a pager that keeps a copy of the *current* ciphertext can hand it back unchanged, which is just the right page; the key lives for one boot, which is as long as any page on the swap file is valid; the kernel's own memory holds the plaintext while it seals (one scratch page, zeroed after use). Original finding:
-
-Write-back hands the pager the plaintext page (`pager.rs:204`–`210`). Read-in installs whatever bytes the pager returns, with the page's old permissions, including executable ones (`pager.rs:311`–`326`).
-
-A buggy or hostile pager can read any eligible program's swapped pages and replace their contents or code. The module comment says the kernel "never trusts the pager with more than it asks of it"; in practice it trusts it with confidentiality and integrity.
-
-**Fix.** Encrypt and authenticate each page in the kernel with a per-boot key before it leaves (AEAD keyed by slot and a counter), and never write back executable pages.
-
-### M7. Global tables have no per-program quotas (fixed)
-
-**Fixed:** run-time memory objects (32 per program, `obj::PROGRAM_OBJ_QUOTA`), capability nodes (192 per program, `cap::PROGRAM_NODE_QUOTA`, charged to the program that makes them: its own memory and endpoints, its threads' copies, what it gives its children) and run-time endpoints (4 per program instead of per task, counted under a lock so that threads cannot race past it). A "program" is the address space, so threads share one allowance. Programs also cannot take the last 16 object entries, 48 nodes or 4 endpoints (reserves for boot services), so the `expect("capability nodes exhausted")` in `install` can no longer be reached by a program filling the table; boot-time tasks are unlimited, as before. Test: `racetest` modes 12–14 start seven threads that create until refused and count while all of them are alive (a thread's objects go when it ends); `make qemu-test` requires the line "one program cannot take more than its share ..."; the unfixed kernel fails all three (failure bits 1, 1, 1). **Also fixed:** the endpoint queue (a program, all its threads together, may have at most half of a queue, 4 of 8, queued at one endpoint; boot-time tasks are not limited) and the file and network session tables (a program may hold 5 of the 8 sessions of each kind for the programs it starts, and the last 2 are never given to programs; boot-time spawners are not limited). Test: `racetest` mode 15 (a program and its thread queue to their own endpoint: 4 accepted, the thread's refused) and `spawner` mode 2 (a program starts children with file sessions until refused: 5); the unfixed kernel gives 8 and 8. **Not fixed:** two programs together can still fill a queue (4 + 4) or all but the reserve of the sessions (5 + 5 > 6 usable), and the share is the same for every program, including the program manager, which starts every packaged program; `install` still panics if boot-time tasks themselves ever run the table out. Several programs together can still exhaust a table (192 nodes each, 1024 in all, less the reserve). Original finding:
-
-Several fixed-size tables are shared by everyone, and one program can use them up:
-
-| Resource | Size | How it is exhausted |
-|---|---|---|
-| Run-time memory objects | 192 | `SHM_CREATE` until slots run out; threads and children each have their own 31 slots |
-| Run-time endpoints | 16 | 4 per task, and each thread is a task (`ipc.rs:95`) |
-| Capability nodes | 1024 | `THREAD_CREATE` with a full mask copies 31 capabilities per thread; only `CAP_GRANT` has a quota |
-| Endpoint queues | 8 messages | `IPC_SEND` never blocks; one client can keep a shared server's queue full (`ipc.rs:256`) |
-| File and network sessions | 8 each | Any holder of the spawn right |
-
-Node exhaustion has a sharper edge: restarting a boot service calls `install`, which does `expect("capability nodes exhausted")` (`task.rs:282`). Other cores can take nodes between the old instance's teardown and the rebuild, so a service crash at the wrong moment becomes a kernel panic.
-
-**Fix.** Charge nodes, objects and endpoints to the program (address space), not the task. Make `build` fail the restart instead of panicking. Give endpoints a per-sender queue share.
-
----
-
 ## Low
 
-**L1 (fixed). `SYSINFO` exposes other tasks' authority.** *Fixed:* pages 10, 11, 13 and 14 now answer `E_PERM` unless the caller holds an `Admin` capability (`sysinfo_needs_admin`); regression test in `make qemu-test` (a program without one gets -1 on all four, the conductor, which has one, is answered; the unfixed kernel answers all four). The task manager, which gets an Admin copy from the console session, is unaffected; any other program that read these pages needs the `admin` permission now. Original finding: Pages 10, 11, 13 and 14 return any task's capability slots, object ids, rights, node ids and revoke log to any caller (`syscall.rs:647`–`756`). The comment says it reveals nothing a task could not observe anyway; that does not hold for these pages. It also tells an attacker which slots are free for M2. Gate them behind the `Admin` capability.
-
-**L2. `RESTORE_OF` can resurrect revoked authority.** The log stores the parent's node id and only checks that the id is alive (`syscall.rs:986`). If the granter revoked or died and the id was reused, the capability comes back under an unrelated node. Needs the admin to act; fixed by node generations (H1).
+**L2. `RESTORE_OF` can resurrect revoked authority.** The log stores the parent's node id and only checks that the id is alive (`syscall.rs:986`). If the granter revoked or died and the id was reused, the capability comes back under an unrelated node. Needs the admin to act; fixed by node generations (see N1).
 
 **L3. Holding-limit check is not atomic.** `SHM_CREATE` and `MC_ALLOC` read `held_pages()` under a lock that is dropped before `reserve_contig` runs (`syscall.rs:1180`, `:1246`–`1247`), and `reserve_contig` itself loads, checks, then adds (`spawn.rs:134`–`140`). Threads racing each other can exceed the quota. Hold the lock across the call, or use a compare-exchange loop.
 
@@ -213,23 +58,13 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 
 ## What is done well
 
-- Every syscall argument that is a user pointer goes through a page-table walk and a bounds-checked physical read; the `try_*` forms keep device pages from panicking the kernel (M3 is the one miss).
+- Every syscall argument that is a user pointer goes through a page-table walk and a bounds-checked physical read; the `try_*` forms keep device pages from panicking the kernel.
 - User memory is strictly W^X: `TASK_LOAD` loads a page once, and nothing can later make it writable.
 - Lock ranks are checked on every acquisition, so ordering bugs panic at once instead of deadlocking.
 - Unattached devices are aborted by default in the SMMU, and drivers get a read-only copy of PCI configuration space, never the bus.
 - Guard pages surround user stacks, thread stacks and kernel stacks, with stack probes for large frames.
 - Sender ids in IPC are set by the kernel, and stale calls are purged when a task id is reused.
 - Arithmetic on user-supplied sizes uses `checked_`/`saturating_` forms nearly everywhere.
-
-## Suggested order of work
-
-1. ~~H1 and H2~~ (done in `8ab56dc`; node generations from H1 are still open and would also close L2).
-2. M1 and M3: lifetime rules for dynamic objects and the range checks in `mem.rs`.
-3. M2 and L1: decide who may grant to whom, then hide the introspection pages.
-4. ~~M4 and M5~~ (done: FP trapping, kernel page permissions, WXN, PAN).
-5. ~~M6 and M7~~ (done), then the Low items.
-
-Tests for H1 and H2 now exist (`racetest`, in `make qemu-test`, since threads exist only for programs and `make fuzz` runs a single task). Still worth adding: a driver-role task calling `WAIT_WORD` on its register window (M3).
 
 ---
 
@@ -245,7 +80,7 @@ Auditor: Claude (code review). **Status:** everything in this section is open.
 
 | # | Severity | Finding | Who can trigger it |
 |---|---|---|---|
-| N1 | High | A revoked capability comes back to life in `SPAWN` and `THREAD_CREATE` (reopens H1) | A program with 2 threads, or 1 thread and `spawn`; SMP only |
+| N1 | High | A revoked capability comes back to life in `SPAWN` and `THREAD_CREATE` (reopens the earlier H1 race, fixed in `8ab56dc`) | A program with 2 threads, or 1 thread and `spawn`; SMP only |
 | N2 | High | `TASK_LOAD` keeps writing the page tables of an embryo that was killed | A program with `spawn` and 1 thread; SMP only |
 | N3 | Medium | Shared memory orphaned by a thread's exit is charged to nobody | A program with 1 thread |
 | N4 | Medium | A thread created after the program's first task died gets page-table root 0: kernel panic | A program with 2 threads; SMP only |
@@ -258,7 +93,7 @@ Auditor: Claude (code review). **Status:** everything in this section is open.
 
 ### N1. A revoked capability comes back to life in `SPAWN` and `THREAD_CREATE`
 
-The H1 fix rechecks `node_alive` under a task lock. That is only sound if a node number that was alive at the first look and is alive at the recheck is the same node. It need not be: `mint_for` hands out the lowest free number (`kernel/src/cap.rs:127`) and nodes have no generation (the part of H1 that was left undone).
+The earlier fix for the revocation race (`8ab56dc`) rechecks `node_alive` under a task lock. That is only sound if a node number that was alive at the first look and is alive at the recheck is the same node. It need not be: `mint_for` hands out the lowest free number (`kernel/src/cap.rs:127`) and nodes have no generation (the generation counter that fix left undone).
 
 `SPAWN` and `THREAD_CREATE` make it easy, because they mint a node themselves between the first look and the recheck:
 
@@ -275,7 +110,7 @@ The attack:
 
 Object numbers are reused too, first free first (`kernel/src/obj.rs:153`, `:243`). So the forged capability names whatever memory object is created next in that entry, the attacker's or another program's, and `MEM_MAP` maps it writable.
 
-It gets worse on the way out. The mapping is recorded under the forged capability's node (`kernel/src/syscall.rs:451`), which is not in the new object's tree. When the object's creator revokes it, `revoke_subtree` removes only mappings recorded under marked nodes (`kernel/src/task.rs:610`–`620`), `shm_destroy` frees the frames, and the mapping stays. The attacker does not need a victim: it creates the object itself, maps it through the forged capability, and revokes it. It then has a writable view of freed frames at the bottom of RAM, which is where the next page table is allocated from. That is the worst case of the original H1.
+It gets worse on the way out. The mapping is recorded under the forged capability's node (`kernel/src/syscall.rs:451`), which is not in the new object's tree. When the object's creator revokes it, `revoke_subtree` removes only mappings recorded under marked nodes (`kernel/src/task.rs:610`–`620`), `shm_destroy` frees the frames, and the mapping stays. The attacker does not need a victim: it creates the object itself, maps it through the forged capability, and revokes it. It then has a writable view of freed frames at the bottom of RAM, which is where the next page table is allocated from. That is the worst case of the original race: a writable mapping of freed physical memory.
 
 `CAP_GRANT` and `MEM_MAP` have the same weakness in principle (a third party must re-mint the number in a much shorter gap).
 
@@ -306,7 +141,7 @@ When the creator of shared memory ends while someone holds a copy, the object be
 
 A thread creates shared memory, grants a copy to its own first task (allowed: same program) and exits. The program keeps the memory, mapped, and is charged nothing. It repeats with a new thread. One capability table holds about 30 such objects, each as large as the program's heap limit (up to 4096 pages), and each thread adds another table. The frames are pinned, so they cannot be swapped or compacted. On a 64 MiB machine this uses up all memory.
 
-The same steps get around the per-program limits of M7: an orphan has no owner in the object table (`o.owner = NO_OWNER`), and the nodes of the copies were made by `CAP_GRANT` from a thread that is gone, so they count for nobody.
+The same steps get around the per-program limits on memory objects and capability nodes: an orphan has no owner in the object table (`o.owner = NO_OWNER`), and the nodes of the copies were made by `CAP_GRANT` from a thread that is gone, so they count for nobody.
 
 A parent and a child program can do the same without threads (the child grants to its parent and exits).
 
@@ -353,7 +188,7 @@ Each time, a task slot is lost for good (there are 37), with about 20 frames and
 
 **N8. The reverse map cannot hold addresses above 64 GiB.** A movable frame records `tid << 24 | va >> 12` in 32 bits (`kernel/src/mem.rs:49`, `:188`), but position-independent images are placed up to 256 GiB (`PIE_HI`, `kernel/src/task.rs:74`). For about three quarters of the possible bases the address spills into the task number. Those image pages are never compacted or swapped (the check against the page table fails), and `try_evict` and `compact::migrate` lock a different task's slot; if that slot is a thread's, they walk its stale root (N7). Widen the field.
 
-**N9. `RESTORE_OF` restores without rechecking.** `restore_of` checks that the target is alive before taking its lock (`kernel/src/syscall.rs:998`, `:1016`), installs the capability, drops the lock, and `remap` maps without checking `node_alive` (`:967`–`990`). A revoke of the parent in between leaves a mapping of memory the program no longer holds (the H1 pattern); a target that died in between gets a capability whose node leaks. Needs the admin to act.
+**N9. `RESTORE_OF` restores without rechecking.** `restore_of` checks that the target is alive before taking its lock (`kernel/src/syscall.rs:998`, `:1016`), installs the capability, drops the lock, and `remap` maps without checking `node_alive` (`:967`–`990`). A revoke of the parent in between leaves a mapping of memory the program no longer holds (the same race as N1); a target that died in between gets a capability whose node leaks. Needs the admin to act.
 
 **N10. Check-then-act in `WAIT` and `TASK_START`.** `wait` decides under the caller's own lock (`kernel/src/spawn.rs:772`), so two threads of one parent can both release the same zombie; if a `SPAWN` takes the slot in between, the second release clears the new program's parent and session. `task_start` can set a just-killed embryo `Ready` after it died (`:753`), and the next dispatch hits the assert of N4. Both windows are a few instructions wide.
 

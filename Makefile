@@ -102,7 +102,7 @@ kernel: user
 # Programs started with SPAWN (programs/): position-independent ELF files in programs/build (random image base each run; the
 # loader relocates them), packed into the system image under /bin. `sleeper` stays a flat image (the user crate embeds
 # it); the static `.elf` copies of argdump and hello exist to test the loader's fixed-address path.
-PROGRAM_BINS := guardtest pager pagetest hello crash ping mem burn spawner cat fswrite ls fdprobe kv kvc blocker argdump upper threads stdtest nettest netcheck fetch quotatest shmtest pietest progmgr progctl counter crasher hog probe fsprog
+PROGRAM_BINS := racetest guardtest pager pagetest hello crash ping mem burn spawner cat fswrite ls fdprobe kv kvc blocker argdump upper threads stdtest nettest netcheck fetch quotatest shmtest pietest progmgr progctl counter crasher hog probe fsprog
 PIE_FLAGS := -C relocation-model=pic -C link-arg=-pie -C link-arg=--no-dynamic-linker -C link-arg=-znorelro --cfg getrandom_backend=\"custom\"
 programs:
 	rm -rf programs/build; mkdir -p programs/build
@@ -262,6 +262,8 @@ qemu-test: kernel disk
 	 grep -q "TEST \.\.\. while the others keep running.*PASS" build.log && \
 	 grep -q "TEST a program sees files only with the files permission.*PASS" build.log && \
 	 grep -q "TEST a program starts programs only with the spawn permission.*PASS" build.log && \
+	 grep -q "TEST a map that races a revoke never leaves.*PASS" build.log && \
+	 grep -q "TEST pages released by HEAP_RELEASE are not reachable.*PASS" build.log && \
 	 grep -q "TEST stopping asks the ability to leave.*PASS" build.log && \
 	 grep -q "TEST stopping what is not running is refused.*PASS" build.log && \
 	 grep -q "TEST a program's storage is private.*PASS" build.log && \

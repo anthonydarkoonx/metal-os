@@ -36,7 +36,7 @@ The kernel is in better shape than most prototypes: the design is capability-bas
 
 ### H1. Capability checks race with revocation (fixed in `8ab56dc`)
 
-**Fixed:** `MEM_MAP`, `CAP_GRANT`, `SPAWN` delegation and `THREAD_CREATE` now recheck `node_alive` under a task lock before they install or mint anything. `cap_revoke` frees shared and dynamic memory under the same world lock as the revoke. Not done: the generation counter on nodes, so L2 stays open. `make fuzz` passes, but no test races a map against a revoke yet.
+**Fixed:** `MEM_MAP`, `CAP_GRANT`, `SPAWN` delegation and `THREAD_CREATE` now recheck `node_alive` under a task lock before they install or mint anything. `cap_revoke` frees shared and dynamic memory under the same world lock as the revoke. Not done: the generation counter on nodes, so L2 stays open. Regression test: `racetest` mode 1 (`programs/src/bin/racetest.rs`, run by `make qemu-test`) maps while the main thread revokes; on the unfixed kernel it finds a stale mapping in round 1.
 
 The original finding follows.
 
@@ -62,7 +62,7 @@ The window is short but retryable: the revoker only has to take the mapper's tas
 
 ### H2. `HEAP_RELEASE` frees frames before flushing the TLB (fixed in `8ab56dc`)
 
-**Fixed:** the new `swap::release_pages` unmaps a batch of pages, flushes the TLB, and only then frees the frames. `heap_release`, `free_thread_stack` and the failure path of `make_thread_stack` use it. No test yet touches heap pages while a sibling thread releases them.
+**Fixed:** the new `swap::release_pages` unmaps a batch of pages, flushes the TLB, and only then frees the frames. `heap_release`, `free_thread_stack` and the failure path of `make_thread_stack` use it. Regression test: `racetest` mode 2 reads released pages through a sibling thread while another program allocates; on the unfixed kernel it sees the other program's data in 9 of 12 runs.
 
 The original finding follows.
 
@@ -207,4 +207,4 @@ Node exhaustion has a sharper edge: restarting a boot service calls `install`, w
 4. M4 and M5: FP trapping or switching, kernel page permissions, PAN.
 5. M7, then the Low items.
 
-Tests worth adding to `make fuzz`: a two-thread program that maps while its sibling revokes, one that touches heap pages while its sibling releases them, and a driver-role task calling `WAIT_WORD` on its register window.
+Tests for H1 and H2 now exist (`racetest`, in `make qemu-test`, since threads exist only for programs and `make fuzz` runs a single task). Still worth adding: a driver-role task calling `WAIT_WORD` on its register window (M3).

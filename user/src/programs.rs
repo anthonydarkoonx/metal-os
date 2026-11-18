@@ -463,6 +463,35 @@ pub fn tests() {
         println!("[client] TEST the guard-page test program is in the system image: FAIL");
     }
 
+    // ---- the races the kernel audit found (SECURITY.md, H1 and H2): see programs/src/bin/racetest.rs --------------------------
+    let race = load("racetest");
+    if race.len() >= 32 && sysinfo(0)[4] >= 2 {
+        // H1: a thread maps an object while the main thread revokes it; no mapping of the freed frames may be left behind
+        let (c1, o1, _) = run_with_console3(Req::new().arg(1).heap(64).threads(1), &race, b"");
+        let o1 = String::from_utf8_lossy(&o1).into_owned();
+        println!("[client] TEST a map that races a revoke never leaves a mapping of freed shared memory behind (exit code {c1}{}): {}", if o1.is_empty() { String::new() } else { alloc::format!(", {}", o1.trim()) }, verdict(c1 == 0));
+        // H2: a thread keeps reading heap pages that the main thread releases, while another program allocates; it must never
+        // see that program's data through a translation that outlived the unmapping
+        let mut leaks = 0;
+        let mut ran = 0;
+        for _ in 0..12 {
+            let s = svc(37, 1, 0, 0, 0, 0)[0] as i64;
+            if s < 0 {
+                break;
+            }
+            let alloc_t = Req::new().arg(3).heap(4300).give_masked(0, s as u8, 0xFFFF & !4).go(&race);
+            if alloc_t > 0 {
+                let (_c, out, _) = run_with_console3(Req::new().arg(2).heap(2200).threads(1).give_masked(0, s as u8, 0xFFFF & !4), &race, b"");
+                leaks += String::from_utf8_lossy(&out).contains("LEAK") as u32;
+                ran += (wait(alloc_t, false) == 0) as u32; // the allocator ran to its end alongside the release
+            }
+            svc(CAP_REVOKE, s as u64, 1, 0, 0, 0);
+        }
+        println!("[client] TEST pages released by HEAP_RELEASE are not reachable through a stale translation after they are freed (12 rounds, {ran} reached the release, {leaks} saw another program's data): {}", verdict(leaks == 0 && ran > 0));
+    } else {
+        println!("[client] TEST the race test program is in the system image and there are at least two cores: FAIL");
+    }
+
     // ---- the pager: pages written back to disk and read again ------------------------------------------------------------
     pager_tests(&v, &load("pager"), &load("pagetest"));
 

@@ -58,15 +58,13 @@ pub const E_AGAIN: i64 = -10;
 /// Counts up each time the slot is made into a new program (`spawn`, before it becomes an embryo). `task_load` runs for a long time and
 /// lets go of the child's lock between pages; it remembers the epoch it started in, so that a child that was killed, collected and
 /// replaced by another embryo of the same parent is not mistaken for the one it was loading.
-static EPOCH: [AtomicU32; MAX_TASKS] = [const { AtomicU32::new(0) }; MAX_TASKS];
-
-static PARENT: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(NO_PARENT) }; MAX_TASKS];
-static EXIT_CODE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(EXIT_FAULTED) }; MAX_TASKS];
+static EPOCH: crate::table::Table<AtomicU32> = crate::table::Table::new();
+static PARENT: crate::table::Table<AtomicU8> = crate::table::Table::new();
+static EXIT_CODE: crate::table::Table<AtomicU64> = crate::table::Table::new();
 static SPAWNING: SpinLock<()> = SpinLock::new(());
 /// Per program: how many threads it may have, and how many it has now.
-static THREAD_QUOTA: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(0) }; MAX_TASKS];
-static EXTRA: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(0) }; MAX_TASKS];
-
+static THREAD_QUOTA: crate::table::Table<AtomicU8> = crate::table::Table::new();
+static EXTRA: crate::table::Table<AtomicU8> = crate::table::Table::new();
 // ---- memory budgets ----------------------------------------------------------------------------------------------------
 //
 // A task has two limits: `heap_quota` (pages it may hold itself: heap plus contiguous allocations) and `budget` (pages it
@@ -77,10 +75,9 @@ static EXTRA: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(0) }; MAX_TASKS];
 
 /// Per task: budget handed down to live children; what this program costs its parent (0 once refunded); contiguous
 /// pages (`MC_ALLOC`) it holds.
-static DELEGATED: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
-static CHARGE: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
-static CONTIG: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
-
+static DELEGATED: crate::table::Table<AtomicUsize> = crate::table::Table::new();
+static CHARGE: crate::table::Table<AtomicUsize> = crate::table::Table::new();
+static CONTIG: crate::table::Table<AtomicUsize> = crate::table::Table::new();
 fn try_charge(parent: usize, cost: usize) -> bool {
     let budget = task::info(parent).budget;
     let mut d = DELEGATED[parent].load(Ordering::SeqCst);
@@ -121,7 +118,7 @@ fn add_charge(child: usize, n: usize) -> bool {
 }
 
 fn children_of(p: usize) -> usize {
-    (FIRST_DYNAMIC_TASK..MAX_TASKS).filter(|&c| PARENT[c].load(Ordering::SeqCst) == p as u8).count()
+    (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == p as u8).count()
 }
 
 /// The address space `a` has been emptied: what it held and what it handed down are gone.
@@ -166,7 +163,7 @@ pub fn quota(cur: usize, op: u64, child: u64, heap: u64, budget: u64) -> i64 {
         }
         1 => {
             let child = child as usize;
-            if child >= MAX_TASKS || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != pa as u8 || matches!(sched::state(child), State::Free | State::Dead) {
+            if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != pa as u8 || matches!(sched::state(child), State::Free | State::Dead) {
                 return E_INVAL;
             }
             if heap == 0 || heap > MAX_HEAP as u64 || budget > MAX_BUDGET as u64 {
@@ -260,9 +257,8 @@ const PERM_RO: u32 = 2;
 
 /// Per embryo: which pages of the image area have been loaded, and which of those are executable. Written only by
 /// the parent's system calls (and reset by `SPAWN`), so plain atomics suffice.
-static LOADED: [[AtomicU64; BITMAP_WORDS]; MAX_TASKS] = [const { [const { AtomicU64::new(0) }; BITMAP_WORDS] }; MAX_TASKS];
-static EXEC: [[AtomicU64; BITMAP_WORDS]; MAX_TASKS] = [const { [const { AtomicU64::new(0) }; BITMAP_WORDS] }; MAX_TASKS];
-
+static LOADED: crate::table::Table<[AtomicU64; BITMAP_WORDS]> = crate::table::Table::new();
+static EXEC: crate::table::Table<[AtomicU64; BITMAP_WORDS]> = crate::table::Table::new();
 fn bit(map: &[AtomicU64; BITMAP_WORDS], page: usize) -> bool {
     map[page / 64].load(Ordering::SeqCst) & (1 << (page % 64)) != 0
 }
@@ -273,7 +269,7 @@ fn set_bit(map: &[AtomicU64; BITMAP_WORDS], page: usize) {
 
 /// An embryo of `parent` (the only task that may load and start it).
 fn embryo_of(parent: usize, tid: usize) -> bool {
-    tid < MAX_TASKS && is_program(tid) && PARENT[tid].load(Ordering::SeqCst) == task::aspace(parent) as u8 && sched::state(tid) == State::Embryo
+    tid < task::limit() && is_program(tid) && PARENT[tid].load(Ordering::SeqCst) == task::aspace(parent) as u8 && sched::state(tid) == State::Embryo
 }
 
 /// The request block `SPAWN(slot, request va)` reads from the caller's memory (little endian, 96 bytes). It creates an
@@ -305,8 +301,7 @@ pub const FLAG_NO_FIXED_MAPS: u32 = 4;
 /// instead of `USER_BASE`; `TASK_BASE` tells the parent which, so that it can relocate the image before loading it.
 pub const FLAG_PIE: u32 = 8;
 /// Where each embryo's image area starts (`USER_BASE` unless it was spawned with `FLAG_PIE`).
-static IMG_BASE: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(USER_BASE) }; MAX_TASKS];
-
+static IMG_BASE: crate::table::Table<AtomicUsize> = crate::table::Table::new();
 /// How many pages an image at `base` may have.
 fn image_pages(base: usize) -> usize {
     if base == USER_BASE { MAX_IMAGE / PAGE } else { task::PIE_MAX_IMAGE / PAGE }
@@ -350,11 +345,11 @@ pub const FS_PAGES: usize = 8;
 const SESSION_SHARE: usize = 5;
 const SESSION_RESERVE: usize = 2;
 const NO_FS: u8 = u8::MAX;
-static FS_PAGE: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(NO_FS) }; MAX_TASKS];
-static FS_GEN: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+static FS_PAGE: crate::table::Table<AtomicU8> = crate::table::Table::new();
+static FS_GEN: crate::table::Table<AtomicU64> = crate::table::Table::new();
 static FS_POOL: AtomicU64 = AtomicU64::new(0);
-static NET_PAGE: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(NO_FS) }; MAX_TASKS];
-static NET_GEN: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+static NET_PAGE: crate::table::Table<AtomicU8> = crate::table::Table::new();
+static NET_GEN: crate::table::Table<AtomicU64> = crate::table::Table::new();
 static NET_POOL: AtomicU64 = AtomicU64::new(0);
 
 /// (session page, generation) of a program's file-system session; page `NO_FS` if it has none. The generation changes
@@ -514,7 +509,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     // are for boot-time spawners; counted under the lock that serialises SPAWN)
     if is_program(task::aspace(parent)) {
         let pa = task::aspace(parent);
-        let mine = |per: &[AtomicU8; MAX_TASKS]| (FIRST_DYNAMIC_TASK..MAX_TASKS).filter(|&c| PARENT[c].load(Ordering::SeqCst) == pa as u8 && per[c].load(Ordering::SeqCst) != NO_FS).count();
+        let mine = |per: &crate::table::Table<AtomicU8>| (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == pa as u8 && per[c].load(Ordering::SeqCst) != NO_FS).count();
         let full = |pool: &AtomicU64, pages: usize| pool.load(Ordering::SeqCst).count_ones() as usize + SESSION_RESERVE >= pages;
         if (flags & FLAG_FS != 0 && (mine(&FS_PAGE) >= SESSION_SHARE || full(&FS_POOL, FS_PAGES)))
             || (flags & FLAG_NET != 0 && (mine(&NET_PAGE) >= SESSION_SHARE || full(&NET_POOL, NET_PAGES)))
@@ -536,7 +531,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     } else {
         None
     };
-    let Some(tid) = (FIRST_DYNAMIC_TASK..MAX_TASKS).find(|&i| sched::state(i) == State::Free) else {
+    let Some(tid) = (FIRST_DYNAMIC_TASK..task::limit()).find(|&i| sched::state(i) == State::Free) else {
         if let Some(k) = fs_page {
             FS_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
         }
@@ -723,7 +718,7 @@ pub fn task_load(parent: usize, child: usize, req_va: usize) -> Result<(), i64> 
     // the address space, and an embryo is only ever freed after it has been made runnable and killed (so it is not an embryo any more),
     // so while the lock is held and `embryo_of` is true, the tables are intact; see the loop below.
     let (epoch, l1) = {
-        let t = lock(child.min(MAX_TASKS - 1));
+        let t = lock(child.min(task::limit() - 1));
         if !embryo_of(parent, child) {
             return Err(E_INVAL);
         }
@@ -786,7 +781,7 @@ pub fn task_load(parent: usize, child: usize, req_va: usize) -> Result<(), i64> 
 
 /// `TASK_START(child, entry)`: make the embryo runnable at `entry`, which must lie in a loaded executable page.
 pub fn task_start(parent: usize, child: usize, entry: usize) -> Result<(), i64> {
-    if child >= MAX_TASKS || entry % 4 != 0 {
+    if child >= task::limit() || entry % 4 != 0 {
         return Err(E_INVAL);
     }
     // Everything under the child's lock, which the end of a task takes (with every other): an embryo that was killed meanwhile has ended and
@@ -815,7 +810,7 @@ pub enum Waited {
 }
 
 pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
-    if child >= MAX_TASKS || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 || sched::state(child) == State::Embryo {
+    if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 || sched::state(child) == State::Embryo {
         return Waited::Err(E_INVAL); // (waiting for an embryo you have not started would never end)
     }
     // Under our own task lock: the child's death takes every task lock, so it either finished before we look
@@ -845,7 +840,7 @@ pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
 
 /// Condemn a child (the next core to own it kills it). Killing a zombie is an error: it is already dead.
 pub fn kill(cur: usize, child: usize) -> i64 {
-    if child >= MAX_TASKS || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 {
+    if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 {
         return E_INVAL;
     }
     match sched::state(child) {
@@ -871,7 +866,7 @@ fn release(tid: usize) {
 /// the last task in it: that program's slot is freed or left as a zombie for its parent — handing the parent the code
 /// at once if it is already waiting.
 pub fn on_death(_w: &mut World, tid: usize, done: Option<usize>) {
-    for c in FIRST_DYNAMIC_TASK..MAX_TASKS {
+    for c in FIRST_DYNAMIC_TASK..task::limit() {
         let par = PARENT[c].load(Ordering::SeqCst);
         // (children belong to a program, not to one of its threads)
         if par != NO_PARENT && (par == tid as u8 || done == Some(par as usize)) && c != tid {
@@ -947,7 +942,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
     if EXTRA[leader].load(Ordering::SeqCst) >= THREAD_QUOTA[leader].load(Ordering::SeqCst) {
         return Err(E_PERM);
     }
-    let Some(tid) = (FIRST_DYNAMIC_TASK..MAX_TASKS).find(|&i| sched::state(i) == State::Free) else { return Err(E_FULL) };
+    let Some(tid) = (FIRST_DYNAMIC_TASK..task::limit()).find(|&i| sched::state(i) == State::Free) else { return Err(E_FULL) };
     let core = sched::assign_core(class);
     sched::init_task(tid, core);
     task::set_dynamic_info(tid, ROLE_THREAD, &name_of(leader), class, 0, 0);
@@ -1091,4 +1086,23 @@ pub fn thread_gone(tid: usize, leader: usize) {
     task::set_aspace(tid, None);
     sched::release_core(sched::home_core(tid), task::info(tid).class);
     sched::set_state(tid, State::Free);
+}
+
+/// Carve this module's per-task tables (`n` tasks); called once from `task::init_tables`.
+pub fn init_tables(n: usize) {
+    EPOCH.init(n, |_| const { AtomicU32::new(0) });
+    PARENT.init(n, |_| const { AtomicU8::new(NO_PARENT) });
+    EXIT_CODE.init(n, |_| const { AtomicU64::new(EXIT_FAULTED) });
+    THREAD_QUOTA.init(n, |_| const { AtomicU8::new(0) });
+    EXTRA.init(n, |_| const { AtomicU8::new(0) });
+    DELEGATED.init(n, |_| const { AtomicUsize::new(0) });
+    CHARGE.init(n, |_| const { AtomicUsize::new(0) });
+    CONTIG.init(n, |_| const { AtomicUsize::new(0) });
+    LOADED.init(n, |_| const { [const { AtomicU64::new(0) }; BITMAP_WORDS] });
+    EXEC.init(n, |_| const { [const { AtomicU64::new(0) }; BITMAP_WORDS] });
+    IMG_BASE.init(n, |_| const { AtomicUsize::new(USER_BASE) });
+    FS_PAGE.init(n, |_| const { AtomicU8::new(NO_FS) });
+    FS_GEN.init(n, |_| const { AtomicU64::new(0) });
+    NET_PAGE.init(n, |_| const { AtomicU8::new(NO_FS) });
+    NET_GEN.init(n, |_| const { AtomicU64::new(0) });
 }

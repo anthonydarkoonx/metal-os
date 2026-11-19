@@ -25,6 +25,7 @@ mod smmu;
 mod smp;
 mod spawn;
 mod swap;
+mod table;
 mod sync;
 mod syscall;
 mod task;
@@ -192,6 +193,7 @@ extern "C" fn kmain() -> ! {
         None => kprintln!("[mem] TEST RAM above the first GiB is reached through the direct map: SKIPPED (RAM ends inside the first GiB)"),
     }
     kprintln!("[mem] TEST the reverse map holds the addresses of the whole user space (up to 256 GiB): {}", v(mem::rmap_selftest()));
+    task::init_tables(task::MAX_TASKS);
     timer::init();
     sched::init();
     platform::init_devices();

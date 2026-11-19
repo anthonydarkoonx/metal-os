@@ -29,7 +29,7 @@
 #![forbid(unsafe_code)]
 use crate::ipc;
 use crate::smp::{self, MAX_CPUS};
-use crate::sync::{Slots, SpinLock, R_RT};
+use crate::sync::{SlotTable, Slots, SpinLock, R_RT};
 use crate::task::{self, frame, info, State, MAX_TASKS, NOT_PINNED};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mem, mmu, timer};
@@ -158,14 +158,12 @@ impl Slot {
     };
 }
 
-static SLOT: [Slot; MAX_TASKS] = [Slot::NEW; MAX_TASKS];
-
+static SLOT: crate::table::Table<Slot> = crate::table::Table::new();
 /// Condemned tasks: their device broke the rules (see smmu.rs). Whichever core next owns the
 /// task kills it, so the kill never races with the task running on another core.
-static DOOMED: [AtomicBool; MAX_TASKS] = [const { AtomicBool::new(false) }; MAX_TASKS];
+static DOOMED: crate::table::Table<AtomicBool> = crate::table::Table::new();
 /// Why: see `Doom`.
-static DOOM_WHY: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(0) }; MAX_TASKS];
-
+static DOOM_WHY: crate::table::Table<AtomicU8> = crate::table::Table::new();
 #[derive(Clone, Copy)]
 pub enum Doom {
     /// The task's device faulted in the IOMMU.
@@ -184,8 +182,7 @@ fn doom_reason(tid: usize) -> &'static str {
     }
 }
 /// Counter value at which a timed `IRQ_WAIT` expires (0 = no deadline).
-static IRQ_DEADLINE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
-
+static IRQ_DEADLINE: crate::table::Table<AtomicU64> = crate::table::Table::new();
 /// Condemn `tid`: it is killed (and restarted, if policy allows) the next time a core would
 /// run it. A blocked task is made runnable so that happens promptly.
 pub fn doom(tid: usize, why: Doom) {
@@ -387,8 +384,7 @@ pub fn ring_wait_unless(tid: usize, min: u32, ready: impl FnOnce() -> bool) -> b
 
 /// Each task's `TPIDR_EL0` (the thread-pointer register, which EL0 may read and write), kept while the task is not running so that
 /// one task's value is never seen by another (SECURITY.md, M4).
-static TPIDR: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
-
+static TPIDR: crate::table::Table<AtomicU64> = crate::table::Table::new();
 fn tpidr_save(tid: usize) {
     TPIDR[tid].store(crate::frame::cpu::tpidr_el0(), Ordering::Relaxed);
 }
@@ -412,7 +408,7 @@ pub fn set_current(core: usize, tid: usize) {
 // All times below are system-counter ticks (see timer.rs). Every field is written by one core at a
 // time: the core that owns the task (see the ownership rule above), or the one dispatching.
 
-static TASK_UTIL: Slots<Padded<Util>, MAX_TASKS> = Slots::new([const { Padded(Util::new(1)) }; MAX_TASKS]);
+static TASK_UTIL: SlotTable<Padded<Util>> = SlotTable::new();
 
 static CORE_TRACK: Slots<Padded<Util>, MAX_CPUS> = Slots::new([const { Padded(Util::new(1)) }; MAX_CPUS]);
 
@@ -449,9 +445,9 @@ pub fn init() {
     for (level, class) in [(1, Class::Interactive), (2, Class::Background), (3, Class::Heavy)] {
         QUANTUM[level].store(c(quantum_us(class)), Ordering::Relaxed);
     }
-    for u in TASK_UTIL.all_mut().iter_mut() {
+    TASK_UTIL.for_each_mut(|_, u| {
         **u = Util::new(c(UTIL_WINDOW_US));
-    }
+    });
     for u in CORE_TRACK.all_mut().iter_mut() {
         **u = Util::new(c(UTIL_WINDOW_US));
     }
@@ -705,8 +701,7 @@ pub const NO_PRIO: u8 = 4;
 const NO_EP: u8 = u8::MAX;
 
 /// The (at most two) endpoints a task receives on; their queued senders' priority counts too.
-static RECV_EPS: [[AtomicU8; 2]; MAX_TASKS] = [const { [const { AtomicU8::new(NO_EP) }; 2] }; MAX_TASKS];
-
+static RECV_EPS: crate::table::Table<[AtomicU8; 2]> = crate::table::Table::new();
 pub fn note_recv_endpoint(tid: usize, e: u8) {
     for slot in &RECV_EPS[tid] {
         if slot.load(Ordering::Relaxed) == e {
@@ -797,13 +792,13 @@ fn rank(tid: usize) -> Rank {
 
 const NO_CORE: u8 = u8::MAX;
 /// Core a real-time task is admitted on and confined to (`NO_CORE`: not real-time).
-static RT_CORE: [AtomicU8; MAX_TASKS] = [const { AtomicU8::new(NO_CORE) }; MAX_TASKS];
+static RT_CORE: crate::table::Table<AtomicU8> = crate::table::Table::new();
 /// Deadline of its current job, readable from any core.
-static RT_DEADLINE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(u64::MAX) }; MAX_TASKS];
+static RT_DEADLINE: crate::table::Table<AtomicU64> = crate::table::Table::new();
 /// The reserved share it was admitted with.
-static RT_SHARE: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+static RT_SHARE: crate::table::Table<AtomicU64> = crate::table::Table::new();
 /// The job state. Only the task's own core touches it after admission (the core the task is confined to).
-static RT_JOB: Slots<Option<Job>, MAX_TASKS> = Slots::new([None; MAX_TASKS]);
+static RT_JOB: SlotTable<Option<Job>> = SlotTable::new();
 /// Tasks that hold a reservation.
 static RT_TASKS: AtomicU64 = AtomicU64::new(0);
 static ADMISSION: SpinLock<Admission<MAX_CPUS>> = SpinLock::new(Admission::new());
@@ -1047,7 +1042,7 @@ fn best_candidate(core: usize, cur: usize, now: u64, skip: u64) -> Option<usize>
 }
 
 fn alive() -> bool {
-    (0..MAX_TASKS).any(|i| matches!(state(i), State::Ready | State::Sleep(_) | State::IrqWait(_) | State::RingWait(_)))
+    (0..task::limit()).any(|i| matches!(state(i), State::Ready | State::Sleep(_) | State::IrqWait(_) | State::RingWait(_)))
         || crate::ring::async_ops_outstanding()
 }
 
@@ -1347,7 +1342,7 @@ fn choose(core: usize, cur: usize, preempt: bool, now: u64) -> Option<usize> {
         // an unexpired slice was granted by an earlier decision; a new one needs a fresh look at the class rules
         if !expired || class_ok(cur, core, now, 0) {
             skip |= 1u64 << cur;
-            for _ in 0..=MAX_TASKS {
+            for _ in 0..=task::limit() {
                 let Some(cand) = best_candidate(core, cur, now, skip) else { break };
                 if !should_switch(cand, cur, expired, now) {
                     break;
@@ -1371,7 +1366,7 @@ fn choose(core: usize, cur: usize, preempt: bool, now: u64) -> Option<usize> {
     if cur != usize::MAX {
         skip |= 1u64 << cur;
     }
-    for _ in 0..=MAX_TASKS {
+    for _ in 0..=task::limit() {
         let cand = best_candidate(core, cur, now, skip)?;
         if claim(cand) {
             return Some(cand);
@@ -1583,7 +1578,7 @@ pub fn finish(code: u32) -> ! {
         "[mem] largest free run {} of {} free frames in {} runs; compaction: {} pages migrated in {} passes, {} refused, {} contiguous-allocation failures, {} racing faults retried",
         mem::largest_free_run(), mem::free_frames(), mem::free_runs(), c.migrated, c.passes, c.rejected, c.failures, c.spurious
     );
-    for i in 0..MAX_TASKS {
+    for i in 0..task::limit() {
         let st = state(i);
         if st != State::Free {
             let ticks: [u32; MAX_CPUS] = core::array::from_fn(|c| task::TICKS_ON[i][c].load(Ordering::Relaxed));
@@ -1592,7 +1587,7 @@ pub fn finish(code: u32) -> ! {
     }
     // Placement check: Heavy work must have stayed on performance cores when they exist.
     let big = big_online();
-    for i in (0..MAX_TASKS).filter(|&i| info(i).class == Class::Heavy && state(i) != State::Free) {
+    for i in (0..task::limit()).filter(|&i| info(i).class == Class::Heavy && state(i) != State::Free) {
         let t: [u32; MAX_CPUS] = core::array::from_fn(|c| task::TICKS_ON[i][c].load(Ordering::Relaxed));
         let (little, bigt) = (t[..2].iter().sum::<u32>(), t[2..].iter().sum::<u32>());
         if big {
@@ -1643,4 +1638,19 @@ pub fn semihost_exit(code: u32) -> ! {
     loop {
         crate::frame::cpu::wait_for_event();
     }
+}
+
+/// Carve this module's per-task tables (`n` tasks); called once from `task::init_tables`.
+pub fn init_tables(n: usize) {
+    SLOT.init(n, |_| Slot::NEW);
+    DOOMED.init(n, |_| const { AtomicBool::new(false) });
+    DOOM_WHY.init(n, |_| const { AtomicU8::new(0) });
+    IRQ_DEADLINE.init(n, |_| const { AtomicU64::new(0) });
+    TPIDR.init(n, |_| const { AtomicU64::new(0) });
+    RECV_EPS.init(n, |_| const { [const { AtomicU8::new(NO_EP) }; 2] });
+    RT_CORE.init(n, |_| const { AtomicU8::new(NO_CORE) });
+    RT_DEADLINE.init(n, |_| const { AtomicU64::new(u64::MAX) });
+    RT_SHARE.init(n, |_| const { AtomicU64::new(0) });
+    TASK_UTIL.init(n, |_| Padded(Util::new(1)));
+    RT_JOB.init(n, |_| None);
 }

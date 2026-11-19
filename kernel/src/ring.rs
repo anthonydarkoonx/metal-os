@@ -82,8 +82,7 @@ pub fn async_ops_outstanding() -> bool {
 }
 
 /// Serialises kernel-side producers of each task's completion ring.
-static RING_LOCKS: [SpinLock<()>; MAX_TASKS] = [const { SpinLock::new(()) }; MAX_TASKS];
-
+static RING_LOCKS: crate::table::Table<SpinLock<()>> = crate::table::Table::new();
 fn idx(pa: usize, off: usize) -> &'static AtomicU32 {
     crate::frame::phys::atomic_u32(pa + off)
 }
@@ -192,7 +191,7 @@ pub fn fail_queued(t: &mut Task, tid: usize, tag: u8, res: i64) {
 
 /// `server` died: every async call it was handling fails.
 pub fn fail_calls_to(w: &mut World, server: usize) {
-    for c in 0..MAX_TASKS {
+    for c in 0..task::limit() {
         for i in 0..MAX_PENDING {
             let p = w.tasks[c].pending[i];
             if p.kind == PKind::Call && p.callee == Some(server as u8) {
@@ -210,7 +209,7 @@ pub fn expire_timeouts() {
         return;
     }
     let now = timer::ticks();
-    for c in 0..MAX_TASKS {
+    for c in 0..task::limit() {
         let mut t = task::lock(c);
         if t.ring_pa == 0 {
             continue;
@@ -327,4 +326,9 @@ pub fn enter(cur: usize, to_submit: u32, min_complete: u32) -> Result<(u32, bool
     task::frame(cur).x[0] = n as u64;
     let sleep = sched::ring_wait_unless(cur, min, || unconsumed(pa) >= min);
     Ok((n, sleep))
+}
+
+/// Carve this module's per-task tables (`n` tasks); called once from `task::init_tables`.
+pub fn init_tables(n: usize) {
+    RING_LOCKS.init(n, |_| const { SpinLock::new(()) });
 }

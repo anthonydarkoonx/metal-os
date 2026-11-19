@@ -555,15 +555,15 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             let (enabled, devices) = crate::smmu::summary();
             f.x[1] = enabled as u64;
             f.x[2] = devices as u64;
-            f.x[3] = (0..MAX_TASKS).filter(|&t| !matches!(sched::state(t), State::Free | State::Dead)).count() as u64;
-            f.x[4] = (0..MAX_TASKS).map(|t| task::RESTARTS[t].load(core::sync::atomic::Ordering::Relaxed) as u64).sum();
+            f.x[3] = (0..task::limit()).filter(|&t| !matches!(sched::state(t), State::Free | State::Dead)).count() as u64;
+            f.x[4] = (0..task::limit()).map(|t| task::RESTARTS[t].load(core::sync::atomic::Ordering::Relaxed) as u64).sum();
             f.x[5] = crate::cap::nodes_in_use() as u64;
             Out::Ret(0)
         }
         3 => {
             // one row of the task table: (name bytes 0..8, name bytes 8..16, state code, restarts, role)
             let t = arg as usize;
-            if t >= MAX_TASKS {
+            if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
             let code = match sched::state(t) {
@@ -592,7 +592,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
         7 => {
             // pages task `arg` holds (a program's heap, stack, code, page tables, buffers; a thread counts for its program)
             let t = arg as usize;
-            if t >= MAX_TASKS {
+            if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
             f.x[1] = mem::count_owned(mem::OWNER_TASK0 + task::aspace(t) as u8) as u64;
@@ -612,7 +612,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
         5 => {
             // a program's file-system session: (page index or 255, generation, program, parent program or 255); see spawn.rs
             let t = arg as usize;
-            if t >= MAX_TASKS {
+            if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
             let (page, gen, owner) = crate::spawn::fs_session(t);
@@ -625,7 +625,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
         6 => {
             // a program's network session: (page index or 255, generation, program); see spawn.rs
             let t = arg as usize;
-            if t >= MAX_TASKS {
+            if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
             let (page, gen, owner) = crate::spawn::net_session(t);
@@ -670,7 +670,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             // one capability slot of a task, for the task manager: `arg` = task | slot << 8; answers (kind, object, rights, node), kind 0 for an
             // empty slot (Endpoint 1, Memory 2, Console 3, Irq 4, MemCtl 5, Admin 6, Sched 7, Spawn 8, Factory 9). Read-only, like the other pages.
             let (t, slot) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
-            if t >= MAX_TASKS || slot >= NCAPS {
+            if t >= task::limit() || slot >= NCAPS {
                 return Out::Ret(E_INVAL);
             }
             let mut c = task::lock(t).caps[slot];
@@ -687,7 +687,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             // what has been revoked from a task and can be given back, for the capabilities manager: `arg` = task | n << 8, the nth (oldest first).
             // Answers (id, slot, kind, object, rights | 1 << 16 if what it hung under is still there); `x0` is E_INVAL past the end. Read-only.
             let (t, n) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
-            if t >= MAX_TASKS {
+            if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
             match crate::cap::revoked_nth(t, n) {
@@ -703,7 +703,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             // derived from it, a bit mask of the tasks holding them, how many capability nodes hang under it (it included), 1 if it is the root capability
             // of its object, which `REVOKE_OF` refuses). Read-only.
             let (t, slot) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
-            if t >= MAX_TASKS || slot >= NCAPS {
+            if t >= task::limit() || slot >= NCAPS {
                 return Out::Ret(E_INVAL);
             }
             let c = task::lock(t).caps[slot];
@@ -713,7 +713,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             let mut marked = [false; crate::cap::NODES];
             let nodes = crate::cap::mark_subtree(c.node, true, &mut marked);
             let (mut copies, mut holders) = (0u64, 0u64);
-            for tt in 0..MAX_TASKS {
+            for tt in 0..task::limit() {
                 let caps = task::lock(tt).caps;
                 for (i, cc) in caps.iter().enumerate() {
                     if cc.kind != Kind::None && marked[cc.node as usize] && !(tt == t && i == slot) {
@@ -732,7 +732,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             // capabilities name it). Read-only.
             let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFF) as u8);
             let (mut any, mut user, mut serve, mut total) = (0u64, 0u64, 0u64, 0u64);
-            for t in 0..MAX_TASKS {
+            for t in 0..task::limit() {
                 let caps = task::lock(t).caps;
                 for c in caps.iter() {
                     if c.kind as u8 != kind || c.kind == Kind::None || (c.obj != obj && matches!(c.kind, Kind::Endpoint | Kind::Memory | Kind::Irq)) {
@@ -872,7 +872,7 @@ fn sched_call(cur: usize, a: [u64; 5]) -> Out {
                 }
                 // task `p2`: (counter ticks on efficiency cores, on performance cores, utilisation 0..1024, priority level, home core)
                 1 => {
-                    if a[2] as usize >= MAX_TASKS {
+                    if a[2] as usize >= task::limit() {
                         return Out::Ret(E_INVAL);
                     }
                     let (l, b, u, p, h) = sched::task_stats(a[2] as usize);
@@ -946,7 +946,7 @@ fn revoke_of(cur: usize, admin: u64, target: u64, slot: u64) -> Out {
         return Out::Ret(e);
     }
     let t = target as usize;
-    if t >= MAX_TASKS || t < task::FIRST_DYNAMIC_TASK || task::aspace(t) == task::aspace(cur) || slot as usize >= NCAPS {
+    if t >= task::limit() || t < task::FIRST_DYNAMIC_TASK || task::aspace(t) == task::aspace(cur) || slot as usize >= NCAPS {
         return Out::Ret(E_INVAL);
     }
     let c = task::lock(t).caps[slot as usize];
@@ -1007,7 +1007,7 @@ fn restore_of(cur: usize, admin: u64, target: u64, id: u64) -> Out {
         return Out::Ret(e);
     }
     let t = target as usize;
-    if t >= MAX_TASKS || t < task::FIRST_DYNAMIC_TASK || task::aspace(t) == task::aspace(cur) || matches!(sched::state(t), State::Free | State::Dead) {
+    if t >= task::limit() || t < task::FIRST_DYNAMIC_TASK || task::aspace(t) == task::aspace(cur) || matches!(sched::state(t), State::Free | State::Dead) {
         return Out::Ret(E_INVAL);
     }
     let Some(r) = crate::cap::revoked_by_id(t, id as u32) else { return Out::Ret(E_BADCAP) };
@@ -1354,7 +1354,7 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
         return Out::Ret(E_PERM);
     }
     let target = target as usize;
-    if target >= MAX_TASKS || matches!(sched::state(target), State::Free | State::Dead) {
+    if target >= task::limit() || matches!(sched::state(target), State::Free | State::Dead) {
         return Out::Ret(E_INVAL);
     }
     let target_space = task::aspace(target); // (what the checks below were made for: looked at again under the target's lock)

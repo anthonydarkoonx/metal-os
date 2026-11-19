@@ -377,6 +377,46 @@ impl<T, const N: usize> Slots<T, N> {
     }
 }
 
+/// One element of a `SlotTable`.
+struct SlotCell<T>(UnsafeCell<T>);
+// SAFETY: a cell is reached only through its state word in `SlotTable` (many readers or one writer).
+unsafe impl<T: Send> Sync for SlotCell<T> {}
+
+/// `Slots` for a table whose length is chosen at boot (see `table.rs`): each entry checked on its own.
+pub struct SlotTable<T> {
+    state: crate::table::Table<AtomicI32>,
+    data: crate::table::Table<SlotCell<T>>,
+}
+
+impl<T: Send> SlotTable<T> {
+    pub const fn new() -> Self {
+        SlotTable { state: crate::table::Table::new(), data: crate::table::Table::new() }
+    }
+
+    pub fn init(&self, n: usize, mut f: impl FnMut(usize) -> T) {
+        self.state.init(n, |_| AtomicI32::new(0));
+        self.data.init(n, |i| SlotCell(UnsafeCell::new(f(i))));
+    }
+
+    /// Exclusive access to entry `i` (panics if it is borrowed in any way, or `i` is out of range).
+    pub fn write(&self, i: usize) -> RefMut<'_, T> {
+        acquire_write(&self.state[i], self.data[i].0.get(), "a table entry", SPINS)
+    }
+
+    /// Shared access to entry `i` (panics if it is being written).
+    pub fn read(&self, i: usize) -> Ref<'_, T> {
+        // SAFETY (of the pointer use): `acquire_read` registers this reader before the pointer becomes a reference.
+        acquire_read(&self.state[i], self.data[i].0.get(), "a table entry", SPINS)
+    }
+
+    /// Exclusive access to every entry in turn (boot-time set-up; panics if any entry is borrowed).
+    pub fn for_each_mut(&self, mut f: impl FnMut(usize, &mut T)) {
+        for i in 0..self.state.len() {
+            f(i, &mut *self.write(i));
+        }
+    }
+}
+
 pub struct AllMut<'a, T, const N: usize> {
     t: &'a Slots<T, N>,
 }

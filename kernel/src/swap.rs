@@ -115,7 +115,7 @@ pub struct Filter {
 }
 
 fn try_evict(frame: usize, tid: usize, va: usize, f: Filter) -> Tried {
-    if tid >= MAX_TASKS || f.only.map_or(false, |o| o != tid) || matches!(sched::state(tid), State::Free | State::Dead) {
+    if tid >= task::limit() || f.only.map_or(false, |o| o != tid) || matches!(sched::state(tid), State::Free | State::Dead) {
         return Tried::Skipped;
     }
     let t = task::lock(tid);

@@ -268,8 +268,8 @@ fn start_write(me: usize) -> Option<Op> {
     }
     let mut wrapped = false;
     let mut scanned = 0;
-    while scanned <= MAX_TASKS {
-        if tid >= MAX_TASKS {
+    while scanned <= task::limit() {
+        if tid >= task::limit() {
             if wrapped {
                 break;
             }

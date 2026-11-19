@@ -12,7 +12,7 @@ use crate::cap::*;
 use crate::ipc::{self, Endpoint, NEP};
 use crate::mem::{self, PAGE};
 use crate::sched;
-use crate::sync::{Guard, Slots, SpinLock, R_TASK};
+use crate::sync::{Guard, SlotTable, SpinLock, R_TASK};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mmu, obj};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -21,6 +21,13 @@ use metal_sched::Class;
 /// Boot-time tasks first, then slots for tasks created at run time (programs and their threads). At most 64: the
 /// scheduler keeps per-task run-state bits in 64-bit masks, and lock ranks (sync.rs) leave room for 70 task locks.
 pub const MAX_TASKS: usize = 64;
+
+/// How many task slots this boot has (at most `MAX_TASKS`): set by `init_tables`.
+static LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn limit() -> usize {
+    LIMIT.load(Ordering::Relaxed)
+}
 /// First slot that may hold a task created at run time.
 pub const FIRST_DYNAMIC_TASK: usize = 27;
 pub const USER_BASE: usize = 0x8000_0000;
@@ -158,8 +165,7 @@ impl Task {
     };
 }
 
-static TASKS: [SpinLock<Task>; MAX_TASKS] = [const { SpinLock::new(Task::EMPTY) }; MAX_TASKS];
-
+static TASKS: crate::table::Table<SpinLock<Task>> = crate::table::Table::new();
 /// Lock task `tid` (rank `R_TASK + tid`: when taking several, take them in ascending order).
 pub fn lock(tid: usize) -> Guard<'static, Task> {
     TASKS[tid].lock(R_TASK + tid as u16)
@@ -216,15 +222,13 @@ pub struct Info {
     pub budget: usize,
 }
 
-static INFO: Slots<Info, MAX_TASKS> = Slots::new(
-    [const { Info { role: 0, restartable: false, name: Name::EMPTY, class: Class::Background, pinned: NOT_PINNED, heap_quota: MAX_HEAP_PAGES, budget: 0 } }; MAX_TASKS],
-);
+static INFO: SlotTable<Info> = SlotTable::new();
 
 pub fn info(tid: usize) -> Info {
     *INFO.read(tid)
 }
 
-static FRAMES: Slots<TrapFrame, MAX_TASKS> = Slots::new([TrapFrame::ZERO; MAX_TASKS]);
+static FRAMES: SlotTable<TrapFrame> = SlotTable::new();
 
 /// The task's saved registers. Not behind a lock: whoever currently *owns* the task writes it.
 /// That is the core running it (from kernel entry until its dispatch), or, while it is blocked,
@@ -239,28 +243,24 @@ pub fn frame(tid: usize) -> crate::sync::RefMut<'static, TrapFrame> {
 }
 
 /// Root of the task's page tables, readable by the dispatcher without taking the task lock.
-static L1: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
-
+static L1: crate::table::Table<AtomicUsize> = crate::table::Table::new();
 pub fn l1_of(tid: usize) -> usize {
     L1[tid].load(Ordering::Acquire)
 }
 
-pub static RESTARTS: [AtomicU32; MAX_TASKS] = [const { AtomicU32::new(0) }; MAX_TASKS];
+pub static RESTARTS: crate::table::Table<AtomicU32> = crate::table::Table::new();
 /// Restarts since the last stable period (what `MAX_RESTARTS` limits); `RESTARTS` stays cumulative.
-static STREAK: [AtomicU32; MAX_TASKS] = [const { AtomicU32::new(0) }; MAX_TASKS];
-static LAST_RESTART: [core::sync::atomic::AtomicU64; MAX_TASKS] = [const { core::sync::atomic::AtomicU64::new(0) }; MAX_TASKS];
+static STREAK: crate::table::Table<AtomicU32> = crate::table::Table::new();
+static LAST_RESTART: crate::table::Table<core::sync::atomic::AtomicU64> = crate::table::Table::new();
 /// Timer ticks each task has run on each core.
-pub static TICKS_ON: [[AtomicU32; crate::smp::MAX_CPUS]; MAX_TASKS] =
-    [const { [const { AtomicU32::new(0) }; crate::smp::MAX_CPUS] }; MAX_TASKS];
-
+pub static TICKS_ON: crate::table::Table<[AtomicU32; crate::smp::MAX_CPUS]> = crate::table::Table::new();
 pub fn owner(tid: usize) -> u8 {
     mem::OWNER_TASK0 + tid as u8
 }
 
 /// The task whose address space `tid` runs in: itself, unless it is a thread (thread.rs). Everything about memory — the
 /// page tables, the mappings, the heap, the frames and who owns them — is kept under that task's lock and name.
-static SPACE: [core::sync::atomic::AtomicU8; MAX_TASKS] = [const { core::sync::atomic::AtomicU8::new(u8::MAX) }; MAX_TASKS];
-
+static SPACE: crate::table::Table<core::sync::atomic::AtomicU8> = crate::table::Table::new();
 pub fn aspace(tid: usize) -> usize {
     match SPACE[tid].load(Ordering::Acquire) {
         u8::MAX => tid,
@@ -275,7 +275,7 @@ pub fn set_aspace(tid: usize, leader: Option<usize>) {
 
 /// The tasks (including `leader`) that run in `leader`'s address space and are not gone.
 pub fn members(leader: usize) -> impl Iterator<Item = usize> {
-    (0..MAX_TASKS).filter(move |&m| aspace(m) == leader && !matches!(sched::state(m), State::Free | State::Dead))
+    (0..limit()).filter(move |&m| aspace(m) == leader && !matches!(sched::state(m), State::Free | State::Dead))
 }
 
 fn install(t: &mut Task, tid: usize, slot: usize, kind: Kind, obj: u8, rights: Rights) {
@@ -537,7 +537,7 @@ pub fn set_l1(tid: usize, l1: usize) {
 
 /// Boot-time only (single core): create a task and make it runnable.
 pub fn spawn(role: u8, name: &'static str, class: Class, restartable: bool) -> usize {
-    let tid = (0..MAX_TASKS).find(|&i| sched::state(i) == State::Free).expect("no free task slot");
+    let tid = (0..limit()).find(|&i| sched::state(i) == State::Free).expect("no free task slot");
     let core = sched::assign_core(class);
     sched::init_task(tid, core);
     let mut i = Info {
@@ -592,7 +592,7 @@ impl World {
         let mut marked = [false; NODES];
         let n = mark_subtree(root, include_root, &mut marked);
         // a task asleep in receive on an endpoint whose receive capability is being revoked must not sleep for ever
-        for tid in 0..MAX_TASKS {
+        for tid in 0..limit() {
             for c in self.tasks[tid].caps {
                 if c.kind == Kind::Endpoint && c.rights & R_RECV != 0 && marked[c.node as usize] && self.eps[c.obj as usize].waiter == Some(tid as u8) {
                     self.eps[c.obj as usize].waiter = None;
@@ -652,7 +652,7 @@ impl World {
             let Some(o) = obj::get(id) else { continue };
             let holds = |t: &Task| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive());
             let mut taken = false;
-            for h in 0..MAX_TASKS {
+            for h in 0..limit() {
                 let q = aspace(h);
                 if q == leader || !holds(&self.tasks[h]) || matches!(sched::state(h), State::Free | State::Dead) {
                     continue;
@@ -724,7 +724,7 @@ impl World {
         t.reply_to = None;
         t.callee = None;
         crate::ring::reset_task(t);
-        for o in 0..MAX_TASKS {
+        for o in 0..limit() {
             if self.tasks[o].reply_to.map_or(false, |(c, _)| c == tid as u8) {
                 self.tasks[o].reply_to = None;
             }
@@ -762,7 +762,7 @@ impl World {
 /// Condemn every live task running `role` (see `sched::doom`).
 pub fn condemn_role(role: u8, why: sched::Doom) -> usize {
     let mut n = 0;
-    for tid in 0..MAX_TASKS {
+    for tid in 0..limit() {
         // a dead task has nothing to kill (and a stale flag on it would hit its next instance)
         if !matches!(sched::state(tid), State::Free | State::Dead) && info(tid).role == role {
             sched::doom(tid, why);
@@ -792,7 +792,7 @@ fn die_as(tid: usize, why: &str, program_dies: bool, exit_word: Option<(usize, u
         kprintln!("[kernel] task {tid} '{}' terminated: {why}", info(tid).name);
     }
     let mut w = World::lock();
-    for c in 0..MAX_TASKS {
+    for c in 0..limit() {
         if w.tasks[c].callee == Some(tid as u8) && sched::state(c) == State::CallWait {
             w.tasks[c].callee = None;
             frame(c).x[0] = crate::syscall::E_DEAD as u64;
@@ -853,4 +853,23 @@ fn die_as(tid: usize, why: &str, program_dies: bool, exit_word: Option<(usize, u
     } else {
         kprintln!("[kernel] reclaimed {freed} pages from '{}'", info(tid).name);
     }
+}
+
+/// Carve this module's per-task tables (`n` tasks); called once from `task::init_tables`.
+pub fn init_tables(n: usize) {
+    assert!((1..=MAX_TASKS).contains(&n) && limit() == 0, "task tables: bad size or initialised twice");
+    LIMIT.store(n, Ordering::Relaxed);
+    crate::sched::init_tables(n);
+    crate::spawn::init_tables(n);
+    crate::thread::init_tables(n);
+    crate::ring::init_tables(n);
+    TASKS.init(n, |_| const { SpinLock::new(Task::EMPTY) });
+    L1.init(n, |_| const { AtomicUsize::new(0) });
+    RESTARTS.init(n, |_| const { AtomicU32::new(0) });
+    STREAK.init(n, |_| const { AtomicU32::new(0) });
+    LAST_RESTART.init(n, |_| const { core::sync::atomic::AtomicU64::new(0) });
+    TICKS_ON.init(n, |_| const { [const { AtomicU32::new(0) }; crate::smp::MAX_CPUS] });
+    SPACE.init(n, |_| const { core::sync::atomic::AtomicU8::new(u8::MAX) });
+    INFO.init(n, |_| Info { role: 0, restartable: false, name: Name::EMPTY, class: Class::Background, pinned: NOT_PINNED, heap_quota: MAX_HEAP_PAGES, budget: 0 });
+    FRAMES.init(n, |_| TrapFrame::ZERO);
 }

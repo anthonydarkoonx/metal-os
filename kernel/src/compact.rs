@@ -34,7 +34,7 @@ static FAILURES: AtomicU64 = AtomicU64::new(0);
 static SPURIOUS: AtomicU64 = AtomicU64::new(0);
 
 fn migrate(src: usize, dst: usize, tid: usize, va: usize) -> bool {
-    if tid >= MAX_TASKS || matches!(sched::state(tid), State::Free | State::Dead) {
+    if tid >= task::limit() || matches!(sched::state(tid), State::Free | State::Dead) {
         return false;
     }
     let mut t = task::lock(tid);

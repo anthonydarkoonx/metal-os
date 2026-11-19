@@ -27,8 +27,8 @@ pub const E_INVAL: i64 = crate::syscall::E_INVAL;
 
 static TABLE: SpinLock<()> = SpinLock::new(());
 /// Address each waiting task waits on, and its place in the queue.
-static KEY: [AtomicUsize; MAX_TASKS] = [const { AtomicUsize::new(0) }; MAX_TASKS];
-static TICKET: [AtomicU64; MAX_TASKS] = [const { AtomicU64::new(0) }; MAX_TASKS];
+static KEY: crate::table::Table<AtomicUsize> = crate::table::Table::new();
+static TICKET: crate::table::Table<AtomicU64> = crate::table::Table::new();
 static NEXT_TICKET: AtomicU64 = AtomicU64::new(1);
 
 pub enum Wait {
@@ -82,7 +82,7 @@ fn wake_locked(space: usize, key: usize, count: usize) -> usize {
     let mut woken = 0;
     while woken < count {
         let mut best: Option<(u64, usize, u64)> = None;
-        for m in (0..MAX_TASKS).filter(|&m| key & 1 != 0 || task::aspace(m) == space) {
+        for m in (0..task::limit()).filter(|&m| key & 1 != 0 || task::aspace(m) == space) {
             if let State::WordWait(d) = sched::state(m) {
                 if KEY[m].load(Ordering::SeqCst) == key {
                     let ticket = TICKET[m].load(Ordering::SeqCst);
@@ -145,4 +145,10 @@ pub fn store_and_wake(t: &task::Task, space: usize, va: usize, value: u32) {
         return; // not RAM: nothing to store or wake
     }
     wake_locked(space, key, usize::MAX);
+}
+
+/// Carve this module's per-task tables (`n` tasks); called once from `task::init_tables`.
+pub fn init_tables(n: usize) {
+    KEY.init(n, |_| const { AtomicUsize::new(0) });
+    TICKET.init(n, |_| const { AtomicU64::new(0) });
 }

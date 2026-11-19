@@ -30,7 +30,7 @@
 use crate::ipc;
 use crate::smp::{self, MAX_CPUS};
 use crate::sync::{SlotTable, Slots, SpinLock, R_RT};
-use crate::task::{self, frame, info, State, MAX_TASKS, NOT_PINNED};
+use crate::task::{self, frame, info, State, NOT_PINNED};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mem, mmu, timer};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -78,7 +78,7 @@ fn decode(v: u64) -> State {
         4 => State::Sleep(v >> 8),
         5 => State::IrqWait((v >> 8) as u8),
         6 => State::RingWait((v >> 8) as u32),
-        8 => State::ChildWait((v >> 8) as u8),
+        8 => State::ChildWait((v >> 8) as u16),
         9 => State::Embryo,
         10 => State::WordWait(v >> 8),
         _ => State::Dead,
@@ -217,15 +217,68 @@ pub fn state(tid: usize) -> State {
 /// a state updates the bits afterwards (`publish`), so for a moment they may lag, and everybody
 /// confirms against the state before acting. (A waker's `kick_idle` always comes after its publish, so a
 /// core that missed the lagging bit while going to sleep is woken by the interrupt.)
-static READY: AtomicU64 = AtomicU64::new(0);
-static TIMED: AtomicU64 = AtomicU64::new(0);
+static READY: TaskMask = TaskMask::new();
+static TIMED: TaskMask = TaskMask::new();
+
+/// One bit per task slot, in as many words as `MAX_TASKS` needs (the scheduler's hints and the real-time set live in these).
+const TASK_WORDS: usize = task::MAX_TASKS.div_ceil(64);
+
+/// A snapshot of a `TaskMask`, or a set built locally (the tasks `choose` has already tried).
+#[derive(Clone, Copy)]
+struct TaskSet([u64; TASK_WORDS]);
+
+impl TaskSet {
+    const EMPTY: TaskSet = TaskSet([0; TASK_WORDS]);
+
+    fn insert(&mut self, i: usize) {
+        self.0[i / 64] |= 1 << (i % 64);
+    }
+
+    /// Everything in `self` that is not in `other`.
+    fn without(mut self, other: &TaskSet) -> TaskSet {
+        for (w, o) in self.0.iter_mut().zip(other.0.iter()) {
+            *w &= !o;
+        }
+        self
+    }
+
+    fn any(&self) -> bool {
+        self.0.iter().any(|&w| w != 0)
+    }
+
+    /// The tasks in the set, lowest first.
+    fn iter(self) -> impl Iterator<Item = usize> {
+        (0..TASK_WORDS).flat_map(move |k| each(self.0[k]).map(move |b| k * 64 + b))
+    }
+}
+
+/// Task bits that cores read and change without a lock.
+struct TaskMask([AtomicU64; TASK_WORDS]);
+
+impl TaskMask {
+    const fn new() -> Self {
+        TaskMask([const { AtomicU64::new(0) }; TASK_WORDS])
+    }
+
+    fn load(&self, order: Ordering) -> TaskSet {
+        TaskSet(core::array::from_fn(|k| self.0[k].load(order)))
+    }
+
+    fn has(&self, i: usize) -> bool {
+        self.0[i / 64].load(Ordering::SeqCst) & 1 << (i % 64) != 0
+    }
+
+    fn set(&self, i: usize, on: bool) {
+        let bit = 1u64 << (i % 64);
+        let _ = self.0[i / 64].try_update(Ordering::SeqCst, Ordering::SeqCst, |m| Some(if on { m | bit } else { m & !bit }));
+    }
+}
 
 /// Bring the task's bits in line with its state. Reads the state itself, and repeats if it changed
 /// meanwhile: two cores that change a task's state (a waker, and the task's own core going to sleep)
 /// each publish after their own store, and whichever publishes last must describe the state that is
 /// current then, not the one its own store wrote.
 fn publish(tid: usize) {
-    let bit = 1u64 << tid;
     loop {
         let s = state(tid);
         let (ready, timed) = match s {
@@ -238,8 +291,8 @@ fn publish(tid: usize) {
         // never in neither mask, which a core deciding how long to sleep could take for "nothing to wake for")
         for add in [true, false] {
             for (mask, want) in [(&READY, ready), (&TIMED, timed)] {
-                if want == add && (mask.load(Ordering::SeqCst) & bit != 0) != want {
-                    let _ = mask.try_update(Ordering::SeqCst, Ordering::SeqCst, |m| Some(if want { m | bit } else { m & !bit }));
+                if want == add && mask.has(tid) != want {
+                    mask.set(tid, want);
                 }
             }
         }
@@ -249,13 +302,13 @@ fn publish(tid: usize) {
     }
 }
 
-/// Tasks that may be runnable, as a bit mask.
-fn ready_mask() -> u64 {
+/// Tasks that may be runnable.
+fn ready_mask() -> TaskSet {
     READY.load(Ordering::SeqCst)
 }
 
 /// Tasks that wait for a time to pass.
-fn timed_mask() -> u64 {
+fn timed_mask() -> TaskSet {
     TIMED.load(Ordering::SeqCst)
 }
 
@@ -800,7 +853,7 @@ static RT_SHARE: crate::table::Table<AtomicU64> = crate::table::Table::new();
 /// The job state. Only the task's own core touches it after admission (the core the task is confined to).
 static RT_JOB: SlotTable<Option<Job>> = SlotTable::new();
 /// Tasks that hold a reservation.
-static RT_TASKS: AtomicU64 = AtomicU64::new(0);
+static RT_TASKS: TaskMask = TaskMask::new();
 static ADMISSION: SpinLock<Admission<MAX_CPUS>> = SpinLock::new(Admission::new());
 
 fn is_rt(tid: usize) -> bool {
@@ -851,7 +904,7 @@ pub fn rt_set(tid: usize, runtime_us: u64, period_us: u64, hint: Option<usize>) 
     SLOT[tid].slice_end.store(u64::MAX, Ordering::Relaxed); // no slice: its budget limits it
     SLOT[tid].home.store(core as u8, Ordering::Relaxed);
     RT_CORE[tid].store(core as u8, Ordering::SeqCst); // last: from here on only `core` touches the job
-    RT_TASKS.fetch_or(1u64 << tid, Ordering::SeqCst);
+    RT_TASKS.set(tid, true);
     Ok(core)
 }
 
@@ -859,7 +912,7 @@ pub fn rt_set(tid: usize, runtime_us: u64, period_us: u64, hint: Option<usize>) 
 pub fn rt_clear(tid: usize) {
     let core = RT_CORE[tid].swap(NO_CORE, Ordering::SeqCst);
     if core != NO_CORE {
-        RT_TASKS.fetch_and(!(1u64 << tid), Ordering::SeqCst);
+        RT_TASKS.set(tid, false);
         ADMISSION.lock(R_RT).release(core as usize, RT_SHARE[tid].swap(0, Ordering::Relaxed));
         *RT_JOB.write(tid) = None;
         RT_DEADLINE[tid].store(u64::MAX, Ordering::Relaxed);
@@ -917,7 +970,7 @@ fn rt_gate(tid: usize, now: u64) -> bool {
 /// of `running`'s budget if it is real-time.
 fn rt_event(core: usize, running: usize, now: u64) -> u64 {
     let mut ev = u64::MAX;
-    for i in each(RT_TASKS.load(Ordering::Relaxed)) {
+    for i in RT_TASKS.load(Ordering::Relaxed).iter() {
         if RT_CORE[i].load(Ordering::Relaxed) as usize != core {
             continue;
         }
@@ -980,7 +1033,7 @@ fn starved(i: usize, now: u64) -> bool {
 }
 
 fn wake_sleepers(now: u64) {
-    for i in each(timed_mask()) {
+    for i in timed_mask().iter() {
         match state(i) {
             State::Sleep(deadline) if deadline <= now => {
                 if wake_if(i, State::Sleep(deadline)) {
@@ -1003,11 +1056,11 @@ fn wake_sleepers(now: u64) {
 /// that starve (longest waiting), then the highest effective priority, then the task that has waited
 /// longest, with the home core breaking ties. Reads are racy by design; the choice is confirmed by
 /// claiming the task.
-fn best_candidate(core: usize, cur: usize, now: u64, skip: u64) -> Option<usize> {
+fn best_candidate(core: usize, cur: usize, now: u64, skip: &TaskSet) -> Option<usize> {
     let mut rt: Option<(u64, u64, usize)> = None;
     let mut starving: Option<(u64, usize)> = None;
     let mut by_level: [Option<(u64, bool, usize)>; 4] = [None; 4];
-    for i in each(ready_mask() & !skip) {
+    for i in ready_mask().without(skip).iter() {
         if !can_run(i, core, cur, now) {
             continue;
         }
@@ -1080,7 +1133,7 @@ const CLOCK_SHARE: u32 = 8;
 fn sample_clock(core: usize, interrupt: bool) -> u64 {
     let st = &STATS[core];
     let age = st.clock_age.load(Ordering::Relaxed);
-    if interrupt || age >= CLOCK_SHARE || RT_TASKS.load(Ordering::Relaxed) != 0 {
+    if interrupt || age >= CLOCK_SHARE || RT_TASKS.load(Ordering::Relaxed).any() {
         let now = timer::counter();
         st.clock.store(now, Ordering::Relaxed);
         st.clock_age.store(0, Ordering::Relaxed);
@@ -1106,7 +1159,7 @@ fn flagged(f: fn(&CoreStats) -> &AtomicBool) -> u32 {
 /// Is someone waiting who could take `core` from `running` when its slice ends?
 fn contended(core: usize, running: usize, now: u64) -> bool {
     let level = eff_prio(running);
-    each(ready_mask()).any(|i| {
+    ready_mask().iter().any(|i| {
         i != running && state(i) == State::Ready && !SLOT[i].running.load(Ordering::Acquire) && eff_prio(i) <= level && can_take(i, core, now)
     })
 }
@@ -1123,7 +1176,7 @@ pub fn resched_targets(idle: u32) -> (u32, u32) {
     let online = smp::online_mask();
     let (mut wake, mut preempt) = (0u32, 0u32);
     let mut flags: Option<(u32, u32)> = None; // (preemption interrupts on their way, slice timers set)
-    for i in each(ready_mask()) {
+    for i in ready_mask().iter() {
         if state(i) != State::Ready || SLOT[i].running.load(Ordering::Acquire) {
             continue;
         }
@@ -1229,7 +1282,7 @@ fn quiet_until(online: u32) -> Option<u64> {
     if crate::ring::async_ops_outstanding() {
         return None;
     }
-    let ready_waiting = each(ready_mask()).any(|i| {
+    let ready_waiting = ready_mask().iter().any(|i| {
         state(i) == State::Ready && !SLOT[i].running.load(Ordering::Acquire) && {
             let p = pin_of(i);
             p == NOT_PINNED || online & (1 << p) != 0 // (a task pinned to a core that does not exist waits forever, ticks or not)
@@ -1239,7 +1292,7 @@ fn quiet_until(online: u32) -> Option<u64> {
         return None;
     }
     let mut at = u64::MAX;
-    for i in each(timed_mask()) {
+    for i in timed_mask().iter() {
         match state(i) {
             State::Sleep(d) => at = at.min(d),
             State::WordWait(d) if d != 0 => at = at.min(d),
@@ -1288,7 +1341,7 @@ fn idle_timer(core: usize, now: u64) {
 /// sleep and a wakeup that arrives just before the core is marked idle.)
 pub fn has_work_for(core: usize) -> bool {
     let now = timer::counter();
-    each(ready_mask()).any(|i| can_run(i, core, usize::MAX, now))
+    ready_mask().iter().any(|i| can_run(i, core, usize::MAX, now))
 }
 
 /// Give up the rest of the running task's slice.
@@ -1333,7 +1386,7 @@ fn claim(cand: usize) -> bool {
 
 /// Pick what `core` runs next and take ownership of it (`RUNNING`), unless it is `cur` already.
 fn choose(core: usize, cur: usize, preempt: bool, now: u64) -> Option<usize> {
-    let mut skip = 0u64;
+    let mut skip = TaskSet::EMPTY;
     if cur != usize::MAX && state(cur) == State::Ready && pin_ok(cur, core) {
         if !preempt {
             return Some(cur);
@@ -1341,9 +1394,9 @@ fn choose(core: usize, cur: usize, preempt: bool, now: u64) -> Option<usize> {
         let expired = now >= SLOT[cur].slice_end.load(Ordering::Relaxed);
         // an unexpired slice was granted by an earlier decision; a new one needs a fresh look at the class rules
         if !expired || class_ok(cur, core, now, 0) {
-            skip |= 1u64 << cur;
+            skip.insert(cur);
             for _ in 0..=task::limit() {
-                let Some(cand) = best_candidate(core, cur, now, skip) else { break };
+                let Some(cand) = best_candidate(core, cur, now, &skip) else { break };
                 if !should_switch(cand, cur, expired, now) {
                     break;
                 }
@@ -1355,7 +1408,7 @@ fn choose(core: usize, cur: usize, preempt: bool, now: u64) -> Option<usize> {
                     }
                     return Some(cand);
                 }
-                skip |= 1 << cand;
+                skip.insert(cand);
             }
             if expired {
                 start_slice(cur, now); // nobody to hand the core to: another slice
@@ -1364,14 +1417,14 @@ fn choose(core: usize, cur: usize, preempt: bool, now: u64) -> Option<usize> {
         }
     }
     if cur != usize::MAX {
-        skip |= 1u64 << cur;
+        skip.insert(cur);
     }
     for _ in 0..=task::limit() {
-        let cand = best_candidate(core, cur, now, skip)?;
+        let cand = best_candidate(core, cur, now, &skip)?;
         if claim(cand) {
             return Some(cand);
         }
-        skip |= 1 << cand;
+        skip.insert(cand);
     }
     None
 }

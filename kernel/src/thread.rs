@@ -18,7 +18,7 @@
 #![forbid(unsafe_code)]
 use crate::sched;
 use crate::sync::{SpinLock, R_WORDS};
-use crate::task::{self, frame, lock, State, MAX_TASKS};
+use crate::task::{self, frame, lock, State};
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 pub const E_AGAIN: i64 = -10;

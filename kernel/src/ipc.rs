@@ -46,7 +46,7 @@ const QLEN: usize = 8;
 
 #[derive(Clone, Copy)]
 pub struct Msg {
-    pub sender: u8,
+    pub sender: u16,
     pub call: bool,
     /// 0 = synchronous caller blocked in IPC_CALL; otherwise 1 + index of the async call in the sender's ring.
     pub tag: u8,
@@ -60,7 +60,7 @@ pub struct Endpoint {
     head: usize,
     len: usize,
     /// Receiver sleeping on this endpoint.
-    pub waiter: Option<u8>,
+    pub waiter: Option<u16>,
 }
 
 impl Endpoint {
@@ -68,7 +68,7 @@ impl Endpoint {
     /// more, and the task id is about to be reused by a fresh instance, which must not be confused
     /// with them (a server would link the stale call to the new instance and reply into its state).
     /// Plain notifications (`call == false`) stay: they were sent and are still deliverable.
-    pub fn purge_calls_from(&mut self, e: u8, tid: u8) {
+    pub fn purge_calls_from(&mut self, e: u8, tid: u16) {
         let mut kept = [NO_MSG; QLEN];
         let mut n = 0;
         for k in 0..self.len {
@@ -86,11 +86,11 @@ impl Endpoint {
 }
 
 /// Owner capability node of each run-time endpoint (`NO_OWNER`: free). The endpoint lives as long as that node.
-const NO_OWNER: u8 = u8::MAX;
+const NO_OWNER: u16 = u16::MAX;
 const NO_OWNER_NODE: NodeId = NodeId::MAX;
 static EP_NODE: [AtomicU16; NEP] = [const { AtomicU16::new(NO_OWNER_NODE) }; NEP];
 /// ... and the task that created it (for its quota).
-static EP_TASK: [AtomicU8; NEP] = [const { AtomicU8::new(NO_OWNER) }; NEP];
+static EP_TASK: [AtomicU16; NEP] = [const { AtomicU16::new(NO_OWNER) }; NEP];
 /// Most run-time endpoints one program (all its threads together) may own at a time, and the ones programs may never take.
 pub const MAX_OWNED_EPS: usize = 4;
 const EP_RESERVE: usize = 4;
@@ -103,7 +103,7 @@ pub fn root_node(e: u8) -> Option<NodeId> {
 }
 
 /// The task that created run-time endpoint `e` (`None` for a boot endpoint or a free one).
-pub fn dynamic_owner(e: u8) -> Option<u8> {
+pub fn dynamic_owner(e: u8) -> Option<u16> {
     if e < EP_FIRST_DYNAMIC || e as usize >= NEP {
         return None;
     }
@@ -123,12 +123,12 @@ pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u8> {
         if owned >= MAX_OWNED_EPS || free <= EP_RESERVE {
             return None;
         }
-    } else if (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| in_use(e) && EP_TASK[e].load(Ordering::SeqCst) == task as u8).count() >= MAX_OWNED_EPS {
+    } else if (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| in_use(e) && EP_TASK[e].load(Ordering::SeqCst) == task as u16).count() >= MAX_OWNED_EPS {
         return None;
     }
     for e in EP_FIRST_DYNAMIC as usize..NEP {
         if EP_NODE[e].compare_exchange(NO_OWNER_NODE, node, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            EP_TASK[e].store(task as u8, Ordering::SeqCst);
+            EP_TASK[e].store(task as u16, Ordering::SeqCst);
             return Some(e as u8);
         }
     }
@@ -137,10 +137,10 @@ pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u8> {
 
 /// The owner capabilities in `marked` are being revoked (their nodes are dead already): the run-time endpoints
 /// they own cease to exist. Whoever waits on them or in their queues is told, so nobody sleeps for ever.
-pub fn destroy_marked(marked: &[bool; crate::cap::NODES]) {
+pub fn destroy_marked(marked: &crate::cap::NodeSet) {
     for e in EP_FIRST_DYNAMIC as usize..NEP {
         let n = EP_NODE[e].load(Ordering::SeqCst);
-        if n == NO_OWNER_NODE || !marked[n as usize] {
+        if n == NO_OWNER_NODE || !marked.has(n as usize) {
             continue;
         }
         let dead = crate::syscall::E_DEAD;
@@ -212,7 +212,7 @@ fn link_call(rcv: usize, m: &Msg) {
     if rcv == sender {
         let mut t = task::lock(rcv);
         t.reply_to = Some((m.sender, m.tag));
-        t.callee = Some(rcv as u8);
+        t.callee = Some(rcv as u16);
     } else {
         // both tasks, in ascending order
         let (lo, hi) = if rcv < sender { (rcv, sender) } else { (sender, rcv) };
@@ -227,7 +227,7 @@ fn link_call(rcv: usize, m: &Msg) {
 
 fn set_callee(sender: &mut task::Task, tag: u8, rcv: usize) {
     if tag == 0 {
-        sender.callee = Some(rcv as u8);
+        sender.callee = Some(rcv as u16);
     } else {
         crate::ring::set_callee(sender, tag, rcv);
     }
@@ -310,7 +310,7 @@ pub fn recv(me: usize, e: u8, block: bool) -> Recv {
     if ep.waiter.is_some() {
         return Recv::Busy;
     }
-    ep.waiter = Some(me as u8);
+    ep.waiter = Some(me as u16);
     sched::set_state(me, State::RecvWait(e));
     Recv::Blocked
 }
@@ -325,7 +325,7 @@ pub fn reply(server: usize, w: [u64; 3]) -> bool {
     if tag != 0 {
         return crate::ring::complete_call(&mut tc, c, tag, server, w);
     }
-    if tc.callee != Some(server as u8) || sched::state(c) != State::CallWait {
+    if tc.callee != Some(server as u16) || sched::state(c) != State::CallWait {
         return false; // caller died or moved on
     }
     tc.callee = None;

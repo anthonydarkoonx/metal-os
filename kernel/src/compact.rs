@@ -12,7 +12,7 @@
 use crate::mem::{self, FKind, PAGE, RAM_BASE};
 use crate::sched;
 use crate::sync::{SpinLock, R_COMPACT};
-use crate::task::{self, State, MAX_TASKS};
+use crate::task::{self, State};
 use crate::mmu;
 use core::sync::atomic::{AtomicU64, Ordering};
 use metal_compact::Compactor;
@@ -117,7 +117,7 @@ pub fn stats() -> Stats {
 
 /// Contiguous allocation. With `direct`, a failure triggers synchronous compaction
 /// (in bounded batches, so the kernel lock is not held for long stretches) and a retry.
-pub fn alloc_contig(n: usize, owner: u8, direct: bool) -> Option<usize> {
+pub fn alloc_contig(n: usize, owner: mem::Owner, direct: bool) -> Option<usize> {
     if let Some(pa) = mem::alloc_contig(n, owner) {
         return Some(pa);
     }

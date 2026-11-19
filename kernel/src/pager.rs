@@ -41,7 +41,7 @@ use crate::mmu::{self, Page};
 use crate::sched;
 use crate::sync::{Global, SpinLock, R_PAGER};
 use crate::syscall::{E_INVAL, E_NOMEM, E_PERM};
-use crate::task::{self, State, FIRST_DYNAMIC_TASK, MAX_TASKS};
+use crate::task::{self, State, FIRST_DYNAMIC_TASK};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 pub const MAX_SLOTS: usize = 1024;
@@ -56,8 +56,8 @@ pub const JOB_READ: u64 = 2;
 #[derive(Clone, Copy)]
 enum Op {
     /// A page copied out of the store: (task, address space, address, store handle, disk slot, cancelled).
-    Write { tid: u8, l1: usize, va: usize, handle: u32, slot: u32, cancelled: bool },
-    Read { tid: u8, va: usize, slot: u32 },
+    Write { tid: u16, l1: usize, va: usize, handle: u32, slot: u32, cancelled: bool },
+    Read { tid: u16, va: usize, slot: u32 },
 }
 
 struct Pager {
@@ -67,7 +67,7 @@ struct Pager {
     used: [u64; MAX_SLOTS / 64],
     want: usize,
     cur: Option<Op>,
-    ins: [Option<(u8, usize, u32)>; QUEUE],
+    ins: [Option<(u16, usize, u32)>; QUEUE],
     /// Where the next victim search starts.
     cursor: (usize, usize),
     seq: u32,
@@ -95,11 +95,11 @@ fn nonce_of(ctr: u64) -> [u8; 12] {
     n
 }
 
-fn aad_of(slot: u32, tid: usize, va: usize) -> [u8; 13] {
-    let mut a = [0u8; 13];
+fn aad_of(slot: u32, tid: usize, va: usize) -> [u8; 14] {
+    let mut a = [0u8; 14];
     a[..4].copy_from_slice(&slot.to_le_bytes());
-    a[4] = tid as u8;
-    a[5..].copy_from_slice(&(va as u64).to_le_bytes());
+    a[4..6].copy_from_slice(&(tid as u16).to_le_bytes());
+    a[6..].copy_from_slice(&(va as u64).to_le_bytes());
     a
 }
 
@@ -308,7 +308,7 @@ fn start_write(me: usize) -> Option<Op> {
                     let ctr = p.ctr;
                     let tag = metal_aead::seal(&key, &nonce_of(ctr), &aad_of(slot, tid, va), &mut SCRATCH.get()[..]);
                     p.meta[slot as usize] = SlotMeta { sealed: true, ctr, tag };
-                    let op = Op::Write { tid: tid as u8, l1: t.l1, va, handle, slot, cancelled: false };
+                    let op = Op::Write { tid: tid as u16, l1: t.l1, va, handle, slot, cancelled: false };
                     p.cur = Some(op);
                     p.want -= 1;
                     p.cursor = (tid, va + PAGE);
@@ -361,7 +361,7 @@ pub fn done(cur: usize, status: u64, buf_va: usize) -> i64 {
                 FAILED.fetch_add(1, Ordering::Relaxed);
                 lose_page(tid, va, slot);
             } else {
-                let owner = mem::OWNER_TASK0 + tid as u8;
+                let owner = mem::OWNER_TASK0 + tid as u16;
                 let Some(pa) = mem::alloc_movable(owner, tid, va) else { return E_NOMEM }; // (the job stays: ask again)
                 let opened = {
                     let t = task::lock(me);
@@ -483,11 +483,11 @@ pub fn request_in(tid: usize, va: usize, slot: u32) -> Wait {
             }
         }
     }
-    let same = |t: u8, v: usize| t as usize == tid && v == va;
+    let same = |t: u16, v: usize| t as usize == tid && v == va;
     let known = matches!(p.cur, Some(Op::Read { tid: t, va: v, .. }) if same(t, v)) || p.ins.iter().flatten().any(|&(t, v, _)| same(t, v));
     if !known {
         if let Some(i) = p.ins.iter().position(|q| q.is_none()) {
-            p.ins[i] = Some((tid as u8, va, slot));
+            p.ins[i] = Some((tid as u16, va, slot));
         }
     }
     KICK_PENDING.store(true, Ordering::Relaxed);

@@ -69,6 +69,9 @@ one (thousands of single-frame holes), shows a 512 KiB contiguous request fail, 
 hammers the pages being moved from another core (faults that raced with a move are counted and
 retried), verifies every page afterwards, then repeats with synchronous compaction.
 
+## Task slots
+The number of task slots is chosen at boot (`task::tasks_for`): one per MiB of RAM, between 64 and 1024, or what the fw_cfg file `opt/metal/max-tasks` says. All per-task state (task records, saved registers, scheduler slots, spawn bookkeeping) is carved out of RAM at that size (`kernel/src/table.rs`), and the capability node pool holds 8192 nodes. `make scale` starts programs until all 997 free slots of a 1024-slot table are used, ends them together and checks that every frame, node and slot comes back.
+
 ## Scheduling, SMP and locking
 Cores come up through PSCI `CPU_ON` (up to 4), each with its own stack, MMU setup and timer. There is
 **no global kernel lock**: kernel code on different cores runs in parallel.
@@ -76,13 +79,17 @@ Cores come up through PSCI `CPU_ON` (up to 4), each with its own stack, MMU setu
 *Locks.* A small set of spinlocks, each with a *rank*; a core may only acquire a lock whose rank exceeds
 every lock it already holds, so no cycle of waiting cores can form. The check runs on every acquisition
 and panics immediately on a violation instead of deadlocking once in a million runs.
-`compaction < endpoint(e) < task(t) < ring(t) < capability nodes < irq < objects < smmu < memory < console`.
+`lifecycle < spawn < compaction < endpoint(e) < task(t) < ring(t) < capability nodes < irq < objects < smmu < memory < console`.
 Common paths (an IPC round trip between two tasks, a syscall on the caller's own state) take only their
-own endpoint and task locks. Rare global operations (a task dying, a capability revoke) take *all*
-endpoint and task locks in order. Memory is claimed under its lock and zeroed outside it; the console
+own endpoint and task locks. The operations that must see many tasks (a task dying, a capability revoke)
+exclude each other and the calls that create, wait for or give capabilities to other tasks (SPAWN, WAIT, THREAD_CREATE,
+TASK_START, CAP_GRANT, RESTORE_OF) with the *lifecycle* lock, but they no longer stop the machine: a revoke first
+kills its capability nodes atomically (nothing can be used or made under a dead node), then clears the tasks' tables one task lock at a
+time and only then frees the node numbers; a dying task is first cut off from the endpoints (no sender wakes it, its queued calls are
+dropped), then everyone linked to it is told. Memory is claimed under its lock and zeroed outside it; the console
 lock keeps lines from interleaving.
 
-*Scheduler.* Lock-free: each task's run state is one atomic word and a core *claims* a task with a
+*Scheduler.* Lock-free (its ready, timed and real-time task sets are multi-word bit masks, one bit per task slot): each task's run state is one atomic word and a core *claims* a task with a
 compare-and-swap. A task is owned by a core from dispatch until that core's next dispatch decision, so
 no other core can pick it while its own core is still handling its syscall. Wakeups write the task's
 frame first and publish with a release store; a core that claims the task sees it. Blocking is ordered so

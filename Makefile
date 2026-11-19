@@ -50,7 +50,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -383,6 +383,15 @@ quick-programs: kernel disk
 
 quick-net: kernel disk
 	@$(WITH_PEER) sh -c 'timeout 200 $(QEMU) -fw_cfg name=opt/metal/only,string=8 2>&1 | grep -aE "TEST|\[client\]|\[nettest|\[netd|PANIC|panic"'
+
+# Every task slot of a big table at once (1024 slots, 512 MiB): programs are started until SPAWN says the table is full, then all end together.
+scale:
+	@$(MAKE) -s scale-run RAM_MIB=512
+
+scale-run: kernel disk
+	@timeout 280 $(QEMU) -fw_cfg name=opt/metal/only,string=9 -fw_cfg name=opt/metal/max-tasks,string=1024 > build-scale.log 2>&1; \
+	 grep -a "task slots\|TEST\|PANIC\|panic" build-scale.log | cut -c1-300; \
+	 if grep -aq "TEST every one of 1024 task slots.*PASS" build-scale.log && grep -aq "TEST they are all killed.*PASS" build-scale.log && ! grep -aq "PANIC" build-scale.log; then echo "== SCALE: ALL PASS =="; else echo "== SCALE: FAILED =="; exit 1; fi
 
 quick-sched: kernel disk
 	@timeout 90 $(QEMU) -fw_cfg name=opt/metal/only,string=2 2>&1 | grep -E "SCHED|TEST|^\[sched\]|PANIC|panic|DEBUG"

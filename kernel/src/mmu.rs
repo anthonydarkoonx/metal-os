@@ -289,7 +289,7 @@ fn table(pa: usize) -> &'static mut [u64; 512] {
 }
 
 /// New user address space: kernel mappings copied in, empty user window.
-pub fn new_space(owner: u8) -> Option<usize> {
+pub fn new_space(owner: mem::Owner) -> Option<usize> {
     let l1_pa = mem::alloc_kind(owner, mem::FKind::PageTable)?;
     let l2_pa = mem::alloc_kind(owner, mem::FKind::PageTable)?;
     let l1 = table(l1_pa);
@@ -315,7 +315,7 @@ fn user_l1_entries() -> impl Iterator<Item = usize> {
 }
 
 /// The L2 table for the 1 GiB around `va` (made if `create` names an owner).
-fn l2_for(l1: usize, va: usize, create: Option<u8>) -> Option<&'static mut [u64; 512]> {
+fn l2_for(l1: usize, va: usize, create: Option<mem::Owner>) -> Option<&'static mut [u64; 512]> {
     if !in_user_range(va) {
         return None; // (L1 entries outside the user ranges hold the kernel's own tables)
     }
@@ -326,7 +326,7 @@ fn l2_for(l1: usize, va: usize, create: Option<u8>) -> Option<&'static mut [u64;
     Some(table((*e & ADDR_MASK) as usize))
 }
 
-fn leaf(l1: usize, va: usize, create: Option<u8>) -> Option<&'static mut u64> {
+fn leaf(l1: usize, va: usize, create: Option<mem::Owner>) -> Option<&'static mut u64> {
     let l2 = l2_for(l1, va, create)?;
     let i2 = (va >> 21) & 511;
     if l2[i2] & 1 == 0 {
@@ -337,7 +337,7 @@ fn leaf(l1: usize, va: usize, create: Option<u8>) -> Option<&'static mut u64> {
     Some(&mut l3[(va >> 12) & 511])
 }
 
-pub fn map_user(l1: usize, va: usize, pa: usize, perm: Perm, owner: u8) -> Result<(), ()> {
+pub fn map_user(l1: usize, va: usize, pa: usize, perm: Perm, owner: mem::Owner) -> Result<(), ()> {
     if !in_user(va) {
         return Err(());
     }

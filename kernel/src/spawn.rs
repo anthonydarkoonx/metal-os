@@ -22,15 +22,15 @@ use crate::mem::{self, PAGE};
 use crate::mmu;
 use crate::sched;
 use crate::sync::{SpinLock, R_SPAWNING};
-use crate::task::{self, frame, lock, MapRec, State, World, FIRST_DYNAMIC_TASK, MAX_TASKS, IMAGE_END, STACK_PAGES, USER_BASE};
+use crate::task::{self, frame, lock, MapRec, State, World, FIRST_DYNAMIC_TASK, IMAGE_END, STACK_PAGES, USER_BASE};
 use crate::trap::TrapFrame;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use metal_sched::Class;
 
 pub const ROLE_PROGRAM: u8 = 32;
 /// A thread: a task that runs in another task's address space (see `thread_create`).
 pub const ROLE_THREAD: u8 = 33;
-pub const NO_PARENT: u8 = u8::MAX;
+pub const NO_PARENT: u16 = u16::MAX;
 pub const EXIT_FAULTED: u64 = u64::MAX;
 pub const EXIT_KILLED: u64 = u64::MAX - 1;
 /// Delegation word: byte `i` is the parent's slot to give the child as its slot `i`; `NONE` skips.
@@ -41,6 +41,7 @@ const MAX_HEAP: usize = 16384;
 const DEFAULT_HEAP: usize = 256;
 /// Most programs one program may have at a time (zombies and embryos count), and the same for a boot-time task.
 const MAX_CHILDREN_PROGRAM: usize = 8;
+/// A boot-time task (the shell, the program manager) is trusted with as many programs at once as there are slots (at least this many).
 const MAX_CHILDREN_ROLE: usize = 64;
 /// What every program costs its parent's budget on top of its heap quota and its own budget: its stack and page tables.
 const OVERHEAD: usize = STACK_PAGES + 8;
@@ -59,7 +60,7 @@ pub const E_AGAIN: i64 = -10;
 /// lets go of the child's lock between pages; it remembers the epoch it started in, so that a child that was killed, collected and
 /// replaced by another embryo of the same parent is not mistaken for the one it was loading.
 static EPOCH: crate::table::Table<AtomicU32> = crate::table::Table::new();
-static PARENT: crate::table::Table<AtomicU8> = crate::table::Table::new();
+static PARENT: crate::table::Table<AtomicU16> = crate::table::Table::new();
 static EXIT_CODE: crate::table::Table<AtomicU64> = crate::table::Table::new();
 static SPAWNING: SpinLock<()> = SpinLock::new(());
 /// Per program: how many threads it may have, and how many it has now.
@@ -118,7 +119,7 @@ fn add_charge(child: usize, n: usize) -> bool {
 }
 
 fn children_of(p: usize) -> usize {
-    (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == p as u8).count()
+    (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == p as u16).count()
 }
 
 /// The address space `a` has been emptied: what it held and what it handed down are gone.
@@ -163,7 +164,7 @@ pub fn quota(cur: usize, op: u64, child: u64, heap: u64, budget: u64) -> i64 {
         }
         1 => {
             let child = child as usize;
-            if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != pa as u8 || matches!(sched::state(child), State::Free | State::Dead) {
+            if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != pa as u16 || matches!(sched::state(child), State::Free | State::Dead) {
                 return E_INVAL;
             }
             if heap == 0 || heap > MAX_HEAP as u64 || budget > MAX_BUDGET as u64 {
@@ -269,7 +270,7 @@ fn set_bit(map: &[AtomicU64; BITMAP_WORDS], page: usize) {
 
 /// An embryo of `parent` (the only task that may load and start it).
 fn embryo_of(parent: usize, tid: usize) -> bool {
-    tid < task::limit() && is_program(tid) && PARENT[tid].load(Ordering::SeqCst) == task::aspace(parent) as u8 && sched::state(tid) == State::Embryo
+    tid < task::limit() && is_program(tid) && PARENT[tid].load(Ordering::SeqCst) == task::aspace(parent) as u16 && sched::state(tid) == State::Embryo
 }
 
 /// The request block `SPAWN(slot, request va)` reads from the caller's memory (little endian, 96 bytes). It creates an
@@ -315,19 +316,19 @@ pub fn task_base(parent: usize, child: usize) -> Result<usize, i64> {
     Ok(IMG_BASE[child].load(Ordering::SeqCst))
 }
 /// Programs started with `FLAG_NO_FIXED_MAPS`, by task slot.
-static NO_FIXED_MAPS: AtomicU64 = AtomicU64::new(0);
+static NO_FIXED_MAPS: crate::table::Table<core::sync::atomic::AtomicBool> = crate::table::Table::new();
 
 /// The boot-time services (not the test programs) may not name addresses for `MEM_MAP` either.
 pub fn restrict_boot_task(tid: usize, role: u8) {
     if matches!(role, 2 | 4 | 5 | 6 | 7 | 9 | 12 | 13 | 14 | 18 | 19 | 20) {
-        NO_FIXED_MAPS.fetch_or(1 << tid, Ordering::SeqCst);
+        NO_FIXED_MAPS[tid].store(true, Ordering::SeqCst);
     } else {
-        NO_FIXED_MAPS.fetch_and(!(1 << tid), Ordering::SeqCst);
+        NO_FIXED_MAPS[tid].store(false, Ordering::SeqCst);
     }
 }
 
 pub fn fixed_maps_allowed(program: usize) -> bool {
-    NO_FIXED_MAPS.load(Ordering::SeqCst) & (1 << program) == 0
+    !NO_FIXED_MAPS[program].load(Ordering::SeqCst)
 }
 pub const NET_EP_SLOT: usize = 10;
 pub const NET_PAGE_SLOT: usize = 11;
@@ -354,8 +355,8 @@ static NET_POOL: AtomicU64 = AtomicU64::new(0);
 
 /// (session page, generation) of a program's file-system session; page `NO_FS` if it has none. The generation changes
 /// every time a slot gets a new program, so the VFS can tell a new program from its predecessor in the same slot.
-/// The program that started program `p` (its parent), or `NO_PARENT` (255) for one the kernel started itself.
-pub fn parent_of(p: usize) -> u8 {
+/// The program that started program `p` (its parent), or `NO_PARENT` (65535) for one the kernel started itself.
+pub fn parent_of(p: usize) -> u16 {
     PARENT[p].load(Ordering::SeqCst)
 }
 
@@ -509,7 +510,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     // are for boot-time spawners; counted under the lock that serialises SPAWN)
     if is_program(task::aspace(parent)) {
         let pa = task::aspace(parent);
-        let mine = |per: &crate::table::Table<AtomicU8>| (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == pa as u8 && per[c].load(Ordering::SeqCst) != NO_FS).count();
+        let mine = |per: &crate::table::Table<AtomicU8>| (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == pa as u16 && per[c].load(Ordering::SeqCst) != NO_FS).count();
         let full = |pool: &AtomicU64, pages: usize| pool.load(Ordering::SeqCst).count_ones() as usize + SESSION_RESERVE >= pages;
         if (flags & FLAG_FS != 0 && (mine(&FS_PAGE) >= SESSION_SHARE || full(&FS_POOL, FS_PAGES)))
             || (flags & FLAG_NET != 0 && (mine(&NET_PAGE) >= SESSION_SHARE || full(&NET_POOL, NET_PAGES)))
@@ -543,7 +544,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     // The parent's limits: how many programs it may have, and what this one costs its budget.
     let pa = task::aspace(parent);
     let cost = heap + budget + OVERHEAD;
-    let refused = if children_of(pa) >= if is_program(pa) { MAX_CHILDREN_PROGRAM } else { MAX_CHILDREN_ROLE } {
+    let refused = if children_of(pa) >= if is_program(pa) { MAX_CHILDREN_PROGRAM } else { MAX_CHILDREN_ROLE.max(task::limit()) } {
         Some(E_FULL)
     } else if !try_charge(pa, cost) {
         Some(E_NOMEM)
@@ -566,7 +567,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     name.copy_from_slice(if rq[56..64].iter().any(|&b| b != 0) { &rq[56..64] } else { b"program\0" });
     task::set_dynamic_info(tid, ROLE_PROGRAM, &name, class, heap, budget);
     EPOCH[tid].fetch_add(1, Ordering::SeqCst);
-    PARENT[tid].store(pa as u8, Ordering::SeqCst);
+    PARENT[tid].store(pa as u16, Ordering::SeqCst);
     CHARGE[tid].store(cost, Ordering::SeqCst);
     DELEGATED[tid].store(0, Ordering::SeqCst);
     CONTIG[tid].store(0, Ordering::SeqCst);
@@ -574,9 +575,9 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     FS_GEN[tid].fetch_add(1, Ordering::SeqCst);
     THREAD_QUOTA[tid].store(threads as u8, Ordering::SeqCst);
     if flags & FLAG_NO_FIXED_MAPS != 0 {
-        NO_FIXED_MAPS.fetch_or(1 << tid, Ordering::SeqCst);
+        NO_FIXED_MAPS[tid].store(true, Ordering::SeqCst);
     } else {
-        NO_FIXED_MAPS.fetch_and(!(1 << tid), Ordering::SeqCst);
+        NO_FIXED_MAPS[tid].store(false, Ordering::SeqCst);
     }
     let base = if flags & FLAG_PIE != 0 {
         task::random_pie_base()
@@ -697,7 +698,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     // closes the gap: the death either ran before (the parent is gone: undo) or finds the embryo and ends it.
     let committed = {
         let _t = lock(tid);
-        let still_mine = PARENT[tid].load(Ordering::SeqCst) == pa as u8;
+        let still_mine = PARENT[tid].load(Ordering::SeqCst) == pa as u16;
         if still_mine {
             sched::set_state(tid, State::Embryo);
         }
@@ -810,7 +811,7 @@ pub enum Waited {
 }
 
 pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
-    if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 || sched::state(child) == State::Embryo {
+    if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u16 || sched::state(child) == State::Embryo {
         return Waited::Err(E_INVAL); // (waiting for an embryo you have not started would never end)
     }
     // Under the lifecycle lock (the child's death holds it): the death either finished before we look
@@ -822,7 +823,7 @@ pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
             // The lock above is the caller's own task lock, and two threads of one program have different ones: both could get here for the
             // same zombie. Whoever takes the parent link away collects it; the other finds it gone. (Releasing twice would give back the
             // core's load twice, and, if a SPAWN took the slot in between, the new program's session.)
-            if PARENT[child].compare_exchange(task::aspace(cur) as u8, NO_PARENT, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            if PARENT[child].compare_exchange(task::aspace(cur) as u16, NO_PARENT, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 return Waited::Err(E_INVAL);
             }
             let code = EXIT_CODE[child].load(Ordering::SeqCst);
@@ -832,7 +833,7 @@ pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
         State::Free => Waited::Err(E_INVAL),
         _ if nohang => Waited::Err(E_AGAIN),
         _ => {
-            sched::set_state(cur, State::ChildWait(child as u8));
+            sched::set_state(cur, State::ChildWait(child as u16));
             Waited::Blocked
         }
     }
@@ -840,7 +841,7 @@ pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
 
 /// Condemn a child (the next core to own it kills it). Killing a zombie is an error: it is already dead.
 pub fn kill(cur: usize, child: usize) -> i64 {
-    if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 {
+    if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u16 {
         return E_INVAL;
     }
     match sched::state(child) {
@@ -869,7 +870,7 @@ pub fn on_death(_w: &mut World, tid: usize, done: Option<usize>) {
     for c in FIRST_DYNAMIC_TASK..task::limit() {
         let par = PARENT[c].load(Ordering::SeqCst);
         // (children belong to a program, not to one of its threads)
-        if par != NO_PARENT && (par == tid as u8 || done == Some(par as usize)) && c != tid {
+        if par != NO_PARENT && (par == tid as u16 || done == Some(par as usize)) && c != tid {
             PARENT[c].store(NO_PARENT, Ordering::SeqCst);
             match sched::state(c) {
                 State::Dead if task::members(c).next().is_none() => release(c),
@@ -892,9 +893,9 @@ pub fn on_death(_w: &mut World, tid: usize, done: Option<usize>) {
         return;
     }
     // the parent (or one of its threads) may be waiting
-    if let Some(waiter) = task::members(p as usize).find(|&m| sched::state(m) == State::ChildWait(prog as u8)) {
+    if let Some(waiter) = task::members(p as usize).find(|&m| sched::state(m) == State::ChildWait(prog as u16)) {
         frame(waiter).x[0] = code; // the result register, written before the parent can run
-        sched::wake_if(waiter, State::ChildWait(prog as u8));
+        sched::wake_if(waiter, State::ChildWait(prog as u16));
         release(prog);
     }
     // else: a zombie until the parent waits (or dies, which frees it above)
@@ -1045,7 +1046,7 @@ fn make_thread_stack(leader: usize, tid: usize, bytes: usize) -> Result<usize, i
         }
     }
     let Some(base) = base else { return Err(E_NOMEM) };
-    let owner = mem::OWNER_TASK0 + leader as u8;
+    let owner = mem::OWNER_TASK0 + leader as u16;
     for p in 0..pages {
         let va = base + p * PAGE;
         let ok = mem::alloc_movable(owner, leader, va).map_or(false, |pa| {
@@ -1060,7 +1061,7 @@ fn make_thread_stack(leader: usize, tid: usize, bytes: usize) -> Result<usize, i
             return Err(E_NOMEM);
         }
     }
-    t.tstacks[slot] = (base, pages, tid as u8);
+    t.tstacks[slot] = (base, pages, tid as u16);
     Ok(base + pages * PAGE)
 }
 
@@ -1090,8 +1091,9 @@ pub fn thread_gone(tid: usize, leader: usize) {
 
 /// Carve this module's per-task tables (`n` tasks); called once from `task::init_tables`.
 pub fn init_tables(n: usize) {
+    NO_FIXED_MAPS.init(n, |_| core::sync::atomic::AtomicBool::new(false));
     EPOCH.init(n, |_| const { AtomicU32::new(0) });
-    PARENT.init(n, |_| const { AtomicU8::new(NO_PARENT) });
+    PARENT.init(n, |_| const { AtomicU16::new(NO_PARENT) });
     EXIT_CODE.init(n, |_| const { AtomicU64::new(EXIT_FAULTED) });
     THREAD_QUOTA.init(n, |_| const { AtomicU8::new(0) });
     EXTRA.init(n, |_| const { AtomicU8::new(0) });

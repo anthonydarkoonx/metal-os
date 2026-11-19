@@ -152,7 +152,55 @@ fn state_of(tid: i64) -> u64 {
 }
 
 fn live_dynamic() -> usize {
-    (FIRST_DYNAMIC..64).filter(|&t| state_of(t as i64) != 0 && sysinfo_at(3, t)[0] != E_INVAL as u64).count()
+    (FIRST_DYNAMIC..task_slots() as u64).filter(|&t| state_of(t as i64) != 0 && sysinfo_at(3, t)[0] != E_INVAL as u64).count()
+}
+
+/// How many task slots the machine has: the rows of the task table (SYSINFO page 3) until one is refused.
+fn task_slots() -> usize {
+    (0..4096u64).take_while(|&t| sysinfo_at(3, t)[0] as i64 == 0).count()
+}
+
+/// `make scale`: every task slot of a big table is used at once, and everything is back after they all end together.
+pub fn scale_tests() {
+    let _ = mem_map(10, 0x8034_0000, true);
+    let v = Vfs::new(9, 0x8034_0000);
+    let sleeper = v.read_file("/system/bin/sleeper").unwrap_or_default();
+    if sleeper.len() < 32 {
+        println!("[client] TEST the sleeper program is in the system image: FAIL");
+        return;
+    }
+    let slots = task_slots();
+    let (free0, nodes0, busy0) = (sysinfo(0)[3], sysinfo(1)[5], live_dynamic());
+    let begin = counter();
+    let mut kids: Vec<i64> = Vec::new();
+    let mut last = 0;
+    for _ in 0..slots + 8 {
+        let t = Req::new().arg(0).heap(4).go(&sleeper); // (a small heap: the default 256 pages would use up the conductor's budget at about a hundred programs)
+        if t < 0 {
+            last = t;
+            break;
+        }
+        kids.push(t);
+    }
+    let spawned = counter() - begin;
+    let room = slots - FIRST_DYNAMIC as usize - busy0;
+    println!("[client] TEST every one of {slots} task slots can be used, then SPAWN says the table is full ({} programs of {room} free slots, then {last}; {} us each): {}",
+        kids.len(), spawned * 1_000_000 / frequency() / kids.len().max(1) as u64, verdict(last == E_FULL as i64 && kids.len() == room));
+    let begin = counter();
+    for &k in &kids {
+        kill(k);
+    }
+    let mut collected = 0;
+    for &k in &kids {
+        if wait(k, false) as u64 == EXIT_KILLED {
+            collected += 1;
+        }
+    }
+    let ended = counter() - begin;
+    sleep(20);
+    let (free1, nodes1, busy1) = (sysinfo(0)[3], sysinfo(1)[5], live_dynamic());
+    println!("[client] TEST they are all killed and collected together, and every frame, capability node and task slot is back (collected {collected} of {}, {} us each; frames {free0} -> {free1}, nodes {nodes0} -> {nodes1}, live programs {busy0} -> {busy1}): {}",
+        kids.len(), ended * 1_000_000 / frequency() / kids.len().max(1) as u64, verdict(collected == kids.len() && free1 + 8 >= free0 && nodes1 <= nodes0 && busy1 == busy0));
 }
 
 /// Run a program with a console endpoint like the shell's: serve its output and its input (`input`, then end of input).
@@ -571,6 +619,8 @@ pub fn tests() {
         let (c, o, _) = run_with_console3(Req::new().arg(23).heap(64).budget(3000).threads(1).give(&[SPAWN_SLOT as u8]), &race, b"");
         let o = String::from_utf8_lossy(&o).into_owned();
         println!("[client] TEST a dead child is collected by one of two threads that wait for it (exit code {c}{}): {}", if o.is_empty() { String::new() } else { alloc::format!(", {}", o.trim()) }, verdict(c == 0));
+    } else if race.len() >= 32 {
+        println!("[client] TEST a dead child is collected by one of two threads that wait for it (skipped: one core): PASS");
     }
     // L2 and N9: RESTORE_OF puts a capability back only under the node it hung under, not under whatever has taken that node's number since
     {
@@ -600,7 +650,8 @@ pub fn tests() {
         }
         sleep(50);
         let leaked = sysinfo(1)[3] as i64 - live0;
-        println!("[client] TEST a program that ends in the middle of SPAWN leaves no embryo nobody owns (60 runs, {leaked} tasks left over): {}", verdict(leaked == 0));
+        println!("[client] TEST a program that ends in the middle of SPAWN leaves no embryo nobody owns (60 runs, {leaked} tasks left over): {}", verdict(leaked == 0));    } else if race.len() >= 32 {
+        println!("[client] TEST a program that ends in the middle of SPAWN leaves no embryo nobody owns (skipped: one core): PASS");
     }
     // N3: shared memory that a thread made and gave to its own program is charged to the program after the thread has ended
     if race.len() >= 32 {

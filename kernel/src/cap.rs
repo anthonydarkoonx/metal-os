@@ -8,7 +8,36 @@ pub const NCAPS: usize = 32;
 /// A capability node's number; `NO_PARENT` (the largest value) means "no parent". (Widened from `u8` on the ROCK 3C, whose boot-time services and drivers
 /// already use two thirds of 254 nodes, leaving too little for two windowed programs at once.)
 pub type NodeId = u16;
-pub const NODES: usize = 1024;
+/// Capability nodes in the whole system: enough for a thousand tasks with several capabilities each.
+pub const NODES: usize = 8192;
+
+/// A set of nodes (a bit each): what a revoke marks.
+#[derive(Clone, Copy)]
+pub struct NodeSet([u64; NODES / 64]);
+
+impl NodeSet {
+    pub const EMPTY: NodeSet = NodeSet([0; NODES / 64]);
+
+    pub fn has(&self, n: usize) -> bool {
+        self.0[n / 64] >> (n % 64) & 1 != 0
+    }
+
+    pub fn insert(&mut self, n: usize) {
+        self.0[n / 64] |= 1 << (n % 64);
+    }
+
+    pub fn remove(&mut self, n: usize) {
+        self.0[n / 64] &= !(1 << (n % 64));
+    }
+
+    pub fn any(&self) -> bool {
+        self.0.iter().any(|&w| w != 0)
+    }
+
+    pub fn count(&self) -> usize {
+        self.0.iter().map(|w| w.count_ones() as usize).sum()
+    }
+}
 
 pub type Rights = u16;
 
@@ -110,7 +139,7 @@ pub struct Minted {
 
 pub const NO_PARENT: NodeId = NodeId::MAX;
 /// (task ids are `u8`: this is "granted by no task")
-const NO_GRANTER: u8 = u8::MAX;
+const NO_GRANTER: u16 = u16::MAX;
 
 #[derive(Clone, Copy)]
 struct Node {
@@ -120,9 +149,9 @@ struct Node {
     dying: bool,
     parent: NodeId,
     /// The task that created this node with `CAP_GRANT` (`NO_PARENT` if it was not made by a grant, or the granter is gone).
-    granter: u8,
+    granter: u16,
     /// The program (address space) charged for this node when it was made for one (`mint_for`), else `NO_GRANTER`.
-    owner: u8,
+    owner: u16,
     /// Counts up each time this number is handed out (0 is never alive), and is kept while the number is free.
     gen: u32,
 }
@@ -140,7 +169,7 @@ static GEN: [AtomicU32; NODES] = [const { AtomicU32::new(0) }; NODES];
 static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, dying: false, parent: NO_PARENT, granter: NO_GRANTER, owner: NO_GRANTER, gen: 0 }; NODES]);
 
 /// Take node `i` (free, found under the table lock `t`) as a new node and publish it.
-fn take(t: &mut [Node; NODES], i: usize, parent: NodeId, granter: u8, owner: u8) -> Minted {
+fn take(t: &mut [Node; NODES], i: usize, parent: NodeId, granter: u16, owner: u16) -> Minted {
     let gen = t[i].gen.wrapping_add(1).max(1);
     t[i] = Node { used: true, dying: false, parent, granter, owner, gen };
     GEN[i].store(gen, Ordering::Release);
@@ -171,7 +200,7 @@ pub const PROGRAM_NODE_QUOTA: usize = 192;
 /// for anything else (a boot-time task: unlimited, as `mint_node`).
 pub fn mint_for(owner: usize, parent: Option<(NodeId, u32)>) -> Option<Minted> {
     let charged = crate::spawn::is_program(owner);
-    let o = owner as u8;
+    let o = owner as u16;
     let mut t = NODE_TABLE.lock(R_NODES);
     // (the parent is checked here, under the table lock that makes the node: a parent that was revoked since the caller read it, and whose number
     // has been handed out again, is refused, whatever else happened in between)
@@ -193,18 +222,18 @@ pub fn mint_granted(parent: (NodeId, u32), granter: usize) -> Option<Minted> {
     let program = crate::task::aspace(granter);
     let charged = crate::spawn::is_program(program);
     let mut t = NODE_TABLE.lock(R_NODES);
-    let g = granter as u8;
+    let g = granter as u16;
     if !parent_ok(&t, parent) {
         return None;
     }
     if t.iter().filter(|n| n.used && n.granter == g).count() >= GRANT_QUOTA
         || t.iter().filter(|n| !n.used).count() <= GRANT_RESERVE
-        || (charged && t.iter().filter(|n| n.used && n.owner == program as u8).count() >= PROGRAM_NODE_QUOTA)
+        || (charged && t.iter().filter(|n| n.used && n.owner == program as u16).count() >= PROGRAM_NODE_QUOTA)
     {
         return None;
     }
     let i = t.iter().position(|n| !n.used)?;
-    Some(take(&mut t, i, parent.0, g, if charged { program as u8 } else { NO_GRANTER }))
+    Some(take(&mut t, i, parent.0, g, if charged { program as u16 } else { NO_GRANTER }))
 }
 
 /// The node `n` hangs under and its generation, if `n` is in use and has one.
@@ -223,7 +252,7 @@ pub fn parent_of(n: NodeId) -> Option<(NodeId, u32)> {
 #[derive(Clone, Copy)]
 pub struct Revoked {
     pub id: u32,
-    pub task: u8,
+    pub task: u16,
     pub slot: u8,
     pub kind: Kind,
     pub obj: u8,
@@ -253,7 +282,7 @@ pub fn log_revoked(task: usize, slot: usize, c: Cap, parent: (NodeId, u32), map:
     let id = l.next_id;
     l.next_id = l.next_id.wrapping_add(1).max(1);
     let at = l.next;
-    l.entries[at] = Some(Revoked { id, task: task as u8, slot: slot as u8, kind: c.kind, obj: c.obj, rights: c.rights, parent: parent.0, parent_gen: parent.1, map_va: map.0, map_pages: map.1 });
+    l.entries[at] = Some(Revoked { id, task: task as u16, slot: slot as u8, kind: c.kind, obj: c.obj, rights: c.rights, parent: parent.0, parent_gen: parent.1, map_va: map.0, map_pages: map.1 });
     l.next = (at + 1) % REVOKED_LOG;
     id
 }
@@ -313,7 +342,7 @@ pub fn mint_restored(parent: (NodeId, u32)) -> Option<Minted> {
 pub fn forget_granter(tid: usize) {
     let mut t = NODE_TABLE.lock(R_NODES);
     for n in t.iter_mut() {
-        if n.used && n.granter == tid as u8 {
+        if n.used && n.granter == tid as u16 {
             n.granter = NO_GRANTER;
         }
     }
@@ -349,20 +378,20 @@ pub fn free_node(n: NodeId) {
 /// lock, so from here on no capability on one of them can be used or minted under. Adds them to `out` (which the caller may have used
 /// for earlier calls) and returns how many. Their numbers stay taken until the caller has cleared them from the tasks' tables and calls
 /// `free_marked`; teardowns are serialised (`task::World`), so no node is ever claimed twice. A root that is not alive marks nothing.
-pub fn kill_subtree(root: NodeId, include_root: bool, out: &mut [bool; NODES]) -> usize {
+pub fn kill_subtree(root: NodeId, include_root: bool, out: &mut NodeSet) -> usize {
     let mut t = NODE_TABLE.lock(R_NODES);
     let r = root as usize;
     if r >= NODES || !t[r].used || t[r].dying {
         return 0;
     }
-    let mut sub = [false; NODES];
-    sub[r] = true;
+    let mut sub = NodeSet::EMPTY;
+    sub.insert(r);
     loop {
         let mut changed = false;
         for i in 0..NODES {
             let p = t[i].parent;
-            if t[i].used && !t[i].dying && !sub[i] && p != NO_PARENT && sub[p as usize] {
-                sub[i] = true;
+            if t[i].used && !t[i].dying && !sub.has(i) && p != NO_PARENT && sub.has(p as usize) {
+                sub.insert(i);
                 changed = true;
             }
         }
@@ -371,14 +400,14 @@ pub fn kill_subtree(root: NodeId, include_root: bool, out: &mut [bool; NODES]) -
         }
     }
     if !include_root {
-        sub[r] = false;
+        sub.remove(r);
     }
     let mut n = 0;
     for i in 0..NODES {
-        if sub[i] {
+        if sub.has(i) {
             t[i].dying = true;
             ALIVE[i].store(false, Ordering::Release);
-            out[i] = true;
+            out.insert(i);
             n += 1;
         }
     }
@@ -386,10 +415,10 @@ pub fn kill_subtree(root: NodeId, include_root: bool, out: &mut [bool; NODES]) -
 }
 
 /// The nodes `kill_subtree` marked are cleared from every table: their numbers are free again.
-pub fn free_marked(marked: &[bool; NODES]) {
+pub fn free_marked(marked: &NodeSet) {
     let mut t = NODE_TABLE.lock(R_NODES);
-    for (i, &m) in marked.iter().enumerate() {
-        if m {
+    for i in 0..NODES {
+        if marked.has(i) {
             t[i].used = false;
             t[i].dying = false;
             ALIVE[i].store(false, Ordering::Release);
@@ -399,16 +428,16 @@ pub fn free_marked(marked: &[bool; NODES]) {
 
 /// Mark `root`'s descendants (and `root` itself when `include_root`) in `out`.
 /// Returns how many nodes were marked.
-pub fn mark_subtree(root: NodeId, include_root: bool, out: &mut [bool; NODES]) -> usize {
+pub fn mark_subtree(root: NodeId, include_root: bool, out: &mut NodeSet) -> usize {
     let t = NODE_TABLE.lock(R_NODES);
-    *out = [false; NODES];
-    out[root as usize] = true;
+    *out = NodeSet::EMPTY;
+    out.insert(root as usize);
     loop {
         let mut changed = false;
         for i in 0..NODES {
             let p = t[i].parent;
-            if t[i].used && !out[i] && p != NO_PARENT && out[p as usize] {
-                out[i] = true;
+            if t[i].used && !out.has(i) && p != NO_PARENT && out.has(p as usize) {
+                out.insert(i);
                 changed = true;
             }
         }
@@ -417,9 +446,9 @@ pub fn mark_subtree(root: NodeId, include_root: bool, out: &mut [bool; NODES]) -
         }
     }
     if !include_root {
-        out[root as usize] = false;
+        out.remove(root as usize);
     }
-    out.iter().filter(|&&m| m).count()
+    out.count()
 }
 
 /// Capability nodes in use (a margin check: `install` panics if they run out).

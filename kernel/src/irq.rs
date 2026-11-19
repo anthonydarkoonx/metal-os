@@ -14,7 +14,7 @@ pub const NIRQ: usize = 4;
 struct Irq {
     used: bool,
     gic_id: u32,
-    waiter: Option<u8>,
+    waiter: Option<u16>,
     pending: bool,
     /// Raised by software (`raise`) while nobody waited.
     soft: bool,
@@ -90,7 +90,7 @@ pub fn wait(idx: u8, me: usize, timeout: u64) -> Wait {
         irq.soft = false;
         return Wait::Ready;
     }
-    irq.waiter = Some(me as u8);
+    irq.waiter = Some(me as u16);
     sched::set_irq_deadline(me, if timeout == 0 { 0 } else { timer::counter().saturating_add(timeout.saturating_mul(timer::interval())) });
     sched::set_state(me, State::IrqWait(idx));
     Wait::Blocked
@@ -113,7 +113,7 @@ pub fn raise(idx: u8) {
 
 /// A task died. Only lines it was blocked on are touched: another driver's interrupt
 /// must not be masked or discarded just because an unrelated task crashed.
-pub fn forget(tid: u8) {
+pub fn forget(tid: u16) {
     for irq in IRQS.lock(R_IRQ).iter_mut().filter(|i| i.used && i.waiter == Some(tid)) {
         irq.waiter = None;
         irq.pending = false;
@@ -127,7 +127,7 @@ pub fn forget(tid: u8) {
 pub fn expire(tid: usize, idx: u8) {
     let mut irqs = IRQS.lock(R_IRQ);
     let irq = &mut irqs[idx as usize];
-    if irq.waiter == Some(tid as u8) {
+    if irq.waiter == Some(tid as u16) {
         irq.waiter = None;
         frame(tid).x[0] = crate::syscall::E_TIMEDOUT as u64; // the blocked IRQ_WAIT returns the error
         sched::wake_if(tid, State::IrqWait(idx));

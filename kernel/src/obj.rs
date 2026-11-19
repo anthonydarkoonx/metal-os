@@ -26,7 +26,7 @@ pub struct MemObj {
     /// Shared memory: where the list of its frames is (`ceil(pages / 1024)` kernel pages of `u32` frame numbers).
     pub list: usize,
     /// Run-time objects: the program (address space) charged a slot of the object table for it (`NO_OWNER` for the kernel's).
-    pub owner: u8,
+    pub owner: u16,
 }
 
 pub const OBJ_SHARED: u8 = 0;
@@ -123,21 +123,21 @@ pub fn init() {
 pub const FIRST_PLATFORM_OBJ: u8 = 52;
 const FIRST_DYNAMIC: usize = 64;
 
-const NO_OWNER: u8 = u8::MAX;
+const NO_OWNER: u16 = u16::MAX;
 /// Most run-time objects one program may have, and the object-table entries programs may never take (boot-time services make
 /// objects too, and must not find the table full because programs filled it).
 pub const PROGRAM_OBJ_QUOTA: usize = 32;
 const OBJ_RESERVE: usize = 16;
 
-fn owner_tag(owner: usize) -> u8 {
-    if crate::spawn::is_program(owner) { owner as u8 } else { NO_OWNER }
+fn owner_tag(owner: usize) -> u16 {
+    if crate::spawn::is_program(owner) { owner as u16 } else { NO_OWNER }
 }
 
 fn over_quota(t: &[MemObj], owner: usize) -> bool {
     if !crate::spawn::is_program(owner) {
         return false;
     }
-    let o = owner as u8;
+    let o = owner as u16;
     let dynamic = &t[FIRST_DYNAMIC..];
     dynamic.iter().filter(|x| x.kind != ObjKind::Unused && x.owner == o).count() >= PROGRAM_OBJ_QUOTA
         || dynamic.iter().filter(|x| x.kind == ObjKind::Unused).count() <= OBJ_RESERVE
@@ -203,7 +203,7 @@ pub const SHM_MAX_PAGES: usize = 4096;
 const PER_LIST_PAGE: usize = mem::PAGE / 4;
 
 /// Frames for a new shared object of `pages` pages owned by `owner`, and the list that names them (its address).
-pub fn shm_alloc(pages: usize, owner: u8) -> Option<usize> {
+pub fn shm_alloc(pages: usize, owner: mem::Owner) -> Option<usize> {
     let lists = (pages + PER_LIST_PAGE - 1) / PER_LIST_PAGE;
     let list = mem::alloc_contig(lists, mem::OWNER_KERNEL)?;
     for i in 0..pages {

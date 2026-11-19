@@ -9,7 +9,7 @@
 //!  * the saved register frame is handed over by protocol, see `frame()`.
 #![forbid(unsafe_code)]
 use crate::cap::*;
-use crate::ipc::{self, Endpoint, NEP};
+use crate::ipc::{self};
 use crate::mem::{self, PAGE};
 use crate::sched;
 use crate::sync::{Guard, SlotTable, SpinLock, R_TASK, R_TEARDOWN};
@@ -18,9 +18,20 @@ use crate::{kprintln, mmu, obj};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use metal_sched::Class;
 
-/// Boot-time tasks first, then slots for tasks created at run time (programs and their threads). At most 64: the
-/// scheduler keeps per-task run-state bits in 64-bit masks, and lock ranks (sync.rs) leave room for 70 task locks.
-pub const MAX_TASKS: usize = 64;
+/// Boot-time tasks first, then slots for tasks created at run time (programs and their threads). This is the most a boot can have
+/// (the lock ranks in sync.rs and the scheduler's task masks are sized by it); `limit()` is how many it does have.
+pub const MAX_TASKS: usize = 1024;
+/// The smallest number of task slots a boot gets, and the most it gets from RAM alone: one slot per MiB of RAM, so that the tables
+/// (about 4 KiB a slot) stay a small part of memory. The fw_cfg file `opt/metal/max-tasks` overrides it (within these bounds' outer limits).
+pub const MIN_TASKS: usize = 64;
+
+/// How many task slots a machine with `ram` bytes gets.
+pub fn tasks_for(ram: usize, requested: Option<u64>) -> usize {
+    match requested {
+        Some(n) => (n as usize).clamp(MIN_TASKS, MAX_TASKS),
+        None => (ram >> 20).clamp(MIN_TASKS, MAX_TASKS),
+    }
+}
 
 /// How many task slots this boot has (at most `MAX_TASKS`): set by `init_tables`.
 static LIMIT: AtomicUsize = AtomicUsize::new(0);
@@ -107,7 +118,7 @@ pub enum State {
     /// Sleeping in RING_ENTER until this many completions are available.
     RingWait(u32),
     /// Blocked in WAIT for this child program to exit (spawn.rs).
-    ChildWait(u8),
+    ChildWait(u16),
     /// Blocked in WAIT_WORD (thread.rs) until woken, or until the counter reaches this value (0 = no deadline).
     WordWait(u64),
     /// A program created by SPAWN whose code is still being loaded by its parent (spawn.rs); never scheduled.
@@ -132,16 +143,16 @@ pub struct Task {
     pub heap_pages: usize,
     /// Thread stacks the kernel made (`THREAD_CREATE` with no stack): (lowest mapped address, pages, thread); pages are
     /// counted against the heap limit.
-    pub tstacks: [(usize, usize, u8); crate::spawn::MAX_THREADS],
+    pub tstacks: [(usize, usize, u16); crate::spawn::MAX_THREADS],
     /// This address space's randomised layout (see `random_stack_top`, `random_heap_base`); set when the space is built.
     pub stack_top: usize,
     pub heap_base: usize,
     pub ring_pa: usize,
     pub pending: [crate::ring::Pending; crate::ring::MAX_PENDING],
     /// (caller, async tag or 0) we still owe a reply to.
-    pub reply_to: Option<(u8, u8)>,
+    pub reply_to: Option<(u16, u8)>,
     /// Server currently handling our outstanding call.
-    pub callee: Option<u8>,
+    pub callee: Option<u16>,
 }
 
 impl Task {
@@ -254,23 +265,23 @@ static STREAK: crate::table::Table<AtomicU32> = crate::table::Table::new();
 static LAST_RESTART: crate::table::Table<core::sync::atomic::AtomicU64> = crate::table::Table::new();
 /// Timer ticks each task has run on each core.
 pub static TICKS_ON: crate::table::Table<[AtomicU32; crate::smp::MAX_CPUS]> = crate::table::Table::new();
-pub fn owner(tid: usize) -> u8 {
-    mem::OWNER_TASK0 + tid as u8
+pub fn owner(tid: usize) -> mem::Owner {
+    mem::OWNER_TASK0 + tid as u16
 }
 
 /// The task whose address space `tid` runs in: itself, unless it is a thread (thread.rs). Everything about memory — the
 /// page tables, the mappings, the heap, the frames and who owns them — is kept under that task's lock and name.
-static SPACE: crate::table::Table<core::sync::atomic::AtomicU8> = crate::table::Table::new();
+static SPACE: crate::table::Table<core::sync::atomic::AtomicU16> = crate::table::Table::new();
 pub fn aspace(tid: usize) -> usize {
     match SPACE[tid].load(Ordering::Acquire) {
-        u8::MAX => tid,
+        u16::MAX => tid,
         leader => leader as usize,
     }
 }
 
 /// Make `tid` a thread of the program `leader` (a free slot), or (`None`) an ordinary task again.
 pub fn set_aspace(tid: usize, leader: Option<usize>) {
-    SPACE[tid].store(leader.map_or(u8::MAX, |l| l as u8), Ordering::Release);
+    SPACE[tid].store(leader.map_or(u16::MAX, |l| l as u16), Ordering::Release);
 }
 
 /// The tasks (including `leader`) that run in `leader`'s address space and are not gone.
@@ -599,15 +610,15 @@ impl World {
     /// Kill capabilities derived from `root` everywhere: clear table slots,
     /// unmap shared memory that was mapped through them, free the nodes.
     pub fn revoke_subtree(&mut self, root: crate::cap::NodeId, include_root: bool) -> usize {
-        let mut marked = [false; NODES];
+        let mut marked = NodeSet::EMPTY;
         let n = crate::cap::kill_subtree(root, include_root, &mut marked);
         self.finish_revoke(&marked);
         n
     }
 
     /// The nodes in `marked` are dead (`cap::kill_subtree`): clear them out of every table, then free their numbers.
-    fn finish_revoke(&mut self, marked: &[bool; NODES]) {
-        if !marked.iter().any(|&m| m) {
+    fn finish_revoke(&mut self, marked: &NodeSet) {
+        if !marked.any() {
             return;
         }
         // a task asleep in receive on an endpoint whose receive capability is being revoked must not sleep for ever
@@ -615,7 +626,7 @@ impl World {
             let mut ep = ipc::lock_ep(e as u8);
             let Some(r) = ep.waiter else { continue };
             let r = r as usize;
-            let revoked = lock(r).caps.iter().any(|c| c.kind == Kind::Endpoint && c.obj as usize == e && c.rights & R_RECV != 0 && marked[c.node as usize]);
+            let revoked = lock(r).caps.iter().any(|c| c.kind == Kind::Endpoint && c.obj as usize == e && c.rights & R_RECV != 0 && marked.has(c.node as usize));
             if revoked {
                 ep.waiter = None;
                 frame(r).x[0] = crate::syscall::E_BADCAP as u64;
@@ -625,13 +636,13 @@ impl World {
         for tid in 0..limit() {
             let mut t = lock(tid);
             for c in t.caps.iter_mut() {
-                if c.kind != Kind::None && marked[c.node as usize] {
+                if c.kind != Kind::None && marked.has(c.node as usize) {
                     *c = Cap::NONE;
                 }
             }
             for m in 0..MAX_MAPS {
                 let rec = t.maps[m];
-                if rec.used && marked[rec.node as usize] {
+                if rec.used && marked.has(rec.node as usize) {
                     if t.l1 != 0 {
                         for p in 0..rec.pages {
                             mmu::unmap_user(t.l1, rec.va + p * PAGE);
@@ -688,7 +699,7 @@ impl World {
                 }
             }
             if !taken {
-                let mut marked = [false; NODES];
+                let mut marked = NodeSet::EMPTY;
                 for h in 0..limit() {
                     let t = lock(h);
                     let nodes: [Option<crate::cap::NodeId>; NCAPS] =
@@ -712,34 +723,34 @@ impl World {
     fn reset(&mut self, tid: usize) {
         for (i, e) in (0..ipc::NEP).map(|e| (e, ipc::lock_ep(e as u8))) {
             let mut e = e;
-            if e.waiter == Some(tid as u8) {
+            if e.waiter == Some(tid as u16) {
                 e.waiter = None;
             }
-            e.purge_calls_from(i as u8, tid as u8);
+            e.purge_calls_from(i as u8, tid as u16);
         }
         // callers waiting for this task to reply, async calls it was handling, and servers still holding a reply link to it
         for c in 0..limit() {
             let mut t = lock(c);
-            if t.callee == Some(tid as u8) && sched::state(c) == State::CallWait {
+            if t.callee == Some(tid as u16) && sched::state(c) == State::CallWait {
                 t.callee = None;
                 frame(c).x[0] = crate::syscall::E_DEAD as u64;
                 sched::wake(c);
             }
             crate::ring::fail_calls_to(&mut t, c, tid);
-            if t.reply_to.map_or(false, |(who, _)| who == tid as u8) {
+            if t.reply_to.map_or(false, |(who, _)| who == tid as u16) {
                 t.reply_to = None;
             }
         }
         // its capabilities. Plain ones are revoked together (one sweep of the tasks); one that needs the object's own bookkeeping first
         // flushes what is pending, so that every step sees the tree as if the ones before it were done.
-        let mut pending = [false; NODES];
+        let mut pending = NodeSet::EMPTY;
         for slot in 0..NCAPS {
             let c = lock(tid).caps[slot];
             if c.kind != Kind::None && c.alive() {
                 // memory from MC_ALLOC is private to its task (the capability has no GRANT right): its frames go
                 // below with the rest, but the object-table entry would stay taken for ever (found by the fuzzer)
                 if c.kind == Kind::Memory && obj::is_dynamic(c.obj) {
-                    self.finish_revoke(&core::mem::replace(&mut pending, [false; NODES]));
+                    self.finish_revoke(&core::mem::replace(&mut pending, NodeSet::EMPTY));
                     if !c.alive() {
                         continue;
                     }
@@ -749,7 +760,7 @@ impl World {
                         // just goes with the revocation below).
                         Some(o) if o.kind == obj::ObjKind::Shared => {
                             if o.root == c.node {
-                                let mut holders = [false; NODES];
+                                let mut holders = NodeSet::EMPTY;
                                 if mark_subtree(c.node, false, &mut holders) > 0 {
                                     obj::shm_orphan(c.obj);
                                     crate::cap::detach_children(c.node);
@@ -778,7 +789,7 @@ impl World {
             t.callee = None;
             crate::ring::reset_task(&mut t);
         }
-        crate::irq::forget(tid as u8);
+        crate::irq::forget(tid as u16);
         crate::cap::forget_granter(tid);
         crate::cap::forget_revoked(tid);
     }
@@ -904,7 +915,7 @@ pub fn init_tables(n: usize) {
     STREAK.init(n, |_| const { AtomicU32::new(0) });
     LAST_RESTART.init(n, |_| const { core::sync::atomic::AtomicU64::new(0) });
     TICKS_ON.init(n, |_| const { [const { AtomicU32::new(0) }; crate::smp::MAX_CPUS] });
-    SPACE.init(n, |_| const { core::sync::atomic::AtomicU8::new(u8::MAX) });
+    SPACE.init(n, |_| const { core::sync::atomic::AtomicU16::new(u16::MAX) });
     INFO.init(n, |_| Info { role: 0, restartable: false, name: Name::EMPTY, class: Class::Background, pinned: NOT_PINNED, heap_quota: MAX_HEAP_PAGES, budget: 0 });
     FRAMES.init(n, |_| TrapFrame::ZERO);
 }

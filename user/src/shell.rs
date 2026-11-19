@@ -845,7 +845,7 @@ impl Shell {
     fn ps(&mut self) -> String {
         const STATES: [&str; 9] = ["free", "ready", "recv", "call", "sleep", "irq", "ring", "dead", "wait"];
         let mut out = format!("{:>3} {:<11} {:<6} {}\n", "TID", "NAME", "STATE", "RESTARTS");
-        for t in 0..64u64 {
+        for t in 0..4096u64 {
             let r = sysinfo_at(3, t);
             if r[0] as i64 != 0 {
                 break; // past the last task slot

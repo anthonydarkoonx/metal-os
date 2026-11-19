@@ -31,7 +31,7 @@ use crate::mmu::{self, Perm};
 use crate::sched;
 use crate::sync::{SpinLock, R_RING};
 use crate::syscall::{E_FULL, E_INVAL, E_NOMEM};
-use crate::task::{self, Task, World, MAX_TASKS, RING_VA};
+use crate::task::{self, Task, RING_VA};
 use crate::timer;
 use crate::frame::phys;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -65,7 +65,7 @@ pub struct Pending {
     pub kind: PKind,
     pub user_data: u64,
     /// For calls: the server currently handling it.
-    pub callee: Option<u8>,
+    pub callee: Option<u16>,
     pub deadline: u64,
 }
 
@@ -92,7 +92,7 @@ pub fn setup(t: &mut Task, tid: usize) -> Result<usize, i64> {
     if t.ring_pa != 0 {
         return Err(E_INVAL);
     }
-    let owner = mem::OWNER_TASK0 + tid as u8;
+    let owner = mem::OWNER_TASK0 + tid as u16;
     // Unmovable: the kernel keeps raw pointers into this page while it is not holding the task lock, so
     // the compactor must never migrate it.
     let pa = mem::alloc(owner).ok_or(E_NOMEM)?;
@@ -163,7 +163,7 @@ pub fn post(tid: usize, ring_pa: usize, user_data: u64, res: i64, w: [u64; 3]) {
 /// A reply arrived for async call `tag` of `caller` (whose locked state is `tc`), served by `server`.
 pub fn complete_call(tc: &mut Task, caller: usize, tag: u8, server: usize, w: [u64; 3]) -> bool {
     let Some(p) = tc.pending.get(tag as usize - 1).copied() else { return false };
-    if p.kind != PKind::Call || p.callee != Some(server as u8) {
+    if p.kind != PKind::Call || p.callee != Some(server as u16) {
         return false;
     }
     free_pending(tc, tag as usize - 1);
@@ -174,7 +174,7 @@ pub fn complete_call(tc: &mut Task, caller: usize, tag: u8, server: usize, w: [u
 pub fn set_callee(sender: &mut Task, tag: u8, server: usize) {
     if let Some(p) = sender.pending.get_mut(tag as usize - 1) {
         if p.kind == PKind::Call {
-            p.callee = Some(server as u8);
+            p.callee = Some(server as u16);
         }
     }
 }
@@ -193,7 +193,7 @@ pub fn fail_queued(t: &mut Task, tid: usize, tag: u8, res: i64) {
 pub fn fail_calls_to(t: &mut Task, c: usize, server: usize) {
     for i in 0..MAX_PENDING {
         let p = t.pending[i];
-        if p.kind == PKind::Call && p.callee == Some(server as u8) {
+        if p.kind == PKind::Call && p.callee == Some(server as u16) {
             free_pending(t, i);
             post(c, t.ring_pa, p.user_data, crate::syscall::E_DEAD, [0; 3]);
         }
@@ -287,7 +287,7 @@ fn exec(cur: usize, q: Sqe) {
             if no_slot {
                 return fail(E_FULL);
             }
-            match ipc::send(cur, c.obj, Msg { sender: cur as u8, call, tag, w: q.w }) {
+            match ipc::send(cur, c.obj, Msg { sender: cur as u16, call, tag, w: q.w }) {
                 Ok(()) if call => {} // completes when the server replies
                 Ok(()) => post(cur, q.ring_pa, q.ud, 0, [0; 3]),
                 Err(ipc::SendErr::Full) => fail(E_FULL),

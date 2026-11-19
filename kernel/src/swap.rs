@@ -25,7 +25,7 @@ use crate::mmu::{self, Page};
 use crate::sched;
 use crate::task::State;
 use crate::sync::{Global, SpinLock, R_SWAP};
-use crate::task::{self, MAX_TASKS};
+use crate::task;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use metal_zram::{Handle, PageWorkspace, Slot, Zram};
 
@@ -212,7 +212,7 @@ enum Back {
 fn bring_in(tid: usize, l1: usize, va: usize) -> Back {
     let Page::Swapped(handle) = mmu::inspect(l1, va) else { return Back::Corrupt };
     crate::pager::cancel_write(l1, Some(va)); // a write of this page to disk is out of date from now on
-    let Some(pa) = mem::alloc_movable(mem::OWNER_TASK0 + tid as u8, tid, va) else { return Back::NoMemory };
+    let Some(pa) = mem::alloc_movable(mem::OWNER_TASK0 + tid as u16, tid, va) else { return Back::NoMemory };
     if with_store(|z| crate::frame::phys::with_page_mut(pa, |page| z.load(Handle(handle), page))).is_err() || !mmu::install_resident(l1, va, pa) {
         mem::free(pa);
         return Back::Corrupt;

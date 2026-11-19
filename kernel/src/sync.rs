@@ -22,30 +22,32 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 pub const R_SPAWNING: u16 = 5;
 /// Serialises the lifecycle operations (task.rs `lifecycle`, `World`): outside SPAWN's lock and every endpoint and task lock.
 pub const R_TEARDOWN: u16 = 3;
-/// The table of threads waiting on words (thread.rs); taken under the address space's task lock, above every task lock.
-pub const R_WORDS: u16 = 266;
+/// Task and ring locks have one rank per task slot, so the ranks above them start after the last slot's.
+const TASKS: u16 = crate::task::MAX_TASKS as u16;
 pub const R_COMPACT: u16 = 10;
 pub const R_EP: u16 = 100;
 pub const R_TASK: u16 = 200;
-pub const R_RING: u16 = 270;
+/// The table of threads waiting on words (thread.rs); taken under the address space's task lock, above every task lock.
+pub const R_WORDS: u16 = R_TASK + TASKS + 2;
+pub const R_RING: u16 = R_WORDS + 4;
 /// Claiming a run-time endpoint (ipc.rs `claim_dynamic`: the quota is counted and the claim made under it). Under a task lock.
-pub const R_EPCLAIM: u16 = 330;
+pub const R_EPCLAIM: u16 = R_RING + TASKS + 1;
 /// Real-time admission (per-core reserved shares). Taken when a task dies, i.e. under the task locks.
-pub const R_RT: u16 = 336;
-pub const R_NODES: u16 = 340;
-pub const R_IRQ: u16 = 345;
-pub const R_OBJ: u16 = 350;
-pub const R_SMMU: u16 = 355;
+pub const R_RT: u16 = R_EPCLAIM + 6;
+pub const R_NODES: u16 = R_EPCLAIM + 10;
+pub const R_IRQ: u16 = R_EPCLAIM + 15;
+pub const R_OBJ: u16 = R_EPCLAIM + 20;
+pub const R_SMMU: u16 = R_EPCLAIM + 25;
 /// The swap store (compressed pages). Taken under a task lock; never together with MEM.
 /// The pager's bookkeeping (pager.rs): taken under a task lock, and above it the swap store may be taken.
-pub const R_PAGER: u16 = 357;
-pub const R_SWAP: u16 = 358;
+pub const R_PAGER: u16 = R_EPCLAIM + 27;
+pub const R_SWAP: u16 = R_EPCLAIM + 28;
 /// The layout-randomisation generator (rand.rs); drawn from under task locks.
-pub const R_RAND: u16 = 359;
-pub const R_MEM: u16 = 360;
-pub const R_CONSOLE: u16 = 380;
+pub const R_RAND: u16 = R_EPCLAIM + 29;
+pub const R_MEM: u16 = R_EPCLAIM + 30;
+pub const R_CONSOLE: u16 = R_EPCLAIM + 50;
 
-const MAX_HELD: usize = 128; // every endpoint and every task lock at once (World::lock), with room to spare
+const MAX_HELD: usize = 128; // the deepest nesting of locks one core holds at once, with room to spare
 
 struct Held {
     depth: usize,
@@ -70,13 +72,13 @@ pub const CLASS_NAMES: [&str; 10] = ["compact", "endpoint", "task", "ring", "nod
 fn class_of(rank: u16) -> usize {
     match rank {
         0..=99 => 0,
-        100..=199 => 1,
-        200..=269 => 2,
-        270..=339 => 3,
-        340..=344 => 4,
-        345..=349 => 5,
-        350..=359 => 6,
-        360..=369 => 7,
+        R_EP..R_TASK => 1,
+        R_TASK..R_WORDS => 2,
+        R_WORDS..R_EPCLAIM => 3,
+        R_NODES..R_IRQ => 4,
+        R_IRQ..R_OBJ => 5,
+        R_OBJ..R_MEM => 6,
+        R_MEM..R_CONSOLE => 7,
         _ => 9,
     }
 }

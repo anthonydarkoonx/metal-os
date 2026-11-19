@@ -20,6 +20,8 @@ use metal_compact::Frames;
 
 pub const RAM_BASE: usize = crate::platform::RAM_BASE;
 pub const PAGE: usize = 4096;
+/// Owner numbers in use: nobody, the kernel, and every task slot (plus a few the self-test borrows).
+const OWNERS: usize = OWNER_TASK0 as usize + crate::task::MAX_TASKS + 8;
 /// End of a per-owner list.
 const NIL: u32 = u32::MAX;
 
@@ -28,15 +30,17 @@ pub const fn usable_ram(ram: usize) -> usize {
     if ram > crate::frame::phys::GIB { ram & !((2 << 20) - 1) } else { ram }
 }
 
-/// Bytes of per-frame tables (owner 1 + kind 1 + reverse map 8 + two list links of 4) for `n` frames, rounded up to whole pages. They sit in the last frames of RAM.
+/// Bytes of per-frame tables (owner 2 + kind 1 + reverse map 8 + two list links of 4) for `n` frames, rounded up to whole pages. They sit in the last frames of RAM.
 pub const fn meta_bytes(n: usize) -> usize {
-    (n * 18).div_ceil(PAGE) * PAGE
+    (n * 19).div_ceil(PAGE) * PAGE
 }
 
-pub const OWNER_FREE: u8 = 0;
-pub const OWNER_KERNEL: u8 = 1;
+/// Who holds a frame: nobody, the kernel, or task `tid` as `OWNER_TASK0 + tid`.
+pub type Owner = u16;
+pub const OWNER_FREE: Owner = 0;
+pub const OWNER_KERNEL: Owner = 1;
 /// Task `tid` owns its frames as `OWNER_TASK0 + tid`.
-pub const OWNER_TASK0: u8 = 2;
+pub const OWNER_TASK0: Owner = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
@@ -53,7 +57,7 @@ pub enum FKind {
 }
 
 pub struct MemState {
-    owner: &'static mut [u8],
+    owner: &'static mut [Owner],
     kind: &'static mut [FKind],
     /// For movable frames: `tid << 32 | (virtual address >> 12)`. (The page number of an address in the 39-bit user space takes 27 bits, more
     /// than the 24 that fit beside a task number in 32: a position-independent image is placed as high as 256 GiB.)
@@ -62,8 +66,8 @@ pub struct MemState {
     /// frames are found, counted and freed without scanning all of RAM.
     next: &'static mut [u32],
     prev: &'static mut [u32],
-    head: [u32; 256],
-    held: [u32; 256],
+    head: [u32; OWNERS],
+    held: [u32; OWNERS],
     nframes: usize,
     /// No free frame exists below `low_hint`, nor above `high_hint`.
     low_hint: usize,
@@ -77,8 +81,8 @@ static MEM: SpinLock<MemState> = SpinLock::new(MemState {
     rmap: &mut [],
     next: &mut [],
     prev: &mut [],
-    head: [NIL; 256],
-    held: [0; 256],
+    head: [NIL; OWNERS],
+    held: [0; OWNERS],
     nframes: 0,
     low_hint: 0,
     high_hint: 0,
@@ -92,7 +96,7 @@ pub fn lock() -> Guard<'static, MemState> {
 
 impl MemState {
     /// Put frame `i` on `owner`'s list (unless the owner is nobody).
-    fn link(&mut self, i: usize, owner: u8) {
+    fn link(&mut self, i: usize, owner: Owner) {
         self.owner[i] = owner;
         if owner == OWNER_FREE {
             return;
@@ -125,7 +129,7 @@ impl MemState {
         self.held[owner as usize] -= 1;
     }
 
-    fn claim(&mut self, i: usize, owner: u8, kind: FKind) -> usize {
+    fn claim(&mut self, i: usize, owner: Owner, kind: FKind) -> usize {
         self.link(i, owner);
         self.kind[i] = kind;
         self.free -= 1;
@@ -143,7 +147,7 @@ impl MemState {
     /// Every list is well formed and accounts for exactly the frames that have an owner.
     fn lists_intact(&self) -> bool {
         let mut total = 0usize;
-        for o in 1..256usize {
+        for o in 1..OWNERS {
             let (mut n, mut prev, mut i) = (0u32, NIL, self.head[o]);
             while i != NIL {
                 let k = i as usize;
@@ -222,7 +226,7 @@ fn zero(pa: usize) {
 }
 
 /// Allocate one zeroed *unmovable* frame from the bottom of RAM.
-pub fn alloc_kind(owner: u8, kind: FKind) -> Option<usize> {
+pub fn alloc_kind(owner: Owner, kind: FKind) -> Option<usize> {
     debug_assert!(kind != FKind::Movable && kind != FKind::Free);
     let pa = {
         let mut m = lock();
@@ -244,7 +248,7 @@ pub fn alloc_kind(owner: u8, kind: FKind) -> Option<usize> {
 /// Allocate an unmovable kernel-owned frame that lies in the identity-mapped window, for the code that reaches a frame through its
 /// physical address used as a pointer (the SMMU's tables and queues, a probe's DMA page). Frames come from the bottom of RAM, so this
 /// fails only when the whole first GiB is taken by unmovable memory.
-pub fn alloc_identity(owner: u8) -> Option<usize> {
+pub fn alloc_identity(owner: Owner) -> Option<usize> {
     let pa = alloc_kind(owner, FKind::Kernel)?;
     if pa < crate::frame::phys::ID_END {
         return Some(pa);
@@ -254,12 +258,12 @@ pub fn alloc_identity(owner: u8) -> Option<usize> {
 }
 
 /// Allocate an unmovable kernel-owned frame.
-pub fn alloc(owner: u8) -> Option<usize> {
+pub fn alloc(owner: Owner) -> Option<usize> {
     alloc_kind(owner, FKind::Kernel)
 }
 
 /// Allocate one zeroed *movable* frame (from the top of RAM) that will be mapped at `va` in `tid`.
-pub fn alloc_movable(owner: u8, tid: usize, va: usize) -> Option<usize> {
+pub fn alloc_movable(owner: Owner, tid: usize, va: usize) -> Option<usize> {
     let pa = {
         let mut m = lock();
         let n = m.nframes;
@@ -297,8 +301,8 @@ pub fn rmap_selftest() -> bool {
 /// Boot-time check of the per-owner lists: counts follow allocation, release, re-owning and `free_owned`, and every list is intact
 /// (each frame on a list names its owner, links agree both ways, the lengths match the counts, held + free = all frames).
 pub fn owner_lists_selftest() -> bool {
-    const O1: u8 = 250;
-    const O2: u8 = 251;
+    const O1: Owner = OWNERS as Owner - 2;
+    const O2: Owner = OWNERS as Owner - 1;
     let mut ok = count_owned(O1) == 0 && count_owned(O2) == 0;
     let (a, b, c) = (alloc(O1), alloc_movable(O1, 0, 0), alloc_kind(O1, FKind::Pinned));
     let (Some(a), Some(b), Some(c)) = (a, b, c) else { return false };
@@ -344,14 +348,14 @@ pub fn is_movable(pa: usize) -> bool {
 }
 
 /// Who owns the frame at `pa` (`OWNER_FREE` if nobody).
-pub fn owner_of(pa: usize) -> u8 {
+pub fn owner_of(pa: usize) -> Owner {
     // (outside RAM there is no frame, so nobody owns it)
     let m = lock();
     pa.checked_sub(RAM_BASE).and_then(|d| m.owner.get(d / PAGE).copied()).unwrap_or(OWNER_FREE)
 }
 
 /// Hand a frame to another owner (shared memory that outlives the program that made it goes to the kernel).
-pub fn set_owner(pa: usize, owner: u8) {
+pub fn set_owner(pa: usize, owner: Owner) {
     let mut m = lock();
     let i = (pa - RAM_BASE) / PAGE;
     assert!(m.kind[i] != FKind::Free, "owner of a free frame");
@@ -368,12 +372,12 @@ pub fn free(pa: usize) {
 }
 
 /// How many frames `owner` holds.
-pub fn count_owned(owner: u8) -> usize {
+pub fn count_owned(owner: Owner) -> usize {
     lock().held[owner as usize] as usize
 }
 
 /// Free every frame owned by `owner`; returns how many were reclaimed.
-pub fn free_owned(owner: u8) -> usize {
+pub fn free_owned(owner: Owner) -> usize {
     let mut m = lock();
     let mut n = 0;
     while m.head[owner as usize] != NIL {
@@ -385,7 +389,7 @@ pub fn free_owned(owner: u8) -> usize {
 }
 
 /// `n` physically contiguous unmovable frames (DMA-style), lowest address first.
-pub fn alloc_contig(n: usize, owner: u8) -> Option<usize> {
+pub fn alloc_contig(n: usize, owner: Owner) -> Option<usize> {
     let start = {
         let mut m = lock();
         let start = metal_compact::find_run(&*m, m.low_hint, n)?;

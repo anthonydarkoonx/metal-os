@@ -113,6 +113,10 @@ fn client() -> ! {
             programs::net_tests();
             exit(0)
         }
+        9 => {
+            programs::scale_tests(); // make scale: every slot of a table of 1024 tasks
+            exit(0)
+        }
         _ => {}
     }
 

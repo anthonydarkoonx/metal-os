@@ -53,7 +53,7 @@ pub mod phys {
         pub rmap: &'static mut [u64],
         pub next: &'static mut [u32],
         pub prev: &'static mut [u32],
-        pub owner: &'static mut [u8],
+        pub owner: &'static mut [crate::mem::Owner],
         pub kind: &'static mut [crate::mem::FKind],
     }
 
@@ -66,7 +66,7 @@ pub mod phys {
         check(pa, len, PAGE);
         let base = va(pa);
         // SAFETY: `pa..pa+len` is whole frames of RAM (checked), not yet handed to anyone (the allocator reserves it), and `TAKEN`
-        // makes this the only call, so the slices are the only references into it. They do not overlap (offsets 0, 8n, 12n, 16n and 17n,
+        // makes this the only call, so the slices are the only references into it. They do not overlap (offsets 0, 8n, 12n, 16n and 18n,
         // widest element first so every slice is aligned for its type) and are zeroed before the slices exist; zero is a valid
         // `u8`, `u32`, `u64` and `FKind::Free`.
         unsafe {
@@ -75,8 +75,8 @@ pub mod phys {
                 rmap: core::slice::from_raw_parts_mut(base as *mut u64, n),
                 next: core::slice::from_raw_parts_mut((base + 8 * n) as *mut u32, n),
                 prev: core::slice::from_raw_parts_mut((base + 12 * n) as *mut u32, n),
-                owner: core::slice::from_raw_parts_mut((base + 16 * n) as *mut u8, n),
-                kind: core::slice::from_raw_parts_mut((base + 17 * n) as *mut crate::mem::FKind, n),
+                owner: core::slice::from_raw_parts_mut((base + 16 * n) as *mut crate::mem::Owner, n),
+                kind: core::slice::from_raw_parts_mut((base + 18 * n) as *mut crate::mem::FKind, n),
             }
         }
     }

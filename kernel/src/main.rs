@@ -193,7 +193,9 @@ extern "C" fn kmain() -> ! {
         None => kprintln!("[mem] TEST RAM above the first GiB is reached through the direct map: SKIPPED (RAM ends inside the first GiB)"),
     }
     kprintln!("[mem] TEST the reverse map holds the addresses of the whole user space (up to 256 GiB): {}", v(mem::rmap_selftest()));
-    task::init_tables(task::MAX_TASKS);
+    let tasks = task::tasks_for(ram, platform::number(b"opt/metal/max-tasks"));
+    task::init_tables(tasks);
+    kprintln!("[kernel] {tasks} task slots");
     timer::init();
     sched::init();
     platform::init_devices();

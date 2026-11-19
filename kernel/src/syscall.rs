@@ -10,7 +10,7 @@ use crate::ipc::{self, Msg};
 use crate::mmu::{self, Perm};
 use crate::obj::{self, ObjKind};
 use crate::sched;
-use crate::task::{self, frame, info, State, World, MAX_TASKS, SHM_HI, SHM_LO};
+use crate::task::{self, frame, info, State, World, SHM_HI, SHM_LO};
 use crate::{compact, irq, mem, ring, timer, uart};
 
 pub const IPC_SEND: u64 = 1;
@@ -129,6 +129,11 @@ pub fn lookup(tid: usize, slot: u64, kind: Kind, need: Rights) -> Result<Cap, i6
         return Err(E_PERM);
     }
     Ok(c)
+}
+
+/// Bit `t` of the task masks the task-manager pages answer with: only the first 64 task slots have one.
+fn task_bit(t: usize) -> u64 {
+    if t < 64 { 1 << t } else { 0 }
 }
 
 fn lookup_any(tid: usize, slot: u64) -> Result<Cap, i64> {
@@ -340,7 +345,7 @@ fn ipc_send(cur: usize, slot: u64, w: [u64; 3], call: bool) -> Out {
         Ok(c) => c,
         Err(e) => return Out::Ret(e),
     };
-    match ipc::send(cur, c.obj, Msg { sender: cur as u8, call, tag: 0, w }) {
+    match ipc::send(cur, c.obj, Msg { sender: cur as u16, call, tag: 0, w }) {
         Err(ipc::SendErr::Full) => Out::Ret(E_FULL),
         Ok(()) if call => Out::Block, // `send` left the caller blocked in CallWait
         Ok(()) => Out::Ret(0),
@@ -446,7 +451,7 @@ fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
     };
     for p in 0..o.pages {
         let pa = if o.kind == ObjKind::Shared { obj::shm_frame(&o, p) } else { o.pa + p * mem::PAGE };
-        let r = mmu::map_user(t.l1, va + p * mem::PAGE, pa, perm, mem::OWNER_TASK0 + space as u8);
+        let r = mmu::map_user(t.l1, va + p * mem::PAGE, pa, perm, mem::OWNER_TASK0 + space as u16);
         if r.is_err() {
             for q in 0..p {
                 mmu::unmap_user(t.l1, va + q * mem::PAGE);
@@ -597,7 +602,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
-            f.x[1] = mem::count_owned(mem::OWNER_TASK0 + task::aspace(t) as u8) as u64;
+            f.x[1] = mem::count_owned(mem::OWNER_TASK0 + task::aspace(t) as u16) as u64;
             Out::Ret(0)
         }
         8 => {
@@ -712,15 +717,15 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             if c.kind == Kind::None || !c.alive() {
                 return Out::Ret(E_BADCAP);
             }
-            let mut marked = [false; crate::cap::NODES];
+            let mut marked = crate::cap::NodeSet::EMPTY;
             let nodes = crate::cap::mark_subtree(c.node, true, &mut marked);
             let (mut copies, mut holders) = (0u64, 0u64);
             for tt in 0..task::limit() {
                 let caps = task::lock(tt).caps;
                 for (i, cc) in caps.iter().enumerate() {
-                    if cc.kind != Kind::None && marked[cc.node as usize] && !(tt == t && i == slot) {
+                    if cc.kind != Kind::None && marked.has(cc.node as usize) && !(tt == t && i == slot) {
                         copies += 1;
-                        holders |= 1 << tt;
+                        holders |= task_bit(tt);
                     }
                 }
             }
@@ -740,28 +745,28 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                     if c.kind as u8 != kind || c.kind == Kind::None || (c.obj != obj && matches!(c.kind, Kind::Endpoint | Kind::Memory | Kind::Irq)) {
                         continue;
                     }
-                    any |= 1 << t;
+                    any |= task_bit(t);
                     total += 1;
                     match c.kind {
                         Kind::Endpoint => {
                             if c.rights & R_SEND != 0 {
-                                user |= 1 << t;
+                                user |= task_bit(t);
                             }
                             if c.rights & R_RECV != 0 {
-                                serve |= 1 << t;
+                                serve |= task_bit(t);
                             }
                         }
                         Kind::Memory => {
                             if c.rights & R_WRITE != 0 {
-                                user |= 1 << t;
+                                user |= task_bit(t);
                             }
                             if c.rights & R_MAP != 0 {
-                                serve |= 1 << t;
+                                serve |= task_bit(t);
                             }
                         }
                         _ => {
-                            user |= 1 << t;
-                            serve |= 1 << t;
+                            user |= task_bit(t);
+                            serve |= task_bit(t);
                         }
                     }
                 }
@@ -992,7 +997,7 @@ fn remap(space: usize, c: Cap, va: usize) -> bool {
     };
     for p in 0..o.pages {
         let pa = if o.kind == ObjKind::Shared { obj::shm_frame(&o, p) } else { o.pa + p * mem::PAGE };
-        if mmu::map_user(t.l1, va + p * mem::PAGE, pa, perm, mem::OWNER_TASK0 + space as u8).is_err() {
+        if mmu::map_user(t.l1, va + p * mem::PAGE, pa, perm, mem::OWNER_TASK0 + space as u16).is_err() {
             for q in 0..p {
                 mmu::unmap_user(t.l1, va + q * mem::PAGE);
             }
@@ -1087,7 +1092,7 @@ fn heap_grow(cur: usize, pages: usize) -> Out {
     if base + pages * mem::PAGE > task::HEAP_END {
         return Out::Ret(E_NOMEM); // (the page after the heap stays unmapped)
     }
-    let owner = mem::OWNER_TASK0 + cur as u8;
+    let owner = mem::OWNER_TASK0 + cur as u16;
     for p in 0..pages {
         let va = base + p * mem::PAGE;
         let ok = mem::alloc_movable(owner, cur, va).map_or(false, |pa| {
@@ -1206,7 +1211,7 @@ fn memctl(cur: usize, slot: u64, op: u64, a3: u64, a4: u64) -> Out {
                 return Out::Ret(E_INVAL);
             }
             let asp = task::aspace(cur);
-            let owner = mem::OWNER_TASK0 + asp as u8; // (freed with the address space, not with the thread)
+            let owner = mem::OWNER_TASK0 + asp as u16; // (freed with the address space, not with the thread)
             // counted against the program's limit before anything is taken, under the lock `heap_grow` uses
             if !crate::spawn::reserve_contig(asp, task::lock(asp).held_pages(), pages) {
                 return Out::Ret(E_NOMEM);
@@ -1286,7 +1291,7 @@ fn shm_create(cur: usize, pages: usize) -> Out {
     if !crate::spawn::reserve_contig(asp, task::lock(asp).held_pages(), pages) {
         return Out::Ret(E_NOMEM);
     }
-    let Some(list) = obj::shm_alloc(pages, mem::OWNER_TASK0 + asp as u8) else {
+    let Some(list) = obj::shm_alloc(pages, mem::OWNER_TASK0 + asp as u16) else {
         crate::spawn::release_contig(asp, pages);
         return Out::Ret(E_NOMEM);
     };
@@ -1322,7 +1327,7 @@ fn shm_info(cur: usize, slot: u64) -> Out {
             // bit 32: the creator is gone (the memory stays as long as someone holds it); bit 33: this is the creator's
             // capability and nobody holds a copy any more
             Some(o) if o.kind == ObjKind::Shared => {
-                let alone = o.root == c.node && crate::cap::mark_subtree(c.node, false, &mut [false; crate::cap::NODES]) == 0;
+                let alone = o.root == c.node && crate::cap::mark_subtree(c.node, false, &mut crate::cap::NodeSet::EMPTY) == 0;
                 Out::Ret(o.pages as i64 | ((o.root == crate::cap::NO_PARENT) as i64) << 32 | (alone as i64) << 33)
             }
             _ => Out::Ret(E_INVAL),

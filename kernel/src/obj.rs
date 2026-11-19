@@ -29,78 +29,89 @@ pub struct MemObj {
     pub owner: u16,
 }
 
-pub const OBJ_SHARED: u8 = 0;
-pub const OBJ_BLK_MMIO: u8 = 1;
-pub const OBJ_BLK_RING: u8 = 2;
+pub const OBJ_SHARED: u16 = 0;
+pub const OBJ_BLK_MMIO: u16 = 1;
+pub const OBJ_BLK_RING: u16 = 2;
 /// One DMA buffer per block-driver client; the driver picks by kernel-provided sender id.
-pub const OBJ_BLK_BUF_ROFS: u8 = 3;
-pub const OBJ_BLK_BUF_LFS: u8 = 4;
-pub const OBJ_BLK_BUF_CLIENT: u8 = 5;
+pub const OBJ_BLK_BUF_ROFS: u16 = 3;
+pub const OBJ_BLK_BUF_LFS: u16 = 4;
+pub const OBJ_BLK_BUF_CLIENT: u16 = 5;
 /// Pages shared between the test client and each filesystem server.
-pub const OBJ_SHM_ROFS: u8 = 6;
-pub const OBJ_SHM_LFS: u8 = 7;
+pub const OBJ_SHM_ROFS: u16 = 6;
+pub const OBJ_SHM_LFS: u16 = 7;
 /// Pages the VFS server shares with the storage servers and with each of its clients.
-pub const OBJ_SHM_ROFS_VFS: u8 = 8;
-pub const OBJ_SHM_LFS_VFS: u8 = 9;
-pub const OBJ_SHM_VFS_CLIENT: u8 = 10;
-pub const OBJ_SHM_VFS_PROGRAM: u8 = 11;
+pub const OBJ_SHM_ROFS_VFS: u16 = 8;
+pub const OBJ_SHM_LFS_VFS: u16 = 9;
+pub const OBJ_SHM_VFS_CLIENT: u16 = 10;
+pub const OBJ_SHM_VFS_PROGRAM: u16 = 11;
 /// Result page shared by the benchmark clients and the conductor.
-pub const OBJ_SHM_BENCH: u8 = 12;
+pub const OBJ_SHM_BENCH: u16 = 12;
 /// Read-only copy of the block device's PCI configuration space (the driver parses its capabilities).
-pub const OBJ_BLK_PCICFG: u8 = 13;
+pub const OBJ_BLK_PCICFG: u16 = 13;
 /// The display device: registers, config copy, control-queue page, command page, framebuffer.
-pub const OBJ_GPU_MMIO: u8 = 14;
-pub const OBJ_GPU_PCICFG: u8 = 15;
-pub const OBJ_GPU_QUEUE: u8 = 16;
-pub const OBJ_GPU_CMD: u8 = 17;
-pub const OBJ_GPU_FB: u8 = 18;
+pub const OBJ_GPU_MMIO: u16 = 14;
+pub const OBJ_GPU_PCICFG: u16 = 15;
+pub const OBJ_GPU_QUEUE: u16 = 16;
+pub const OBJ_GPU_CMD: u16 = 17;
+pub const OBJ_GPU_FB: u16 = 18;
 /// 1024 x 768 pixels of 4 bytes, physically contiguous.
 pub const FB_PAGES: usize = 768;
 /// The keyboard: registers, config copy, and one page holding its event queue and buffers.
-pub const OBJ_KBD_MMIO: u8 = 19;
-pub const OBJ_KBD_PCICFG: u8 = 20;
-pub const OBJ_KBD_QUEUE: u8 = 21;
+pub const OBJ_KBD_MMIO: u16 = 19;
+pub const OBJ_KBD_PCICFG: u16 = 20;
+pub const OBJ_KBD_QUEUE: u16 = 21;
 /// Page the VFS server shares with the shell.
-pub const OBJ_SHM_VFS_SHELL: u8 = 22;
+pub const OBJ_SHM_VFS_SHELL: u16 = 22;
 /// Flag page the test conductor shares with the CPU-burner tasks (scheduler tests).
-pub const OBJ_SHM_SPIN: u8 = 23;
+pub const OBJ_SHM_SPIN: u16 = 23;
 /// Sessions of programs with file-system access: eight pages the VFS server has mapped (24..32).
-pub const OBJ_SHM_VFS_PROG0: u8 = 24;
+pub const OBJ_SHM_VFS_PROG0: u16 = 24;
 /// The network device: registers, config copy, the two virtqueue pages, the packet buffers (shared with `netd`), the
 /// ring the driver and `netd` talk through, and the session pages of programs with network access (40..48).
-pub const OBJ_NET_MMIO: u8 = 32;
-pub const OBJ_NET_PCICFG: u8 = 33;
-pub const OBJ_NET_QUEUES: u8 = 34;
-pub const OBJ_NET_BUFS: u8 = 35;
-pub const OBJ_NET_RING: u8 = 36;
-pub const OBJ_SHM_NET_PROG0: u8 = 40;
+pub const OBJ_NET_MMIO: u16 = 32;
+pub const OBJ_NET_PCICFG: u16 = 33;
+pub const OBJ_NET_QUEUES: u16 = 34;
+pub const OBJ_NET_BUFS: u16 = 35;
+pub const OBJ_NET_RING: u16 = 36;
+pub const OBJ_SHM_NET_PROG0: u16 = 40;
 /// The pointer (a second virtio-input device, a tablet): registers, config copy, queue page.
-pub const OBJ_PTR_MMIO: u8 = 48;
-pub const OBJ_PTR_PCICFG: u8 = 49;
-pub const OBJ_PTR_QUEUE: u8 = 50;
+pub const OBJ_PTR_MMIO: u16 = 48;
+pub const OBJ_PTR_PCICFG: u16 = 49;
+pub const OBJ_PTR_QUEUE: u16 = 50;
 /// The page the kernel's own virtio-rng exchange uses (ring and buffer); only exists while the device is being read.
-pub const OBJ_RNG_DMA: u8 = 51;
+pub const OBJ_RNG_DMA: u16 = 51;
 /// 64 receive and 32 transmit buffers of 2 KiB.
 pub const NET_BUF_PAGES: usize = 48;
-pub const IRQ_BLK: u8 = 0;
-pub const IRQ_GPU: u8 = 1;
-pub const IRQ_NET: u8 = 2;
+pub const IRQ_BLK: u16 = 0;
+pub const IRQ_GPU: u16 = 1;
+pub const IRQ_NET: u16 = 2;
 
-/// (ids are `u8`; the first 56 are the boot-time objects, the rest are created at run time)
-const NOBJ: usize = 256;
-static OBJS: SpinLock<[MemObj; NOBJ]> =
-    SpinLock::new([MemObj { kind: ObjKind::Unused, pa: 0, pages: 0, aux: 0, root: 0, list: 0, owner: NO_OWNER }; NOBJ]);
+/// (ids are `u16`; the first 64 are the boot-time objects, the rest are created at run time: `PROGRAM_OBJ_QUOTA` of them for every
+/// task slot, at least 192, sized at boot)
+static OBJS: SpinLock<&'static mut [MemObj]> = SpinLock::new(&mut []);
+
+/// How many object-table entries a machine with `tasks` task slots gets.
+pub fn objs_for(tasks: usize) -> usize {
+    (FIRST_DYNAMIC + (8 * tasks).max(192)).min(u16::MAX as usize)
+}
+
+/// Carve the object table for `n` entries; called once from `main`.
+pub fn init_table(n: usize) {
+    let mut t = OBJS.lock(R_OBJ);
+    assert!(t.is_empty() && n > FIRST_DYNAMIC, "object table: bad size or initialised twice");
+    *t = crate::table::carve_slice(n, |_| MemObj { kind: ObjKind::Unused, pa: 0, pages: 0, aux: 0, root: 0, list: 0, owner: NO_OWNER });
+}
 
 /// All streams a driver role's devices sit behind (the input driver has two: keyboard and pointer).
 pub fn sids_of_role(role: u8) -> [Option<u16>; 2] {
     crate::devices::sids_of_role(role)
 }
 
-pub fn get(i: u8) -> Option<MemObj> {
+pub fn get(i: u16) -> Option<MemObj> {
     OBJS.lock(R_OBJ).get(i as usize).copied().filter(|o| o.kind != ObjKind::Unused)
 }
 
-pub(crate) fn set(i: u8, kind: ObjKind, pa: usize, pages: usize, aux: usize) {
+pub(crate) fn set(i: u16, kind: ObjKind, pa: usize, pages: usize, aux: usize) {
     OBJS.lock(R_OBJ)[i as usize] = MemObj { kind, pa, pages, aux, root: 0, list: 0, owner: NO_OWNER };
 }
 
@@ -120,7 +131,7 @@ pub fn init() {
 
 /// First object id handed out dynamically (below it: the fixed boot objects).
 /// Object numbers 52..=63 belong to the platform (its own devices: `platform.rs` names them); the objects programs make start here.
-pub const FIRST_PLATFORM_OBJ: u8 = 52;
+pub const FIRST_PLATFORM_OBJ: u16 = 52;
 const FIRST_DYNAMIC: usize = 64;
 
 const NO_OWNER: u16 = u16::MAX;
@@ -145,14 +156,14 @@ fn over_quota(t: &[MemObj], owner: usize) -> bool {
 
 /// Register a contiguous DMA-style object created at run time. `root` is the node of the creator's capability: the object
 /// lives as long as that capability does (a copy of the capability, such as a thread's, never ends it).
-pub fn alloc_dynamic(pa: usize, pages: usize, root: crate::cap::NodeId, owner: usize) -> Option<u8> {
+pub fn alloc_dynamic(pa: usize, pages: usize, root: crate::cap::NodeId, owner: usize) -> Option<u16> {
     let mut t = OBJS.lock(R_OBJ);
     if over_quota(&t[..], owner) {
         return None;
     }
-    let i = (FIRST_DYNAMIC..NOBJ).find(|&i| t[i].kind == ObjKind::Unused)?;
+    let i = (FIRST_DYNAMIC..t.len()).find(|&i| t[i].kind == ObjKind::Unused)?;
     t[i] = MemObj { kind: ObjKind::Dma, pa, pages, aux: 0, root, list: 0, owner: owner_tag(owner) };
-    Some(i as u8)
+    Some(i as u16)
 }
 
 /// Dynamic objects in use (a leak check).
@@ -160,11 +171,11 @@ pub fn dynamic_in_use() -> usize {
     OBJS.lock(R_OBJ)[FIRST_DYNAMIC..].iter().filter(|o| o.kind != ObjKind::Unused).count()
 }
 
-pub fn is_dynamic(i: u8) -> bool {
+pub fn is_dynamic(i: u16) -> bool {
     i as usize >= FIRST_DYNAMIC
 }
 
-pub fn release(i: u8) {
+pub fn release(i: u16) {
     set(i, ObjKind::Unused, 0, 0, 0);
 }
 
@@ -235,14 +246,14 @@ pub fn shm_frame(o: &MemObj, p: usize) -> usize {
 }
 
 /// Register a shared object whose frames `shm_alloc` returned.
-pub fn shm_register(pages: usize, creator: usize, root: crate::cap::NodeId, list: usize) -> Option<u8> {
+pub fn shm_register(pages: usize, creator: usize, root: crate::cap::NodeId, list: usize) -> Option<u16> {
     let mut t = OBJS.lock(R_OBJ);
     if over_quota(&t[..], creator) {
         return None;
     }
-    let i = (FIRST_DYNAMIC..NOBJ).find(|&i| t[i].kind == ObjKind::Unused)?;
+    let i = (FIRST_DYNAMIC..t.len()).find(|&i| t[i].kind == ObjKind::Unused)?;
     t[i] = MemObj { kind: ObjKind::Shared, pa: 0, pages, aux: creator, root, list, owner: owner_tag(creator) };
-    Some(i as u8)
+    Some(i as u16)
 }
 
 /// `MemObj::aux` of a shared object whose creator is gone and that is charged to nobody (the creator was a boot-time task).
@@ -261,7 +272,7 @@ fn is_orphan(o: &MemObj) -> bool {
 /// Who pays for it stays with the program that made it (`aux`, and the object-table entry in `owner`), so that ending a thread, or a program
 /// that is not yet gone, does not hand out memory for free: `World::reclaim_space` moves the charge to a holder when that program ends (or
 /// ends the object if no holder can take it). Only an object of a boot-time task (trusted, and restarted often) is charged to nobody.
-pub fn shm_orphan(i: u8) {
+pub fn shm_orphan(i: u16) {
     let mut t = OBJS.lock(R_OBJ);
     let o = &mut t[i as usize];
     if o.kind != ObjKind::Shared || is_orphan(o) {
@@ -281,16 +292,16 @@ pub fn shm_orphan(i: u8) {
 
 /// The first orphaned shared object at or after table entry `from` (for the sweep), if `charged_to` is `None`; with `Some(program)`, the first
 /// one that is charged to that program.
-pub fn next_orphan(from: usize, charged_to: Option<usize>) -> Option<u8> {
+pub fn next_orphan(from: usize, charged_to: Option<usize>) -> Option<u16> {
     if ORPHANS.load(core::sync::atomic::Ordering::SeqCst) == 0 {
         return None;
     }
     let t = OBJS.lock(R_OBJ);
-    (from.max(FIRST_DYNAMIC)..NOBJ).find(|&i| is_orphan(&t[i]) && charged_to.is_none_or(|p| t[i].aux == p)).map(|i| i as u8)
+    (from.max(FIRST_DYNAMIC)..t.len()).find(|&i| is_orphan(&t[i]) && charged_to.is_none_or(|p| t[i].aux == p)).map(|i| i as u16)
 }
 
 /// Charge orphan `i` to program `q`, which has just reserved its pages: from now on `q` pays for it and it counts against `q`'s object limit.
-pub fn shm_charge_to(i: u8, q: usize) {
+pub fn shm_charge_to(i: u16, q: usize) {
     let mut t = OBJS.lock(R_OBJ);
     let o = &mut t[i as usize];
     if is_orphan(o) {
@@ -301,7 +312,7 @@ pub fn shm_charge_to(i: u8, q: usize) {
 
 /// Free a shared object: its frames, its list and its table entry, and the creator's charge for it. (The capabilities and
 /// mappings must have been revoked first.)
-pub fn shm_destroy(i: u8) {
+pub fn shm_destroy(i: u16) {
     let Some(o) = get(i).filter(|o| o.kind == ObjKind::Shared) else { return };
     shm_release_frames(o.list, o.pages, o.pages);
     if is_orphan(&o) {

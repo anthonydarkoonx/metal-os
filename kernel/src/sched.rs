@@ -33,7 +33,7 @@ use crate::sync::{SlotTable, Slots, SpinLock, R_RT};
 use crate::task::{self, frame, info, State, NOT_PINNED};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mem, mmu, timer};
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use metal_sched::energy::{self, CoreState, Spill};
 use metal_sched::rt::{Admission, Job, Params};
 use metal_sched::util::Util;
@@ -73,7 +73,7 @@ fn decode(v: u64) -> State {
     match v & 0xFF {
         0 => State::Free,
         1 => State::Ready,
-        2 => State::RecvWait((v >> 8) as u8),
+        2 => State::RecvWait((v >> 8) as u16),
         3 => State::CallWait,
         4 => State::Sleep(v >> 8),
         5 => State::IrqWait((v >> 8) as u8),
@@ -751,11 +751,11 @@ fn class_level(c: Class) -> u8 {
 }
 
 pub const NO_PRIO: u8 = 4;
-const NO_EP: u8 = u8::MAX;
+const NO_EP: u16 = u16::MAX;
 
 /// The (at most two) endpoints a task receives on; their queued senders' priority counts too.
-static RECV_EPS: crate::table::Table<[AtomicU8; 2]> = crate::table::Table::new();
-pub fn note_recv_endpoint(tid: usize, e: u8) {
+static RECV_EPS: crate::table::Table<[AtomicU16; 2]> = crate::table::Table::new();
+pub fn note_recv_endpoint(tid: usize, e: u16) {
     for slot in &RECV_EPS[tid] {
         if slot.load(Ordering::Relaxed) == e {
             return;
@@ -783,7 +783,7 @@ fn own_level(tid: usize) -> u8 {
     if is_rt(tid) {
         0
     } else {
-        class_level(info(tid).class)
+        class_level(task::class_of(tid))
     }
 }
 
@@ -993,7 +993,7 @@ fn pin_of(tid: usize) -> u8 {
     if r != NO_CORE {
         r
     } else {
-        info(tid).pinned
+        task::pinned_of(tid)
     }
 }
 
@@ -1004,7 +1004,7 @@ fn pin_ok(tid: usize, core: usize) -> bool {
 
 /// May `tid` run on `core`, after waiting `waited`? (Class rules: see `energy::may_run`.)
 fn class_ok(tid: usize, core: usize, now: u64, waited: u64) -> bool {
-    energy::may_run(info(tid).class, task_work(tid, now), core_kind(core), waited, big_online(), spill())
+    energy::may_run(task::class_of(tid), task_work(tid, now), core_kind(core), waited, big_online(), spill())
 }
 
 fn eligible(tid: usize, core: usize, now: u64) -> bool {
@@ -1251,7 +1251,7 @@ pub fn resched_targets(idle: u32) -> (u32, u32) {
                 break;
             }
             let c = CURRENT[core].load(Ordering::Relaxed);
-            if core_kind(core) != CoreKind::Little || c == usize::MAX || info(c).class != Class::Heavy || pin_of(c) != NOT_PINNED || is_rt(c) {
+            if core_kind(core) != CoreKind::Little || c == usize::MAX || task::class_of(c) != Class::Heavy || pin_of(c) != NOT_PINNED || is_rt(c) {
                 continue;
             }
             if now == 0 {
@@ -1353,7 +1353,7 @@ fn quantum_of(tid: usize) -> u64 {
     if is_rt(tid) {
         u64::MAX
     } else {
-        QUANTUM[class_level(info(tid).class) as usize].load(Ordering::Relaxed)
+        QUANTUM[class_level(task::class_of(tid)) as usize].load(Ordering::Relaxed)
     }
 }
 
@@ -1640,7 +1640,7 @@ pub fn finish(code: u32) -> ! {
     }
     // Placement check: Heavy work must have stayed on performance cores when they exist.
     let big = big_online();
-    for i in (0..task::limit()).filter(|&i| info(i).class == Class::Heavy && state(i) != State::Free) {
+    for i in (0..task::limit()).filter(|&i| task::class_of(i) == Class::Heavy && state(i) != State::Free) {
         let t: [u32; MAX_CPUS] = core::array::from_fn(|c| task::TICKS_ON[i][c].load(Ordering::Relaxed));
         let (little, bigt) = (t[..2].iter().sum::<u32>(), t[2..].iter().sum::<u32>());
         if big {
@@ -1700,7 +1700,7 @@ pub fn init_tables(n: usize) {
     DOOM_WHY.init(n, |_| const { AtomicU8::new(0) });
     IRQ_DEADLINE.init(n, |_| const { AtomicU64::new(0) });
     TPIDR.init(n, |_| const { AtomicU64::new(0) });
-    RECV_EPS.init(n, |_| const { [const { AtomicU8::new(NO_EP) }; 2] });
+    RECV_EPS.init(n, |_| const { [const { AtomicU16::new(NO_EP) }; 2] });
     RT_CORE.init(n, |_| const { AtomicU8::new(NO_CORE) });
     RT_DEADLINE.init(n, |_| const { AtomicU64::new(u64::MAX) });
     RT_SHARE.init(n, |_| const { AtomicU64::new(0) });

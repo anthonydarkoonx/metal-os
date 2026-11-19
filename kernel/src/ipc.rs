@@ -14,33 +14,56 @@
 use crate::sched::{self, NO_PRIO};
 use crate::sync::{Guard, SpinLock, R_EP, R_EPCLAIM};
 use crate::task::{self, frame, State};
-use core::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use crate::cap::NodeId;
 
-/// Endpoints 0..21 are the boot-time services'; 21..37 are created at run time (`EP_CREATE`, see below).
-pub const NEP: usize = 38;
-pub const EP_FIRST_DYNAMIC: u8 = 22;
-pub const EP_SERVICE: u8 = 0;
-pub const EP_DRIVER: u8 = 1;
-pub const EP_BLK: u8 = 2;
-pub const EP_ROFS: u8 = 3;
-pub const EP_LFS: u8 = 4;
-pub const EP_VFS: u8 = 5;
+/// Endpoints 0..21 are the boot-time services'; the rest are created at run time (`EP_CREATE`, see below).
+pub const EP_FIRST_DYNAMIC: u16 = 22;
+/// The most endpoints a boot can have (lock ranks are reserved for this many); `nep()` is how many it does have.
+pub const MAX_EPS: usize = 4400;
+static NEP: AtomicUsize = AtomicUsize::new(0);
+
+pub fn nep() -> usize {
+    NEP.load(Ordering::Relaxed)
+}
+
+/// How many endpoints a machine with `tasks` task slots gets: the boot-time ones and `MAX_OWNED_EPS` for every slot.
+pub fn eps_for(tasks: usize) -> usize {
+    (EP_FIRST_DYNAMIC as usize + MAX_OWNED_EPS * tasks).min(MAX_EPS)
+}
+
+/// Carve the endpoint tables for `n` endpoints; called once from `task::init_tables`.
+pub fn init_tables(n: usize) {
+    assert!(n > EP_FIRST_DYNAMIC as usize && n <= MAX_EPS && nep() == 0, "endpoint tables: bad size or initialised twice");
+    NEP.store(n, Ordering::Relaxed);
+    EP_NODE.init(n, |_| AtomicU16::new(NO_OWNER_NODE));
+    EP_TASK.init(n, |_| AtomicU16::new(NO_OWNER));
+    EPS.init(n, |_| SpinLock::new(Endpoint { q: [NO_MSG; QLEN], head: 0, len: 0, waiter: None }));
+    BEST.init(n, |_| AtomicU8::new(NO_PRIO));
+    QUEUED.init(n, |_| AtomicU8::new(0));
+    BEST_DEADLINE.init(n, |_| AtomicU64::new(u64::MAX));
+}
+pub const EP_SERVICE: u16 = 0;
+pub const EP_DRIVER: u16 = 1;
+pub const EP_BLK: u16 = 2;
+pub const EP_ROFS: u16 = 3;
+pub const EP_LFS: u16 = 4;
+pub const EP_VFS: u16 = 5;
 /// Benchmark pairs: server request endpoint and client start endpoint, per pair 0..4.
-pub const EP_BENCH_SRV: u8 = 6;
-pub const EP_BENCH_GO: u8 = 10;
+pub const EP_BENCH_SRV: u16 = 6;
+pub const EP_BENCH_GO: u16 = 10;
 /// The display driver.
-pub const EP_GPU: u8 = 16;
+pub const EP_GPU: u16 = 16;
 /// The system-information screen: told to start once the display tests are done.
-pub const EP_INFO: u8 = 17;
+pub const EP_INFO: u16 = 17;
 /// The keyboard driver, polled by the shell.
-pub const EP_KBD: u8 = 18;
+pub const EP_KBD: u16 = 18;
 /// Chaos test: the conductor tells the monkey when to start.
-pub const EP_MONKEY: u8 = 19;
+pub const EP_MONKEY: u16 = 19;
 /// The network service (`netd`): programs call it, the network driver tells it about frames and ticks.
-pub const EP_NET: u8 = 20;
+pub const EP_NET: u16 = 20;
 /// The audio service (a platform with an audio device runs it as role 20; others have none).
-pub const EP_AUDIO: u8 = 21;
+pub const EP_AUDIO: u16 = 21;
 pub const BENCH_PAIRS: usize = 4;
 const QLEN: usize = 8;
 
@@ -68,7 +91,7 @@ impl Endpoint {
     /// more, and the task id is about to be reused by a fresh instance, which must not be confused
     /// with them (a server would link the stale call to the new instance and reply into its state).
     /// Plain notifications (`call == false`) stay: they were sent and are still deliverable.
-    pub fn purge_calls_from(&mut self, e: u8, tid: u16) {
+    pub fn purge_calls_from(&mut self, e: u16, tid: u16) {
         let mut kept = [NO_MSG; QLEN];
         let mut n = 0;
         for k in 0..self.len {
@@ -88,23 +111,28 @@ impl Endpoint {
 /// Owner capability node of each run-time endpoint (`NO_OWNER`: free). The endpoint lives as long as that node.
 const NO_OWNER: u16 = u16::MAX;
 const NO_OWNER_NODE: NodeId = NodeId::MAX;
-static EP_NODE: [AtomicU16; NEP] = [const { AtomicU16::new(NO_OWNER_NODE) }; NEP];
+static EP_NODE: crate::table::Table<AtomicU16> = crate::table::Table::new();
 /// ... and the task that created it (for its quota).
-static EP_TASK: [AtomicU16; NEP] = [const { AtomicU16::new(NO_OWNER) }; NEP];
+static EP_TASK: crate::table::Table<AtomicU16> = crate::table::Table::new();
 /// Most run-time endpoints one program (all its threads together) may own at a time, and the ones programs may never take.
 pub const MAX_OWNED_EPS: usize = 4;
 const EP_RESERVE: usize = 4;
 static CLAIM: SpinLock<()> = SpinLock::new(());
 
 /// The capability node that is the root of endpoint `e` (the creator's own capability), if it is in use.
-pub fn root_node(e: u8) -> Option<NodeId> {
-    let n = EP_NODE.get(e as usize)?.load(Ordering::SeqCst);
+/// Can anything be queued on, or waiting at, endpoint `e`? (A boot endpoint always may; a run-time one only while it has an owner.)
+pub fn in_use(e: usize) -> bool {
+    e < EP_FIRST_DYNAMIC as usize || EP_NODE[e].load(Ordering::SeqCst) != NO_OWNER_NODE
+}
+
+pub fn root_node(e: u16) -> Option<NodeId> {
+    let n = EP_NODE.iter().nth(e as usize)?.load(Ordering::SeqCst);
     (n != NO_OWNER_NODE).then_some(n)
 }
 
 /// The task that created run-time endpoint `e` (`None` for a boot endpoint or a free one).
-pub fn dynamic_owner(e: u8) -> Option<u16> {
-    if e < EP_FIRST_DYNAMIC || e as usize >= NEP {
+pub fn dynamic_owner(e: u16) -> Option<u16> {
+    if e < EP_FIRST_DYNAMIC || e as usize >= nep() {
         return None;
     }
     let t = EP_TASK[e as usize].load(Ordering::SeqCst);
@@ -113,23 +141,23 @@ pub fn dynamic_owner(e: u8) -> Option<u16> {
 
 /// Claim a free run-time endpoint for `task`, owned by capability node `node`. None if the task is at its quota or
 /// none is free.
-pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u8> {
+pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u16> {
     let _claiming = CLAIM.lock(R_EPCLAIM); // (threads of one program race: the count and the claim are one step)
     let prog = task::aspace(task);
     let in_use = |e: usize| EP_NODE[e].load(Ordering::SeqCst) != NO_OWNER_NODE;
     if crate::spawn::is_program(prog) {
-        let owned = (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| in_use(e) && task::aspace(EP_TASK[e].load(Ordering::SeqCst) as usize) == prog).count();
-        let free = (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| !in_use(e)).count();
+        let owned = (EP_FIRST_DYNAMIC as usize..nep()).filter(|&e| in_use(e) && task::aspace(EP_TASK[e].load(Ordering::SeqCst) as usize) == prog).count();
+        let free = (EP_FIRST_DYNAMIC as usize..nep()).filter(|&e| !in_use(e)).count();
         if owned >= MAX_OWNED_EPS || free <= EP_RESERVE {
             return None;
         }
-    } else if (EP_FIRST_DYNAMIC as usize..NEP).filter(|&e| in_use(e) && EP_TASK[e].load(Ordering::SeqCst) == task as u16).count() >= MAX_OWNED_EPS {
+    } else if (EP_FIRST_DYNAMIC as usize..nep()).filter(|&e| in_use(e) && EP_TASK[e].load(Ordering::SeqCst) == task as u16).count() >= MAX_OWNED_EPS {
         return None;
     }
-    for e in EP_FIRST_DYNAMIC as usize..NEP {
+    for e in EP_FIRST_DYNAMIC as usize..nep() {
         if EP_NODE[e].compare_exchange(NO_OWNER_NODE, node, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
             EP_TASK[e].store(task as u16, Ordering::SeqCst);
-            return Some(e as u8);
+            return Some(e as u16);
         }
     }
     None
@@ -138,22 +166,22 @@ pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u8> {
 /// The owner capabilities in `marked` are being revoked (their nodes are dead already): the run-time endpoints
 /// they own cease to exist. Whoever waits on them or in their queues is told, so nobody sleeps for ever.
 pub fn destroy_marked(marked: &crate::cap::NodeSet) {
-    for e in EP_FIRST_DYNAMIC as usize..NEP {
+    for e in EP_FIRST_DYNAMIC as usize..nep() {
         let n = EP_NODE[e].load(Ordering::SeqCst);
         if n == NO_OWNER_NODE || !marked.has(n as usize) {
             continue;
         }
         let dead = crate::syscall::E_DEAD;
-        let mut ep = lock_ep(e as u8);
+        let mut ep = lock_ep(e as u16);
         if let Some(r) = ep.waiter.take() {
             frame(r as usize).x[0] = dead as u64;
-            sched::wake_if(r as usize, State::RecvWait(e as u8));
+            sched::wake_if(r as usize, State::RecvWait(e as u16));
         }
         let (head, len) = (ep.head, ep.len);
         let queued: [Msg; QLEN] = core::array::from_fn(|k| ep.q[(head + k) % QLEN]);
         ep.head = 0;
         ep.len = 0;
-        ep.refresh_best(e as u8);
+        ep.refresh_best(e as u16);
         for m in queued.iter().take(len) {
             let s = m.sender as usize;
             if !m.call {
@@ -171,28 +199,33 @@ pub fn destroy_marked(marked: &crate::cap::NodeSet) {
     }
 }
 
-static EPS: [SpinLock<Endpoint>; NEP] =
-    [const { SpinLock::new(Endpoint { q: [NO_MSG; QLEN], head: 0, len: 0, waiter: None }) }; NEP];
+static EPS: crate::table::Table<SpinLock<Endpoint>> = crate::table::Table::new();
 
 /// Best (lowest) priority among the senders of requests queued on each endpoint.
-static BEST: [AtomicU8; NEP] = [const { AtomicU8::new(NO_PRIO) }; NEP];
-/// Earliest deadline among those senders that are real-time (or serving a real-time task).
-static BEST_DEADLINE: [AtomicU64; NEP] = [const { AtomicU64::new(u64::MAX) }; NEP];
+static BEST: crate::table::Table<AtomicU8> = crate::table::Table::new();
+/// How many messages are queued on each endpoint, readable without its lock (a hint: for deciding which endpoints are worth locking).
+static QUEUED: crate::table::Table<AtomicU8> = crate::table::Table::new();
 
-pub fn lock_ep(e: u8) -> Guard<'static, Endpoint> {
-    EPS[e as usize].lock(R_EP + e as u16)
+pub fn has_queued(e: usize) -> bool {
+    QUEUED[e].load(Ordering::SeqCst) != 0
+}
+/// Earliest deadline among those senders that are real-time (or serving a real-time task).
+static BEST_DEADLINE: crate::table::Table<AtomicU64> = crate::table::Table::new();
+
+pub fn lock_ep(e: u16) -> Guard<'static, Endpoint> {
+    EPS[e as usize].lock(R_EP + e)
 }
 
-pub fn best_queued(e: u8) -> u8 {
+pub fn best_queued(e: u16) -> u8 {
     BEST[e as usize].load(Ordering::Relaxed)
 }
 
-pub fn best_queued_deadline(e: u8) -> u64 {
+pub fn best_queued_deadline(e: u16) -> u64 {
     BEST_DEADLINE[e as usize].load(Ordering::Relaxed)
 }
 
 impl Endpoint {
-    fn refresh_best(&self, e: u8) {
+    fn refresh_best(&self, e: u16) {
         let mut best = NO_PRIO;
         let mut deadline = u64::MAX;
         for k in 0..self.len {
@@ -201,6 +234,7 @@ impl Endpoint {
             deadline = deadline.min(sched::deadline_to_pass_on(sender));
         }
         BEST[e as usize].store(best, Ordering::Relaxed);
+        QUEUED[e as usize].store(self.len as u8, Ordering::SeqCst);
         BEST_DEADLINE[e as usize].store(deadline, Ordering::Relaxed);
     }
 }
@@ -250,7 +284,7 @@ pub enum SendErr {
 
 /// Send `m` (from task `cur`) to endpoint `e`. For a synchronous call the sender is left
 /// blocked in `CallWait`; the caller of this function then reports `Block`.
-pub fn send(cur: usize, e: u8, m: Msg) -> Result<(), SendErr> {
+pub fn send(cur: usize, e: u16, m: Msg) -> Result<(), SendErr> {
     let mut ep = lock_ep(e);
     let sync_call = m.call && m.tag == 0;
     if let Some(r) = ep.waiter.take() {
@@ -291,7 +325,7 @@ pub enum Recv {
 
 /// Receive on endpoint `e` for task `me`. On `Got` the message is already in `me`'s registers;
 /// on `Blocked` the task is registered and asleep in `RecvWait`.
-pub fn recv(me: usize, e: u8, block: bool) -> Recv {
+pub fn recv(me: usize, e: u16, block: bool) -> Recv {
     let mut ep = lock_ep(e);
     if ep.len > 0 {
         let m = ep.q[ep.head];

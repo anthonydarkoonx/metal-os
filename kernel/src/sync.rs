@@ -25,8 +25,9 @@ pub const R_TEARDOWN: u16 = 3;
 /// Task and ring locks have one rank per task slot, so the ranks above them start after the last slot's.
 const TASKS: u16 = crate::task::MAX_TASKS as u16;
 pub const R_COMPACT: u16 = 10;
+/// One rank per endpoint, below every task lock.
 pub const R_EP: u16 = 100;
-pub const R_TASK: u16 = 200;
+pub const R_TASK: u16 = R_EP + crate::ipc::MAX_EPS as u16 + 100;
 /// The table of threads waiting on words (thread.rs); taken under the address space's task lock, above every task lock.
 pub const R_WORDS: u16 = R_TASK + TASKS + 2;
 pub const R_RING: u16 = R_WORDS + 4;
@@ -115,6 +116,8 @@ fn order_violation(want: u16, top: u16) -> ! {
 
 pub struct SpinLock<T> {
     locked: AtomicBool,
+    /// Cores waiting for the lock (so that a release only wakes them when there are any: `sev` is not free everywhere).
+    waiting: core::sync::atomic::AtomicU32,
     data: UnsafeCell<T>,
 }
 
@@ -130,7 +133,7 @@ pub struct Guard<'a, T> {
 
 impl<T> SpinLock<T> {
     pub const fn new(v: T) -> Self {
-        SpinLock { locked: AtomicBool::new(false), data: UnsafeCell::new(v) }
+        SpinLock { locked: AtomicBool::new(false), waiting: core::sync::atomic::AtomicU32::new(0), data: UnsafeCell::new(v) }
     }
 
     /// Acquire at `rank` (must exceed the rank of every lock this core already holds).
@@ -147,10 +150,13 @@ impl<T> SpinLock<T> {
         bump(&counts.acquires[c]);
         if self.locked.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
             bump(&counts.waits[c]);
+            // (announced before the first retry: a release that sees nobody waiting stored `false` before this, so the retry finds it)
+            self.waiting.fetch_add(1, Ordering::SeqCst);
             while self.locked.compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
                 // SAFETY: WFE only pauses until the holder's SEV (or any event); it changes no state the compiler tracks.
                 unsafe { asm!("wfe", options(nomem, nostack)) };
             }
+            self.waiting.fetch_sub(1, Ordering::Relaxed);
         }
         h.rank[h.depth] = rank;
         h.depth += 1;
@@ -182,8 +188,11 @@ impl<T> Drop for Guard<'_, T> {
             h.depth -= 1;
         }
         self.lock.locked.store(false, Ordering::Release);
-        // SAFETY: SEV only wakes cores waiting in WFE; it changes no state the compiler tracks.
-        unsafe { asm!("sev", options(nomem, nostack)) };
+        core::sync::atomic::fence(Ordering::SeqCst); // (pairs with the waiter's announcement in `lock`)
+        if self.lock.waiting.load(Ordering::SeqCst) != 0 {
+            // SAFETY: SEV only wakes cores waiting in WFE; it changes no state the compiler tracks.
+            unsafe { asm!("sev", options(nomem, nostack)) };
+        }
     }
 }
 

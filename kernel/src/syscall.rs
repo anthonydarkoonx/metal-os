@@ -474,7 +474,7 @@ fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
 /// Page 9: the caller's layout (heap start, stack top, ASLR on, FEAT_RNG present).
 /// Page 3, `arg` = task id: that task's (name 0..8, name 8..16, state code, restarts, role).
 /// A boot endpoint's name, at most 16 bytes (the task manager shows it).
-fn ep_name(e: u8) -> &'static str {
+fn ep_name(e: u16) -> &'static str {
     match e {
         ipc::EP_SERVICE => "service",
         ipc::EP_DRIVER => "driver",
@@ -495,7 +495,7 @@ fn ep_name(e: u8) -> &'static str {
 }
 
 /// A memory object's name, at most 16 bytes.
-fn obj_name(o: u8) -> &'static str {
+fn obj_name(o: u16) -> &'static str {
     match o {
         obj::OBJ_SHARED => "shared",
         obj::OBJ_BLK_MMIO => "blk registers",
@@ -737,7 +737,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             // who holds a capability to an object, for the task manager: `arg` = kind | object << 8 (kinds as in page 10). Answers bit masks of
             // tasks (bit t is task t): (all holders, holders that may send / write, holders that may receive / map, the creator or 255, how many
             // capabilities name it). Read-only.
-            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFF) as u8);
+            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFFFF) as u16);
             let (mut any, mut user, mut serve, mut total) = (0u64, 0u64, 0u64, 0u64);
             for t in 0..task::limit() {
                 let caps = task::lock(t).caps;
@@ -787,7 +787,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             // what a capability's object is, for the task manager: `arg` = kind | object << 8. Answers (name bytes 0..8, name bytes 8..16, size in pages
             // or the interrupt number, class, creator or 255). Classes: 1 boot endpoint, 2 run-time endpoint, 3 RAM, 4 DMA buffer, 5 device registers,
             // 6 shared memory made by a program, 7 interrupt, 8 other.
-            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFF) as u8);
+            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFFFF) as u16);
             let (name, size, class, owner): (&str, u64, u64, u64) = match kind {
                 k if k == Kind::Endpoint as u8 => match ipc::dynamic_owner(obj) {
                     Some(t) => ("dynamic endpoint", 0, 2, t as u64),

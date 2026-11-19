@@ -76,11 +76,11 @@ const fn task(role: u8, name: &'static str, class: SchedClass, restartable: bool
 pub struct CapGrant {
     pub slot: u8,
     pub kind: Kind,
-    pub obj: u8,
+    pub obj: u16,
     pub rights: Rights,
 }
 
-const fn cap(slot: u8, kind: Kind, obj: u8, rights: Rights) -> CapGrant {
+const fn cap(slot: u8, kind: Kind, obj: u16, rights: Rights) -> CapGrant {
     CapGrant { slot, kind, obj, rights }
 }
 
@@ -97,7 +97,7 @@ pub struct Driver {
     /// What the driver task starts with (slots are the driver program's own numbering).
     pub grants: &'static [CapGrant],
     /// The memory the device itself may reach by DMA (the IOMMU confines its stream to exactly these objects).
-    pub dma: &'static [u8],
+    pub dma: &'static [u16],
     /// The tasks that run when this device is present, in the order they are made.
     pub tasks: &'static [TaskSpec],
     /// Logged at boot when no function matched.
@@ -248,7 +248,7 @@ pub fn present(class: DevClass) -> bool {
 
 /// Give a driver task of `role` the capabilities its device entries list, and confine each device to its DMA memory.
 /// (The role's other capabilities, from the platform, come after.)
-pub fn grant_to_driver(role: u8, mut install: impl FnMut(usize, Kind, u8, Rights)) {
+pub fn grant_to_driver(role: u8, mut install: impl FnMut(usize, Kind, u16, Rights)) {
     if role == 0 {
         return;
     }

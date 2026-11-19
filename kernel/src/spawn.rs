@@ -367,15 +367,15 @@ pub fn fs_session(tid: usize) -> (u8, u64, usize) {
 
 /// Whether `(kind, obj, rights)` in `slot` of program `tid` is exactly what the kernel gives a program itself, with no parent: the console, and for
 /// its file or network session the endpoint to the VFS or the network driver and the session's page and the session still exists: only then can it be given back after a revoke.
-pub fn session_cap_ok(tid: usize, slot: usize, kind: Kind, obj: u8, rights: Rights) -> bool {
+pub fn session_cap_ok(tid: usize, slot: usize, kind: Kind, obj: u16, rights: Rights) -> bool {
     let (fp, _, _) = fs_session(tid);
     let (np, _, _) = net_session(tid);
     match slot {
         crate::syscall::CONSOLE_SLOT => kind == Kind::Console && obj == 0 && rights == 0,
         FS_EP_SLOT => fp != NO_FS && kind == Kind::Endpoint && obj == crate::ipc::EP_VFS && rights == R_SEND,
-        FS_PAGE_SLOT => fp != NO_FS && kind == Kind::Memory && obj == crate::obj::OBJ_SHM_VFS_PROG0 + fp && rights == R_MAP | R_WRITE,
+        FS_PAGE_SLOT => fp != NO_FS && kind == Kind::Memory && obj == crate::obj::OBJ_SHM_VFS_PROG0 + fp as u16 && rights == R_MAP | R_WRITE,
         NET_EP_SLOT => np != NO_FS && kind == Kind::Endpoint && obj == crate::ipc::EP_NET && rights == R_SEND,
-        NET_PAGE_SLOT => np != NO_FS && kind == Kind::Memory && obj == crate::obj::OBJ_SHM_NET_PROG0 + np && rights == R_MAP | R_WRITE,
+        NET_PAGE_SLOT => np != NO_FS && kind == Kind::Memory && obj == crate::obj::OBJ_SHM_NET_PROG0 + np as u16 && rights == R_MAP | R_WRITE,
         _ => false,
     }
 }
@@ -401,7 +401,7 @@ pub fn boot_net_page(tid: usize) -> Option<u8> {
 
 /// Wipe a session page as it is given to a program: it still holds what the program before it (and the server) last put there, file contents and
 /// paths or network data, and the new program maps it.
-fn clear_session_page(obj: u8) {
+fn clear_session_page(obj: u16) {
     if let Some(o) = crate::obj::get(obj) {
         crate::frame::phys::zero_page(o.pa);
     }
@@ -410,7 +410,7 @@ fn clear_session_page(obj: u8) {
 fn claim_net_page() -> Option<u8> {
     for k in 0..NET_PAGES {
         if NET_POOL.fetch_or(1 << k, Ordering::SeqCst) & (1 << k) == 0 {
-            clear_session_page(crate::obj::OBJ_SHM_NET_PROG0 + k as u8);
+            clear_session_page(crate::obj::OBJ_SHM_NET_PROG0 + k as u16);
             return Some(k as u8);
         }
     }
@@ -427,7 +427,7 @@ fn drop_net_page(tid: usize) {
 fn claim_fs_page() -> Option<u8> {
     for k in 0..FS_PAGES {
         if FS_POOL.fetch_or(1 << k, Ordering::SeqCst) & (1 << k) == 0 {
-            clear_session_page(crate::obj::OBJ_SHM_VFS_PROG0 + k as u8);
+            clear_session_page(crate::obj::OBJ_SHM_VFS_PROG0 + k as u16);
             return Some(k as u8);
         }
     }
@@ -652,7 +652,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
             return Err(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock: see `cap_grant`)
         }
         let node = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-        t.caps[crate::syscall::CONSOLE_SLOT] = Cap::new(Kind::Console, 0, 0, node);
+        t.caps[crate::syscall::CONSOLE_SLOT] = Cap::new(Kind::Console, 0u16, 0, node);
         for (i, g) in give.iter().enumerate() {
             if g.kind == Kind::None {
                 continue;
@@ -669,13 +669,13 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
         }
         if let Some(k) = net_page {
             let n2 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-            t.caps[NET_PAGE_SLOT] = Cap::new(Kind::Memory, crate::obj::OBJ_SHM_NET_PROG0 + k, R_MAP | R_WRITE, n2);
+            t.caps[NET_PAGE_SLOT] = Cap::new(Kind::Memory, crate::obj::OBJ_SHM_NET_PROG0 + k as u16, R_MAP | R_WRITE, n2);
         }
         if let Some(k) = fs_page {
             let n1 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
             t.caps[FS_EP_SLOT] = Cap::new(Kind::Endpoint, crate::ipc::EP_VFS, R_SEND, n1);
             let n2 = crate::cap::mint_for(pa, None).ok_or(E_NOMEM)?;
-            t.caps[FS_PAGE_SLOT] = Cap::new(Kind::Memory, crate::obj::OBJ_SHM_VFS_PROG0 + k, R_MAP | R_WRITE, n2);
+            t.caps[FS_PAGE_SLOT] = Cap::new(Kind::Memory, crate::obj::OBJ_SHM_VFS_PROG0 + k as u16, R_MAP | R_WRITE, n2);
         }
         Ok(())
     })();
@@ -973,7 +973,7 @@ pub fn thread_create(cur: usize, entry: usize, sp: usize, arg: u64, mask: u32, s
             return fail(crate::syscall::E_BADCAP); // revoked since it was read (checked under a task lock)
         }
         let Some(node) = crate::cap::mint_for(leader, None) else { drop(t); return fail(E_NOMEM) };
-        t.caps[crate::syscall::CONSOLE_SLOT] = Cap::new(Kind::Console, 0, 0, node);
+        t.caps[crate::syscall::CONSOLE_SLOT] = Cap::new(Kind::Console, 0u16, 0, node);
         for (i, g) in give.iter().enumerate() {
             if g.kind == Kind::None {
                 continue;

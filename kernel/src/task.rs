@@ -111,7 +111,7 @@ static USER_IMG: &[u8] = include_bytes!("../../user/build/user.elf");
 pub enum State {
     Free,
     Ready,
-    RecvWait(u8),
+    RecvWait(u16),
     CallWait,
     Sleep(u64),
     IrqWait(u8),
@@ -239,6 +239,28 @@ pub fn info(tid: usize) -> Info {
     *INFO.read(tid)
 }
 
+// The two facts the scheduler reads for every candidate on every decision, kept where they can be read without the checked borrow of
+// `INFO` (a shared read-modify-write per task per scan, which many cores contend for): written when the slot's `Info` is.
+static CLASS: crate::table::Table<core::sync::atomic::AtomicU8> = crate::table::Table::new();
+static PINNED: crate::table::Table<core::sync::atomic::AtomicU8> = crate::table::Table::new();
+
+fn publish_info(tid: usize, class: Class, pinned: u8) {
+    CLASS[tid].store(class as u8, Ordering::Relaxed);
+    PINNED[tid].store(pinned, Ordering::Relaxed);
+}
+
+pub fn class_of(tid: usize) -> Class {
+    match CLASS[tid].load(Ordering::Relaxed) {
+        x if x == Class::Interactive as u8 => Class::Interactive,
+        x if x == Class::Heavy as u8 => Class::Heavy,
+        _ => Class::Background,
+    }
+}
+
+pub fn pinned_of(tid: usize) -> u8 {
+    PINNED[tid].load(Ordering::Relaxed)
+}
+
 static FRAMES: SlotTable<TrapFrame> = SlotTable::new();
 
 /// The task's saved registers. Not behind a lock: whoever currently *owns* the task writes it.
@@ -289,7 +311,7 @@ pub fn members(leader: usize) -> impl Iterator<Item = usize> {
     (0..limit()).filter(move |&m| aspace(m) == leader && !matches!(sched::state(m), State::Free | State::Dead))
 }
 
-fn install(t: &mut Task, tid: usize, slot: usize, kind: Kind, obj: u8, rights: Rights) {
+fn install(t: &mut Task, tid: usize, slot: usize, kind: Kind, obj: u16, rights: Rights) {
     let node = mint_node(None).expect("capability nodes exhausted");
     t.caps[slot] = Cap::new(kind, obj, rights, node);
     if kind == Kind::Endpoint && rights & R_RECV != 0 {
@@ -320,7 +342,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
                 install(t, tid, 11, Kind::MemCtl, 0, R_MEM_STATS | R_MEM_ALLOC | R_MEM_SWAP | R_MEM_PAGER | R_GRANT); // (grant: the memory-limit tests hand it to a program)
                 // conductor may start each benchmark client and read their results
                 for k in 0..ipc::BENCH_PAIRS {
-                    install(t, tid, 16 + k, Kind::Endpoint, ipc::EP_BENCH_GO + k as u8, R_SEND);
+                    install(t, tid, 16 + k, Kind::Endpoint, ipc::EP_BENCH_GO + k as u16, R_SEND);
                 }
                 install(t, tid, 20, Kind::Memory, obj::OBJ_SHM_BENCH, R_MAP);
             }
@@ -350,11 +372,11 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
         9 => install(t, tid, 0, Kind::MemCtl, 0, R_MEM_STATS | R_MEM_COMPACT | R_MEM_SWAP), // compactd
         10 => {
             // benchmark server `k = tid - FIRST_BENCH_SERVER`: serves its own endpoint, nothing else
-            install(t, tid, 0, Kind::Endpoint, ipc::EP_BENCH_SRV + (tid - FIRST_BENCH_SERVER) as u8, R_RECV);
+            install(t, tid, 0, Kind::Endpoint, ipc::EP_BENCH_SRV + (tid - FIRST_BENCH_SERVER) as u16, R_RECV);
         }
         11 => {
             // benchmark client: calls its server, waits for a start message, reports in a shared page
-            let k = (tid - FIRST_BENCH_CLIENT) as u8;
+            let k = (tid - FIRST_BENCH_CLIENT) as u16;
             install(t, tid, 0, Kind::Endpoint, ipc::EP_BENCH_SRV + k, R_SEND);
             install(t, tid, 1, Kind::Endpoint, ipc::EP_BENCH_GO + k, R_RECV);
             install(t, tid, 2, Kind::Memory, obj::OBJ_SHM_BENCH, R_MAP | R_WRITE);
@@ -404,7 +426,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
                 // the shell's own network session (`download`, `play URL`): endpoint in slot 12, session page in slot 13
                 if let Some(k) = crate::spawn::boot_net_page(tid) {
                     install(t, tid, 12, Kind::Endpoint, ipc::EP_NET, R_SEND);
-                    install(t, tid, 13, Kind::Memory, obj::OBJ_SHM_NET_PROG0 + k, R_MAP | R_WRITE);
+                    install(t, tid, 13, Kind::Memory, obj::OBJ_SHM_NET_PROG0 + k as u16, R_MAP | R_WRITE);
                 }
             }
         }
@@ -416,7 +438,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
             install(t, tid, 2, Kind::Memory, obj::OBJ_NET_RING, R_MAP | R_WRITE);
             install(t, tid, 3, Kind::Irq, obj::IRQ_NET, R_SEND);
             for k in 0..8 {
-                install(t, tid, 16 + k as usize, Kind::Memory, obj::OBJ_SHM_NET_PROG0 + k, R_MAP | R_WRITE);
+                install(t, tid, 16 + k as usize, Kind::Memory, obj::OBJ_SHM_NET_PROG0 + k as u16, R_MAP | R_WRITE);
             }
         }
         5 => {
@@ -447,7 +469,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
             install(t, tid, 7, Kind::Memory, obj::OBJ_SHM_VFS_SHELL, R_MAP | R_WRITE);
             // the session pages of programs with file-system access (see spawn.rs)
             for k in 0..8 {
-                install(t, tid, 16 + k, Kind::Memory, obj::OBJ_SHM_VFS_PROG0 + k as u8, R_MAP | R_WRITE);
+                install(t, tid, 16 + k, Kind::Memory, obj::OBJ_SHM_VFS_PROG0 + k as u16, R_MAP | R_WRITE);
             }
         }
         8 => {
@@ -532,6 +554,7 @@ pub fn set_dynamic_info(tid: usize, role: u8, name: &[u8; 8], class: Class, heap
     let n = name.iter().position(|&b| b == 0).unwrap_or(8);
     let name = if n == 0 { Name::new(b"prog") } else { Name::new(&name[..n]) };
     *INFO.write(tid) = Info { role, restartable: false, name, class, pinned: NOT_PINNED, heap_quota: heap_pages, budget };
+    publish_info(tid, class, NOT_PINNED);
 }
 
 /// Change a program's limits (`QUOTA`): done under its task lock, which is what `heap_grow` reads them under.
@@ -572,6 +595,7 @@ pub fn spawn(role: u8, name: &'static str, class: Class, restartable: bool) -> u
     } else if role == 11 {
         i.pinned = (tid - FIRST_BENCH_CLIENT) as u8;
     }
+    publish_info(tid, i.class, i.pinned);
     *INFO.write(tid) = i;
     let mut t = lock(tid);
     build(&mut t, tid).expect("failed to build task");
@@ -621,22 +645,15 @@ impl World {
         if !marked.any() {
             return;
         }
-        // a task asleep in receive on an endpoint whose receive capability is being revoked must not sleep for ever
-        for e in 0..ipc::NEP {
-            let mut ep = ipc::lock_ep(e as u8);
-            let Some(r) = ep.waiter else { continue };
-            let r = r as usize;
-            let revoked = lock(r).caps.iter().any(|c| c.kind == Kind::Endpoint && c.obj as usize == e && c.rights & R_RECV != 0 && marked.has(c.node as usize));
-            if revoked {
-                ep.waiter = None;
-                frame(r).x[0] = crate::syscall::E_BADCAP as u64;
-                sched::wake_if(r, State::RecvWait(e as u8));
-            }
-        }
+        // (the endpoints on which a receive capability is being revoked: a task asleep in receive on one must not sleep for ever)
+        let mut hit = [0u64; ipc::MAX_EPS.div_ceil(64)];
         for tid in 0..limit() {
             let mut t = lock(tid);
             for c in t.caps.iter_mut() {
                 if c.kind != Kind::None && marked.has(c.node as usize) {
+                    if c.kind == Kind::Endpoint && c.rights & R_RECV != 0 {
+                        hit[c.obj as usize / 64] |= 1 << (c.obj % 64);
+                    }
                     *c = Cap::NONE;
                 }
             }
@@ -652,6 +669,19 @@ impl World {
                 }
             }
         }
+        // Whoever sleeps in receive on one of those endpoints and has no receive capability left for it is told. (The sweep is done, so
+        // a task that held only revoked ones is found without any; one that holds another, still alive, goes on waiting.)
+        for e in (0..ipc::nep()).filter(|&e| hit[e / 64] >> (e % 64) & 1 != 0) {
+            let mut ep = ipc::lock_ep(e as u16);
+            let Some(r) = ep.waiter else { continue };
+            let r = r as usize;
+            let still = lock(r).caps.iter().any(|c| c.kind == Kind::Endpoint && c.obj as usize == e && c.rights & R_RECV != 0 && c.alive());
+            if !still {
+                ep.waiter = None;
+                frame(r).x[0] = crate::syscall::E_BADCAP as u64;
+                sched::wake_if(r, State::RecvWait(e as u16));
+            }
+        }
         crate::ipc::destroy_marked(marked);
         crate::cap::free_marked(marked);
         mmu::flush_tlb();
@@ -659,7 +689,7 @@ impl World {
     }
 
     /// Does any task still hold a live capability on shared-memory object `id`?
-    fn memory_held(id: u8) -> bool {
+    fn memory_held(id: u16) -> bool {
         (0..limit()).any(|t| lock(t).caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()))
     }
 
@@ -721,67 +751,82 @@ impl World {
     /// First the task is cut off from the endpoints (it is no longer woken by a sender, and the calls it had queued are dropped), so that no
     /// new link to it can form; then everyone still linked to it is told.
     fn reset(&mut self, tid: usize) {
-        for (i, e) in (0..ipc::NEP).map(|e| (e, ipc::lock_ep(e as u8))) {
-            let mut e = e;
-            if e.waiter == Some(tid as u16) {
-                e.waiter = None;
+        // (it can only be asleep in receive on an endpoint it holds a receive capability for; and only an endpoint with something queued can
+        // hold calls of its to drop)
+        let held = lock(tid).caps;
+        for c in held.iter().filter(|c| c.kind == Kind::Endpoint && c.rights & R_RECV != 0) {
+            let mut ep = ipc::lock_ep(c.obj);
+            if ep.waiter == Some(tid as u16) {
+                ep.waiter = None;
             }
-            e.purge_calls_from(i as u8, tid as u16);
         }
-        // callers waiting for this task to reply, async calls it was handling, and servers still holding a reply link to it
-        for c in 0..limit() {
+        for e in (0..ipc::nep()).filter(|&e| ipc::has_queued(e)) {
+            ipc::lock_ep(e as u16).purge_calls_from(e as u16, tid as u16);
+        }
+        // Callers waiting for this task to reply (only a task in `CallWait` can be one) and async calls it was handling (only if any are
+        // outstanding anywhere).
+        for c in (0..limit()).filter(|&c| sched::state(c) == State::CallWait) {
             let mut t = lock(c);
             if t.callee == Some(tid as u16) && sched::state(c) == State::CallWait {
                 t.callee = None;
                 frame(c).x[0] = crate::syscall::E_DEAD as u64;
                 sched::wake(c);
             }
-            crate::ring::fail_calls_to(&mut t, c, tid);
+        }
+        if crate::ring::async_ops_outstanding() {
+            for c in 0..limit() {
+                crate::ring::fail_calls_to(&mut lock(c), c, tid);
+            }
+        }
+        // The servers that still hold a reply link to it are the ones its own calls are linked to (a link is made on both sides at once).
+        let (callee, pending): (Option<u16>, [Option<u16>; crate::ring::MAX_PENDING]) = {
+            let t = lock(tid);
+            (t.callee, core::array::from_fn(|i| t.pending[i].callee))
+        };
+        for s in callee.into_iter().chain(pending.into_iter().flatten()) {
+            let mut t = lock(s as usize);
             if t.reply_to.map_or(false, |(who, _)| who == tid as u16) {
                 t.reply_to = None;
             }
         }
-        // its capabilities. Plain ones are revoked together (one sweep of the tasks); one that needs the object's own bookkeeping first
-        // flushes what is pending, so that every step sees the tree as if the ones before it were done.
+        // Its capabilities, all revoked in one sweep of the tasks. Memory objects that need their own bookkeeping get it as their
+        // capability comes up; what must wait for the sweep (freeing an object nobody holds) is done after it.
         let mut pending = NodeSet::EMPTY;
+        let mut destroy = [None; NCAPS];
         for slot in 0..NCAPS {
             let c = lock(tid).caps[slot];
-            if c.kind != Kind::None && c.alive() {
-                // memory from MC_ALLOC is private to its task (the capability has no GRANT right): its frames go
-                // below with the rest, but the object-table entry would stay taken for ever (found by the fuzzer)
-                if c.kind == Kind::Memory && obj::is_dynamic(c.obj) {
-                    self.finish_revoke(&core::mem::replace(&mut pending, NodeSet::EMPTY));
-                    if !c.alive() {
-                        continue;
-                    }
-                    match obj::get(c.obj) {
-                        // The creator of shared memory is going. With no holders the memory goes too; with holders it
-                        // lives on without a creator until the last of them lets go (a holder's own copy, or a thread's,
-                        // just goes with the revocation below).
-                        Some(o) if o.kind == obj::ObjKind::Shared => {
-                            if o.root == c.node {
-                                let mut holders = NodeSet::EMPTY;
-                                if mark_subtree(c.node, false, &mut holders) > 0 {
-                                    obj::shm_orphan(c.obj);
-                                    crate::cap::detach_children(c.node);
-                                    self.revoke_subtree(c.node, true);
-                                } else {
-                                    self.revoke_subtree(c.node, true);
-                                    obj::shm_destroy(c.obj);
-                                }
+            if c.kind == Kind::None || !c.alive() {
+                continue; // (or revoked already, with an ancestor, a moment ago in this very loop)
+            }
+            // memory from MC_ALLOC is private to its task (the capability has no GRANT right): its frames go
+            // below with the rest, but the object-table entry would stay taken for ever (found by the fuzzer)
+            if c.kind == Kind::Memory && obj::is_dynamic(c.obj) {
+                match obj::get(c.obj) {
+                    // The creator of shared memory is going. With no holders the memory goes too; with holders it
+                    // lives on without a creator until the last of them lets go (a holder's own copy, or a thread's,
+                    // just goes with the revocation below).
+                    Some(o) if o.kind == obj::ObjKind::Shared => {
+                        if o.root == c.node {
+                            let mut holders = NodeSet::EMPTY;
+                            if mark_subtree(c.node, false, &mut holders) > 0 {
+                                obj::shm_orphan(c.obj);
+                                crate::cap::detach_children(c.node);
+                            } else {
+                                destroy[slot] = Some(c.obj);
                             }
                         }
-                        // (a copy of a run-time object's capability, a thread's, ends with the copy: the object stays with the creator's)
-                        Some(o) if o.root != c.node => {}
-                        _ => obj::release(c.obj),
                     }
-                }
-                if c.alive() {
-                    crate::cap::kill_subtree(c.node, true, &mut pending);
+                    // (a copy of a run-time object's capability, a thread's, ends with the copy: the object stays with the creator's)
+                    Some(o) if o.root != c.node => {}
+                    _ => obj::release(c.obj),
                 }
             }
+            crate::cap::kill_subtree(c.node, true, &mut pending);
         }
         self.finish_revoke(&pending);
+        for id in destroy.into_iter().flatten() {
+            obj::shm_destroy(id);
+        }
         {
             let mut t = lock(tid);
             t.caps = [Cap::NONE; NCAPS];
@@ -909,6 +954,7 @@ pub fn init_tables(n: usize) {
     crate::spawn::init_tables(n);
     crate::thread::init_tables(n);
     crate::ring::init_tables(n);
+    crate::ipc::init_tables(crate::ipc::eps_for(n));
     TASKS.init(n, |_| const { SpinLock::new(Task::EMPTY) });
     L1.init(n, |_| const { AtomicUsize::new(0) });
     RESTARTS.init(n, |_| const { AtomicU32::new(0) });
@@ -916,6 +962,8 @@ pub fn init_tables(n: usize) {
     LAST_RESTART.init(n, |_| const { core::sync::atomic::AtomicU64::new(0) });
     TICKS_ON.init(n, |_| const { [const { AtomicU32::new(0) }; crate::smp::MAX_CPUS] });
     SPACE.init(n, |_| const { core::sync::atomic::AtomicU16::new(u16::MAX) });
+    CLASS.init(n, |_| core::sync::atomic::AtomicU8::new(Class::Background as u8));
+    PINNED.init(n, |_| core::sync::atomic::AtomicU8::new(NOT_PINNED));
     INFO.init(n, |_| Info { role: 0, restartable: false, name: Name::EMPTY, class: Class::Background, pinned: NOT_PINNED, heap_quota: MAX_HEAP_PAGES, budget: 0 });
     FRAMES.init(n, |_| TrapFrame::ZERO);
 }

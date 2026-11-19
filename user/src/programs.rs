@@ -175,7 +175,7 @@ pub fn scale_tests() {
     let mut kids: Vec<i64> = Vec::new();
     let mut last = 0;
     for _ in 0..slots + 8 {
-        let t = Req::new().arg(0).heap(4).go(&sleeper); // (a small heap: the default 256 pages would use up the conductor's budget at about a hundred programs)
+        let t = Req::new().arg(1).heap(4).give_masked(1, FACTORY_SLOT as u8, 0xFFFF & !4).go(&sleeper); // (a small heap: the default 256 pages would use up the conductor's budget at about a hundred programs; each holds 4 endpoints and 2 shared-memory objects)
         if t < 0 {
             last = t;
             break;
@@ -183,9 +183,11 @@ pub fn scale_tests() {
         kids.push(t);
     }
     let spawned = counter() - begin;
+    sleep(50);
+    let holding = live_dynamic() - busy0; // (a program that was refused an endpoint or an object has ended by now)
     let room = slots - FIRST_DYNAMIC as usize - busy0;
-    println!("[client] TEST every one of {slots} task slots can be used, then SPAWN says the table is full ({} programs of {room} free slots, then {last}; {} us each): {}",
-        kids.len(), spawned * 1_000_000 / frequency() / kids.len().max(1) as u64, verdict(last == E_FULL as i64 && kids.len() == room));
+    println!("[client] TEST every one of {slots} task slots can be used, each holding 4 endpoints and 2 objects, then SPAWN says the table is full ({} programs of {room} free slots, then {last}; {holding} still holding them; {} us each): {}",
+        kids.len(), spawned * 1_000_000 / frequency() / kids.len().max(1) as u64, verdict(last == E_FULL as i64 && kids.len() == room && holding == kids.len()));
     let begin = counter();
     for &k in &kids {
         kill(k);

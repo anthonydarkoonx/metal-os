@@ -70,7 +70,7 @@ hammers the pages being moved from another core (faults that raced with a move a
 retried), verifies every page afterwards, then repeats with synchronous compaction.
 
 ## Task slots
-The number of task slots is chosen at boot (`task::tasks_for`): one per MiB of RAM, between 64 and 1024, or what the fw_cfg file `opt/metal/max-tasks` says. All per-task state (task records, saved registers, scheduler slots, spawn bookkeeping) is carved out of RAM at that size (`kernel/src/table.rs`), and the capability node pool holds 8192 nodes. `make scale` starts programs until all 997 free slots of a 1024-slot table are used, ends them together and checks that every frame, node and slot comes back.
+The number of task slots is chosen at boot (`task::tasks_for`): one per MiB of RAM, between 64 and 1024, or what the fw_cfg file `opt/metal/max-tasks` says. All per-task state (task records, saved registers, scheduler slots, spawn bookkeeping) is carved out of RAM at that size (`kernel/src/table.rs`), and so are the endpoint table (the 22 boot-time endpoints and `MAX_OWNED_EPS` = 4 for every task slot: 4118 at 1024 slots) and the memory-object table (64 boot-time entries and 8 for every slot, at least 192). The capability node pool holds 8192 nodes. Endpoint and object ids are 16 bits. `make scale` starts programs until all 997 free slots of a 1024-slot table are used (each holding 4 endpoints and 2 shared-memory objects), ends them together and checks that every frame, node and slot comes back.
 
 ## Scheduling, SMP and locking
 Cores come up through PSCI `CPU_ON` (up to 4), each with its own stack, MMU setup and timer. There is

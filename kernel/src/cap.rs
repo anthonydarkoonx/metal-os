@@ -98,7 +98,7 @@ pub enum Kind {
 pub struct Cap {
     pub kind: Kind,
     /// Index of the kernel object (endpoint id / memory object id).
-    pub obj: u8,
+    pub obj: u16,
     pub rights: Rights,
     pub node: NodeId,
     /// The generation of `node` this capability was made under. A node number is reused as soon as it is freed, so a copy of a
@@ -115,8 +115,8 @@ impl Cap {
     }
 
     /// A capability of `kind` on object `obj`, hanging under the node `n` that was just made.
-    pub fn new(kind: Kind, obj: u8, rights: Rights, n: Minted) -> Cap {
-        Cap { kind, obj, rights, node: n.id, gen: n.gen }
+    pub fn new(kind: Kind, obj: impl Into<u16>, rights: Rights, n: Minted) -> Cap {
+        Cap { kind, obj: obj.into(), rights, node: n.id, gen: n.gen }
     }
 
     /// The same capability under a new node (a copy), with `rights`.
@@ -255,7 +255,7 @@ pub struct Revoked {
     pub task: u16,
     pub slot: u8,
     pub kind: Kind,
-    pub obj: u8,
+    pub obj: u16,
     pub rights: Rights,
     /// The node it hung under, or `NO_PARENT` for a capability the kernel made itself (a file or network session of a program).
     pub parent: NodeId,
@@ -436,7 +436,7 @@ pub fn mark_subtree(root: NodeId, include_root: bool, out: &mut NodeSet) -> usiz
         let mut changed = false;
         for i in 0..NODES {
             let p = t[i].parent;
-            if t[i].used && !out.has(i) && p != NO_PARENT && out.has(p as usize) {
+            if t[i].used && !t[i].dying && !out.has(i) && p != NO_PARENT && out.has(p as usize) {
                 out.insert(i);
                 changed = true;
             }

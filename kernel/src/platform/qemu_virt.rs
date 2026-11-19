@@ -272,7 +272,7 @@ pub fn probe_devices() {
 }
 
 /// The capabilities a boot-time task of `role` gets for this machine's own devices, on top of the general ones. `grant(slot, kind, object, rights)`.
-pub fn boot_caps(_role: u8, _grant: &mut dyn FnMut(usize, crate::cap::Kind, u8, crate::cap::Rights)) {}
+pub fn boot_caps(_role: u8, _grant: &mut dyn FnMut(usize, crate::cap::Kind, u16, crate::cap::Rights)) {}
 
 /// Tasks this machine has and others do not (a board's audio service, say), spawned after all the others.
 pub fn spawn_extra_tasks() {}

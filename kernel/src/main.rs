@@ -195,7 +195,8 @@ extern "C" fn kmain() -> ! {
     kprintln!("[mem] TEST the reverse map holds the addresses of the whole user space (up to 256 GiB): {}", v(mem::rmap_selftest()));
     let tasks = task::tasks_for(ram, platform::number(b"opt/metal/max-tasks"));
     task::init_tables(tasks);
-    kprintln!("[kernel] {tasks} task slots");
+    obj::init_table(obj::objs_for(tasks));
+    kprintln!("[kernel] {tasks} task slots, {} endpoints, {} memory objects", ipc::nep(), obj::objs_for(tasks));
     timer::init();
     sched::init();
     platform::init_devices();

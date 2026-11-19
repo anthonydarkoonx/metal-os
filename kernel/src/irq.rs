@@ -78,7 +78,7 @@ pub enum Wait {
     Busy,
 }
 
-pub fn wait(idx: u8, me: usize, timeout: u64) -> Wait {
+pub fn wait(idx: u16, me: usize, timeout: u64) -> Wait {
     let mut irqs = IRQS.lock(R_IRQ);
     let irq = &mut irqs[idx as usize];
     if irq.waiter.is_some() {
@@ -92,20 +92,20 @@ pub fn wait(idx: u8, me: usize, timeout: u64) -> Wait {
     }
     irq.waiter = Some(me as u16);
     sched::set_irq_deadline(me, if timeout == 0 { 0 } else { timer::counter().saturating_add(timeout.saturating_mul(timer::interval())) });
-    sched::set_state(me, State::IrqWait(idx));
+    sched::set_state(me, State::IrqWait(idx as u8));
     Wait::Blocked
 }
 
 /// Raise the interrupt line from software (`IRQ_RAISE`, needs the send right on the line's capability): the task blocked
 /// in `IRQ_WAIT` on it wakes as if the device had interrupted; if nobody waits, the next wait returns at once.
-pub fn raise(idx: u8) {
+pub fn raise(idx: u16) {
     let mut irqs = IRQS.lock(R_IRQ);
     let irq = &mut irqs[idx as usize];
     match irq.waiter.take() {
         Some(w) => {
             frame(w as usize).x[0] = 0;
             sched::set_irq_deadline(w as usize, 0);
-            sched::wake_if(w as usize, State::IrqWait(idx));
+            sched::wake_if(w as usize, State::IrqWait(idx as u8));
         }
         None => irq.soft = true,
     }
@@ -130,6 +130,6 @@ pub fn expire(tid: usize, idx: u8) {
     if irq.waiter == Some(tid as u16) {
         irq.waiter = None;
         frame(tid).x[0] = crate::syscall::E_TIMEDOUT as u64; // the blocked IRQ_WAIT returns the error
-        sched::wake_if(tid, State::IrqWait(idx));
+        sched::wake_if(tid, State::IrqWait(idx as u8));
     }
 }

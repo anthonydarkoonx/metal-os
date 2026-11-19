@@ -277,7 +277,7 @@ pub fn init() {
 }
 
 /// Allow stream `sid` (owned by the task with `role`) to reach exactly the pages of `objs`.
-pub fn attach(sid: u16, role: u8, objs: &[u8]) {
+pub fn attach(sid: u16, role: u8, objs: &[u16]) {
     let sid = sid as usize;
     // objects first: the OBJ lock ranks below the SMMU lock
     let mut regions = [(0usize, 0usize); 8];

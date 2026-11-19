@@ -135,16 +135,16 @@ pub fn claim_dynamic(task: usize, node: NodeId) -> Option<u8> {
     None
 }
 
-/// The owner capabilities in `marked` are being revoked (every endpoint and task is locked): the run-time endpoints
+/// The owner capabilities in `marked` are being revoked (their nodes are dead already): the run-time endpoints
 /// they own cease to exist. Whoever waits on them or in their queues is told, so nobody sleeps for ever.
-pub fn destroy_marked(w: &mut task::World, marked: &[bool; crate::cap::NODES]) {
+pub fn destroy_marked(marked: &[bool; crate::cap::NODES]) {
     for e in EP_FIRST_DYNAMIC as usize..NEP {
         let n = EP_NODE[e].load(Ordering::SeqCst);
         if n == NO_OWNER_NODE || !marked[n as usize] {
             continue;
         }
         let dead = crate::syscall::E_DEAD;
-        let ep = &mut w.eps[e];
+        let mut ep = lock_ep(e as u8);
         if let Some(r) = ep.waiter.take() {
             frame(r as usize).x[0] = dead as u64;
             sched::wake_if(r as usize, State::RecvWait(e as u8));
@@ -163,7 +163,7 @@ pub fn destroy_marked(w: &mut task::World, marked: &[bool; crate::cap::NODES]) {
                 frame(s).x[0] = dead as u64;
                 sched::wake_if(s, State::CallWait);
             } else {
-                crate::ring::fail_queued(&mut w.tasks[s], s, m.tag, dead);
+                crate::ring::fail_queued(&mut task::lock(s), s, m.tag, dead);
             }
         }
         EP_TASK[e].store(NO_OWNER, Ordering::SeqCst);

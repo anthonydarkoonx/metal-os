@@ -20,6 +20,8 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 
 /// Serialises SPAWN (taken outside every task lock).
 pub const R_SPAWNING: u16 = 5;
+/// Serialises the lifecycle operations (task.rs `lifecycle`, `World`): outside SPAWN's lock and every endpoint and task lock.
+pub const R_TEARDOWN: u16 = 3;
 /// The table of threads waiting on words (thread.rs); taken under the address space's task lock, above every task lock.
 pub const R_WORDS: u16 = 266;
 pub const R_COMPACT: u16 = 10;

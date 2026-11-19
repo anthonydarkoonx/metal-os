@@ -12,7 +12,7 @@ use crate::cap::*;
 use crate::ipc::{self, Endpoint, NEP};
 use crate::mem::{self, PAGE};
 use crate::sched;
-use crate::sync::{Guard, SlotTable, SpinLock, R_TASK};
+use crate::sync::{Guard, SlotTable, SpinLock, R_TASK, R_TEARDOWN};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mmu, obj};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
@@ -571,37 +571,59 @@ pub fn spawn(role: u8, name: &'static str, class: Class, restartable: bool) -> u
     tid
 }
 
-/// Every endpoint lock and every task lock, held at once (taken in rank order).
-///
-/// Operations that must see or change many tasks consistently (a task dying, a capability
-/// being revoked everywhere) run under this. They are rare; everything on the hot paths
-/// (IPC, memory syscalls) takes only the one or two locks it needs.
+/// Serialises the lifecycle operations: a capability subtree revoked, a task dying, and the system calls that create, wait for, or put
+/// capabilities into other tasks (`lifecycle`: SPAWN, WAIT, THREAD_CREATE, TASK_START, CAP_GRANT, RESTORE_OF). Those look at a task's state
+/// under its lock and then act, which is only sound if the end of that task cannot slip in between, so they exclude each other. But
+/// the teardown no longer freezes the whole machine: it takes the one endpoint or task lock it needs at the moment it needs it, and the
+/// hot paths (IPC, memory syscalls, rings) go on in between. What makes that safe: a capability's node is killed atomically
+/// *first* (`cap::kill_subtree`: nothing can be used or minted under it from then on), and only then are the tasks' tables swept; and a
+/// dying task is cut off from the endpoints (no more waking it, no more calls linked to it) before anyone who relied on it is told.
+/// (Rank `R_TEARDOWN`: outside every endpoint and task lock, inside SPAWN's.)
+static TEARDOWN: SpinLock<()> = SpinLock::new(());
+
 pub struct World {
-    pub eps: [Guard<'static, Endpoint>; NEP],
-    pub tasks: [Guard<'static, Task>; MAX_TASKS],
+    _only: Guard<'static, ()>,
+}
+
+/// Hold the lifecycle lock (see `TEARDOWN`): taken before any task lock, for the whole of a system call that creates, waits for or hands
+/// capabilities to another task.
+pub fn lifecycle() -> Guard<'static, ()> {
+    TEARDOWN.lock(R_TEARDOWN)
 }
 
 impl World {
     pub fn lock() -> World {
-        World { eps: core::array::from_fn(|e| ipc::lock_ep(e as u8)), tasks: core::array::from_fn(lock) }
+        World { _only: lifecycle() }
     }
 
     /// Kill capabilities derived from `root` everywhere: clear table slots,
     /// unmap shared memory that was mapped through them, free the nodes.
     pub fn revoke_subtree(&mut self, root: crate::cap::NodeId, include_root: bool) -> usize {
         let mut marked = [false; NODES];
-        let n = mark_subtree(root, include_root, &mut marked);
+        let n = crate::cap::kill_subtree(root, include_root, &mut marked);
+        self.finish_revoke(&marked);
+        n
+    }
+
+    /// The nodes in `marked` are dead (`cap::kill_subtree`): clear them out of every table, then free their numbers.
+    fn finish_revoke(&mut self, marked: &[bool; NODES]) {
+        if !marked.iter().any(|&m| m) {
+            return;
+        }
         // a task asleep in receive on an endpoint whose receive capability is being revoked must not sleep for ever
-        for tid in 0..limit() {
-            for c in self.tasks[tid].caps {
-                if c.kind == Kind::Endpoint && c.rights & R_RECV != 0 && marked[c.node as usize] && self.eps[c.obj as usize].waiter == Some(tid as u8) {
-                    self.eps[c.obj as usize].waiter = None;
-                    frame(tid).x[0] = crate::syscall::E_BADCAP as u64;
-                    sched::wake_if(tid, State::RecvWait(c.obj));
-                }
+        for e in 0..ipc::NEP {
+            let mut ep = ipc::lock_ep(e as u8);
+            let Some(r) = ep.waiter else { continue };
+            let r = r as usize;
+            let revoked = lock(r).caps.iter().any(|c| c.kind == Kind::Endpoint && c.obj as usize == e && c.rights & R_RECV != 0 && marked[c.node as usize]);
+            if revoked {
+                ep.waiter = None;
+                frame(r).x[0] = crate::syscall::E_BADCAP as u64;
+                sched::wake_if(r, State::RecvWait(e as u8));
             }
         }
-        for t in self.tasks.iter_mut() {
+        for tid in 0..limit() {
+            let mut t = lock(tid);
             for c in t.caps.iter_mut() {
                 if c.kind != Kind::None && marked[c.node as usize] {
                     *c = Cap::NONE;
@@ -619,15 +641,15 @@ impl World {
                 }
             }
         }
-        crate::ipc::destroy_marked(self, &marked);
-        for (i, &m) in marked.iter().enumerate() {
-            if m {
-                free_node(i as crate::cap::NodeId);
-            }
-        }
+        crate::ipc::destroy_marked(marked);
+        crate::cap::free_marked(marked);
         mmu::flush_tlb();
         self.sweep_orphans();
-        n
+    }
+
+    /// Does any task still hold a live capability on shared-memory object `id`?
+    fn memory_held(id: u8) -> bool {
+        (0..limit()).any(|t| lock(t).caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()))
     }
 
     /// Shared memory whose creator is gone is freed when nothing holds it any more.
@@ -635,8 +657,7 @@ impl World {
         let mut from = 0;
         while let Some(id) = obj::next_orphan(from, None) {
             from = id as usize + 1;
-            let held = self.tasks.iter().any(|t| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()));
-            if !held {
+            if !Self::memory_held(id) {
                 obj::shm_destroy(id);
             }
         }
@@ -650,14 +671,16 @@ impl World {
         while let Some(id) = obj::next_orphan(from, Some(leader)) {
             from = id as usize + 1;
             let Some(o) = obj::get(id) else { continue };
-            let holds = |t: &Task| t.caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive());
             let mut taken = false;
             for h in 0..limit() {
                 let q = aspace(h);
-                if q == leader || !holds(&self.tasks[h]) || matches!(sched::state(h), State::Free | State::Dead) {
+                if q == leader || matches!(sched::state(h), State::Free | State::Dead) {
                     continue;
                 }
-                let held = self.tasks[q].held_pages();
+                if !lock(h).caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()) {
+                    continue;
+                }
+                let held = lock(q).held_pages();
                 if crate::spawn::reserve_contig(q, held, o.pages) {
                     obj::shm_charge_to(id, q);
                     taken = true;
@@ -665,19 +688,17 @@ impl World {
                 }
             }
             if !taken {
-                let mut nodes = [crate::cap::NO_PARENT; MAX_TASKS * NCAPS];
-                let mut n = 0;
-                for t in self.tasks.iter() {
-                    for c in t.caps.iter().filter(|c| c.kind == Kind::Memory && c.obj == id && c.alive()) {
-                        nodes[n] = c.node;
-                        n += 1;
+                let mut marked = [false; NODES];
+                for h in 0..limit() {
+                    let t = lock(h);
+                    let nodes: [Option<crate::cap::NodeId>; NCAPS] =
+                        core::array::from_fn(|i| Some(t.caps[i]).filter(|c| c.kind == Kind::Memory && c.obj == id && c.alive()).map(|c| c.node));
+                    drop(t);
+                    for node in nodes.into_iter().flatten() {
+                        crate::cap::kill_subtree(node, true, &mut marked);
                     }
                 }
-                for &node in &nodes[..n] {
-                    if crate::cap::node_alive(node) {
-                        self.revoke_subtree(node, true);
-                    }
-                }
+                self.finish_revoke(&marked);
                 obj::shm_destroy(id);
             }
         }
@@ -685,13 +706,43 @@ impl World {
 
     /// Tear a task down: kill its capability subtrees and every link to it. (Its memory is `reclaim_space`, once
     /// nothing runs in the address space any more.)
+    ///
+    /// First the task is cut off from the endpoints (it is no longer woken by a sender, and the calls it had queued are dropped), so that no
+    /// new link to it can form; then everyone still linked to it is told.
     fn reset(&mut self, tid: usize) {
+        for (i, e) in (0..ipc::NEP).map(|e| (e, ipc::lock_ep(e as u8))) {
+            let mut e = e;
+            if e.waiter == Some(tid as u8) {
+                e.waiter = None;
+            }
+            e.purge_calls_from(i as u8, tid as u8);
+        }
+        // callers waiting for this task to reply, async calls it was handling, and servers still holding a reply link to it
+        for c in 0..limit() {
+            let mut t = lock(c);
+            if t.callee == Some(tid as u8) && sched::state(c) == State::CallWait {
+                t.callee = None;
+                frame(c).x[0] = crate::syscall::E_DEAD as u64;
+                sched::wake(c);
+            }
+            crate::ring::fail_calls_to(&mut t, c, tid);
+            if t.reply_to.map_or(false, |(who, _)| who == tid as u8) {
+                t.reply_to = None;
+            }
+        }
+        // its capabilities. Plain ones are revoked together (one sweep of the tasks); one that needs the object's own bookkeeping first
+        // flushes what is pending, so that every step sees the tree as if the ones before it were done.
+        let mut pending = [false; NODES];
         for slot in 0..NCAPS {
-            let c = self.tasks[tid].caps[slot];
+            let c = lock(tid).caps[slot];
             if c.kind != Kind::None && c.alive() {
                 // memory from MC_ALLOC is private to its task (the capability has no GRANT right): its frames go
                 // below with the rest, but the object-table entry would stay taken for ever (found by the fuzzer)
                 if c.kind == Kind::Memory && obj::is_dynamic(c.obj) {
+                    self.finish_revoke(&core::mem::replace(&mut pending, [false; NODES]));
+                    if !c.alive() {
+                        continue;
+                    }
                     match obj::get(c.obj) {
                         // The creator of shared memory is going. With no holders the memory goes too; with holders it
                         // lives on without a creator until the last of them lets go (a holder's own copy, or a thread's,
@@ -715,25 +766,17 @@ impl World {
                     }
                 }
                 if c.alive() {
-                    self.revoke_subtree(c.node, true);
+                    crate::cap::kill_subtree(c.node, true, &mut pending);
                 }
             }
         }
-        let t = &mut self.tasks[tid];
-        t.caps = [Cap::NONE; NCAPS];
-        t.reply_to = None;
-        t.callee = None;
-        crate::ring::reset_task(t);
-        for o in 0..limit() {
-            if self.tasks[o].reply_to.map_or(false, |(c, _)| c == tid as u8) {
-                self.tasks[o].reply_to = None;
-            }
-        }
-        for (i, e) in self.eps.iter_mut().enumerate() {
-            if e.waiter == Some(tid as u8) {
-                e.waiter = None;
-            }
-            e.purge_calls_from(i as u8, tid as u8);
+        self.finish_revoke(&pending);
+        {
+            let mut t = lock(tid);
+            t.caps = [Cap::NONE; NCAPS];
+            t.reply_to = None;
+            t.callee = None;
+            crate::ring::reset_task(&mut t);
         }
         crate::irq::forget(tid as u8);
         crate::cap::forget_granter(tid);
@@ -744,7 +787,7 @@ impl World {
     /// ran in it calls this.
     fn reclaim_space(&mut self, leader: usize) -> usize {
         self.hand_over_orphans(leader);
-        let t = &mut self.tasks[leader];
+        let mut t = lock(leader);
         t.maps = [MapRec { used: false, va: 0, pages: 0, node: 0 }; MAX_MAPS];
         if t.l1 != 0 {
             crate::swap::release_task(t.l1); // pages in the swap store go with the frames
@@ -792,14 +835,6 @@ fn die_as(tid: usize, why: &str, program_dies: bool, exit_word: Option<(usize, u
         kprintln!("[kernel] task {tid} '{}' terminated: {why}", info(tid).name);
     }
     let mut w = World::lock();
-    for c in 0..limit() {
-        if w.tasks[c].callee == Some(tid as u8) && sched::state(c) == State::CallWait {
-            w.tasks[c].callee = None;
-            frame(c).x[0] = crate::syscall::E_DEAD as u64;
-            sched::wake(c);
-        }
-    }
-    crate::ring::fail_calls_to(&mut w, tid);
     for sid in obj::sids_of_role(info(tid).role).into_iter().flatten() {
         crate::smmu::detach(sid); // the device is cut off until a new driver instance is given its pages
     }
@@ -823,10 +858,10 @@ fn die_as(tid: usize, why: &str, program_dies: bool, exit_word: Option<(usize, u
         // a thread leaves nothing behind for anyone to collect: its slot is free at once
         crate::spawn::thread_gone(tid, leader);
         if !last {
-            crate::spawn::free_thread_stack(&mut w.tasks[leader], tid);
+            crate::spawn::free_thread_stack(&mut lock(leader), tid);
         }
         if let (Some((va, value)), false) = (exit_word, last) {
-            crate::thread::store_and_wake(&w.tasks[leader], leader, va, value);
+            crate::thread::store_and_wake(&lock(leader), leader, va, value);
         }
     } else {
         sched::set_state(tid, State::Dead);
@@ -841,7 +876,7 @@ fn die_as(tid: usize, why: &str, program_dies: bool, exit_word: Option<(usize, u
     if crate::spawn::is_program(tid) || leader != tid {
         // (no restarts: a program is its parent's business)
     } else if info(tid).restartable && STREAK[tid].load(Ordering::Relaxed) < MAX_RESTARTS {
-        match build(&mut w.tasks[tid], tid) {
+        match build(&mut lock(tid), tid) {
             Ok(()) => {
                 STREAK[tid].fetch_add(1, Ordering::Relaxed);
                 LAST_RESTART[tid].store(now, Ordering::Relaxed);

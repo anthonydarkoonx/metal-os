@@ -115,6 +115,9 @@ const NO_GRANTER: u8 = u8::MAX;
 #[derive(Clone, Copy)]
 struct Node {
     used: bool,
+    /// Being revoked (`kill_subtree`): already dead to everyone, but its number is not free until the teardown that claimed it has swept every
+    /// task's tables (`free_marked`). Nothing may be made under it meanwhile.
+    dying: bool,
     parent: NodeId,
     /// The task that created this node with `CAP_GRANT` (`NO_PARENT` if it was not made by a grant, or the granter is gone).
     granter: u8,
@@ -134,12 +137,12 @@ static ALIVE: [AtomicBool; NODES] = [const { AtomicBool::new(false) }; NODES];
 /// Mirror of `Node::gen` for the same reason. Stored before `ALIVE` goes true, so a reader that sees a node alive sees at least the generation it was made with.
 static GEN: [AtomicU32; NODES] = [const { AtomicU32::new(0) }; NODES];
 
-static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, parent: NO_PARENT, granter: NO_GRANTER, owner: NO_GRANTER, gen: 0 }; NODES]);
+static NODE_TABLE: SpinLock<[Node; NODES]> = SpinLock::new([Node { used: false, dying: false, parent: NO_PARENT, granter: NO_GRANTER, owner: NO_GRANTER, gen: 0 }; NODES]);
 
 /// Take node `i` (free, found under the table lock `t`) as a new node and publish it.
 fn take(t: &mut [Node; NODES], i: usize, parent: NodeId, granter: u8, owner: u8) -> Minted {
     let gen = t[i].gen.wrapping_add(1).max(1);
-    t[i] = Node { used: true, parent, granter, owner, gen };
+    t[i] = Node { used: true, dying: false, parent, granter, owner, gen };
     GEN[i].store(gen, Ordering::Release);
     ALIVE[i].store(true, Ordering::Release);
     Minted { id: i as NodeId, gen }
@@ -147,7 +150,7 @@ fn take(t: &mut [Node; NODES], i: usize, parent: NodeId, granter: u8, owner: u8)
 
 /// Is `p` (a node and the generation it was read under) still that node? Called under the table lock, with the minting that depends on it.
 fn parent_ok(t: &[Node; NODES], p: (NodeId, u32)) -> bool {
-    t.get(p.0 as usize).is_some_and(|n| n.used && n.gen == p.1)
+    t.get(p.0 as usize).is_some_and(|n| n.used && !n.dying && n.gen == p.1)
 }
 
 pub fn mint_node(parent: Option<(NodeId, u32)>) -> Option<Minted> {
@@ -338,7 +341,60 @@ pub fn node_is(n: NodeId, gen: u32) -> bool {
 pub fn free_node(n: NodeId) {
     let mut t = NODE_TABLE.lock(R_NODES);
     t[n as usize].used = false;
+    t[n as usize].dying = false;
     ALIVE[n as usize].store(false, Ordering::Release);
+}
+
+/// Revoke `root`'s descendants (and `root` itself when `include_root`): every node of the subtree stops being alive at once, under the table
+/// lock, so from here on no capability on one of them can be used or minted under. Adds them to `out` (which the caller may have used
+/// for earlier calls) and returns how many. Their numbers stay taken until the caller has cleared them from the tasks' tables and calls
+/// `free_marked`; teardowns are serialised (`task::World`), so no node is ever claimed twice. A root that is not alive marks nothing.
+pub fn kill_subtree(root: NodeId, include_root: bool, out: &mut [bool; NODES]) -> usize {
+    let mut t = NODE_TABLE.lock(R_NODES);
+    let r = root as usize;
+    if r >= NODES || !t[r].used || t[r].dying {
+        return 0;
+    }
+    let mut sub = [false; NODES];
+    sub[r] = true;
+    loop {
+        let mut changed = false;
+        for i in 0..NODES {
+            let p = t[i].parent;
+            if t[i].used && !t[i].dying && !sub[i] && p != NO_PARENT && sub[p as usize] {
+                sub[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    if !include_root {
+        sub[r] = false;
+    }
+    let mut n = 0;
+    for i in 0..NODES {
+        if sub[i] {
+            t[i].dying = true;
+            ALIVE[i].store(false, Ordering::Release);
+            out[i] = true;
+            n += 1;
+        }
+    }
+    n
+}
+
+/// The nodes `kill_subtree` marked are cleared from every table: their numbers are free again.
+pub fn free_marked(marked: &[bool; NODES]) {
+    let mut t = NODE_TABLE.lock(R_NODES);
+    for (i, &m) in marked.iter().enumerate() {
+        if m {
+            t[i].used = false;
+            t[i].dying = false;
+            ALIVE[i].store(false, Ordering::Release);
+        }
+    }
 }
 
 /// Mark `root`'s descendants (and `root` itself when `include_root`) in `out`.

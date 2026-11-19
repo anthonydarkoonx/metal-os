@@ -692,7 +692,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     f.sp = args_sp as u64;
     f.spsr = 0;
     // The slot becomes an embryo only if it still has its parent. The death of the parent's first task (while a thread of it is in this call)
-    // takes every task lock and clears the `PARENT` of every slot it left to it, but does nothing for a slot that is not an embryo yet (a
+    // (under the lifecycle lock, as SPAWN is) clears the `PARENT` of every slot it left to it, but does nothing for a slot that is not an embryo yet (a
     // `Free` one has nothing to end), so an embryo made after that would belong to nobody for ever. Looking and setting under a task lock
     // closes the gap: the death either ran before (the parent is gone: undo) or finds the embryo and ends it.
     let committed = {
@@ -714,7 +714,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
 /// caller's memory, with permission `perm`. Request (24 bytes): `va` u64, `src_va` u64, `pages` u32, `perm` u32
 /// (0 read+execute, 1 read+write, 2 read-only). A page can be loaded once, and never both writable and executable.
 pub fn task_load(parent: usize, child: usize, req_va: usize) -> Result<(), i64> {
-    // The embryo, its page-table root and its epoch, read together under its lock. A kill of the embryo takes every task lock when it frees
+    // The embryo, its page-table root and its epoch, read together under its lock. A kill of the embryo takes this lock when it frees
     // the address space, and an embryo is only ever freed after it has been made runnable and killed (so it is not an embryo any more),
     // so while the lock is held and `embryo_of` is true, the tables are intact; see the loop below.
     let (epoch, l1) = {
@@ -784,7 +784,7 @@ pub fn task_start(parent: usize, child: usize, entry: usize) -> Result<(), i64> 
     if child >= task::limit() || entry % 4 != 0 {
         return Err(E_INVAL);
     }
-    // Everything under the child's lock, which the end of a task takes (with every other): an embryo that was killed meanwhile has ended and
+    // Everything under the child's lock, which the end of a task takes (and under the lifecycle lock): an embryo that was killed meanwhile has ended and
     // is not an embryo any more, and one that has not will be ended after it is made runnable. (Without it, a killed embryo could be made
     // `Ready` after it died, and a core would try to run a task with no address space.)
     let _t = lock(child);
@@ -813,7 +813,7 @@ pub fn wait(cur: usize, child: usize, nohang: bool) -> Waited {
     if child >= task::limit() || !is_program(child) || PARENT[child].load(Ordering::SeqCst) != task::aspace(cur) as u8 || sched::state(child) == State::Embryo {
         return Waited::Err(E_INVAL); // (waiting for an embryo you have not started would never end)
     }
-    // Under our own task lock: the child's death takes every task lock, so it either finished before we look
+    // Under the lifecycle lock (the child's death holds it): the death either finished before we look
     // (the state is Dead) or finds us waiting.
     let _t = lock(cur);
     match sched::state(child) {
@@ -861,7 +861,7 @@ fn release(tid: usize) {
     sched::set_state(tid, State::Free);
 }
 
-/// A task has died and everything it held is reclaimed (called by `task::die` with every task locked): its children
+/// A task has died and everything it held is reclaimed (called by `task::die` under the lifecycle lock): its children
 /// are killed (whatever kind of task it was). `done` is the program whose address space is now empty, if `tid` was
 /// the last task in it: that program's slot is freed or left as a zombie for its parent — handing the parent the code
 /// at once if it is already waiting.
@@ -1064,7 +1064,7 @@ fn make_thread_stack(leader: usize, tid: usize, bytes: usize) -> Result<usize, i
     Ok(base + pages * PAGE)
 }
 
-/// A thread that ends gives its stack back (`w` has every task locked; the program lives on).
+/// A thread that ends gives its stack back (under the lifecycle lock; the program lives on).
 pub fn free_thread_stack(t: &mut task::Task, tid: usize) {
     for s in t.tstacks.iter_mut().filter(|s| s.1 != 0 && s.2 as usize == tid) {
         crate::swap::release_pages(t.l1, s.0, s.1);
@@ -1080,7 +1080,7 @@ fn name_of(tid: usize) -> [u8; 8] {
     n
 }
 
-/// A thread's slot is free the moment it is gone (called by `task::die`, with every task locked).
+/// A thread's slot is free the moment it is gone (called by `task::die`, under the lifecycle lock).
 pub fn thread_gone(tid: usize, leader: usize) {
     EXTRA[leader].fetch_sub(1, Ordering::SeqCst);
     task::set_aspace(tid, None);

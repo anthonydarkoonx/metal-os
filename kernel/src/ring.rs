@@ -189,16 +189,13 @@ pub fn fail_queued(t: &mut Task, tid: usize, tag: u8, res: i64) {
     }
 }
 
-/// `server` died: every async call it was handling fails.
-pub fn fail_calls_to(w: &mut World, server: usize) {
-    for c in 0..task::limit() {
-        for i in 0..MAX_PENDING {
-            let p = w.tasks[c].pending[i];
-            if p.kind == PKind::Call && p.callee == Some(server as u8) {
-                free_pending(&mut w.tasks[c], i);
-                let pa = w.tasks[c].ring_pa;
-                post(c, pa, p.user_data, crate::syscall::E_DEAD, [0; 3]);
-            }
+/// `server` died: every async call from task `c` (whose locked state is `t`) that it was handling fails.
+pub fn fail_calls_to(t: &mut Task, c: usize, server: usize) {
+    for i in 0..MAX_PENDING {
+        let p = t.pending[i];
+        if p.kind == PKind::Call && p.callee == Some(server as u8) {
+            free_pending(t, i);
+            post(c, t.ring_pa, p.user_data, crate::syscall::E_DEAD, [0; 3]);
         }
     }
 }

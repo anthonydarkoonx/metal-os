@@ -142,6 +142,8 @@ fn lookup_any(tid: usize, slot: u64) -> Result<Cap, i64> {
 fn run(cur: usize) -> (u64, Out) {
     let f = *frame(cur);
     let (id, a1, a2, a3, a4) = (f.x[0], f.x[1], f.x[2], f.x[3], f.x[4]);
+    // These look at another task's state under its lock and then act on it: the end of that task must not slip in between (task.rs `TEARDOWN`).
+    let _life = matches!(id, CAP_GRANT | RESTORE_OF | SPAWN | WAIT | TASK_START | THREAD_CREATE).then(task::lifecycle);
     let out = match id {
         YIELD => Out::Ret(0),
         IPC_SEND | IPC_CALL => ipc_send(cur, a1, [a2, a3, a4], id == IPC_CALL),
@@ -419,9 +421,9 @@ fn mem_map(cur: usize, slot: u64, va: usize, writable: bool) -> Out {
     }
     let space = task::aspace(cur); // (a thread maps into its program's address space)
     let mut t = task::lock(space);
-    // A revoke frees nodes while holding every task lock, so a node that is alive here stays alive until this lock
-    // is released: the mapping below is recorded under it and the revoke will find and remove it. Without this
-    // check a revoke landing after `lookup` would leave a mapping of freed memory behind.
+    // A revoke kills the nodes first and clears the tasks' tables afterwards, one lock at a time, so a node that is alive here is
+    // swept out of this table only after this lock is released: the mapping below is recorded under it and the sweep will find and
+    // remove it. Without this check a revoke landing after `lookup` would leave a mapping of freed memory behind.
     if !c.alive() {
         return Out::Ret(E_BADCAP);
     }
@@ -974,8 +976,8 @@ fn remap(space: usize, c: Cap, va: usize) -> bool {
         return false; // (as in `MEM_MAP`)
     }
     let mut t = task::lock(space);
-    // (as in `MEM_MAP`: a revoke frees nodes with every task lock held, so a capability that is alive under this lock stays alive until it is
-    // let go; one that was revoked since it was made must not leave a mapping behind)
+    // (as in `MEM_MAP`: a revoke kills nodes before it sweeps this table under this lock, so a capability that is alive under the lock is
+    // swept after it is let go; one that was revoked since it was made must not leave a mapping behind)
     if !c.alive() {
         return false;
     }
@@ -1026,7 +1028,7 @@ fn restore_of(cur: usize, admin: u64, target: u64, id: u64) -> Out {
         return Out::Ret(E_DEAD);
     }
     let mut tl = task::lock(t);
-    // (the program may have ended since the checks above: the end of a task, which takes every task lock, forgets its log entries, so one that
+    // (the program may have ended since the checks above: the end of a task, which runs under the lifecycle lock as this does, forgets its log entries, so one that
     // is still there under this lock means the task is the same one)
     if crate::cap::revoked_by_id(t, id as u32).is_none() {
         return Out::Ret(E_DEAD);
@@ -1380,9 +1382,9 @@ fn cap_grant(cur: usize, slot: u64, target: u64, mask: Rights, dest: u64) -> Out
     }
     let mut t = task::lock(target); // only the target's table changes (the source is just read above)
     if !c.alive() {
-        return Out::Ret(E_BADCAP); // revoked since the lookup (a revoke frees nodes with every task lock held): no copy may outlive it
+        return Out::Ret(E_BADCAP); // revoked since the lookup (a revoke kills nodes before it sweeps, and a grant runs under the lifecycle lock): no copy may outlive it
     }
-    // The end of a task takes every task lock and wipes its table, so a target that is gone (or whose slot is somebody else's now) must be
+    // The end of a task wipes its table under the lifecycle lock, which a grant holds, so a target that is gone (or whose slot is somebody else's now) must be
     // noticed here, under its lock: a capability put into a table that is wiped afterwards, or into a stranger's, would never be freed.
     if matches!(sched::state(target), State::Free | State::Dead) || task::aspace(target) != target_space {
         return Out::Ret(E_INVAL);

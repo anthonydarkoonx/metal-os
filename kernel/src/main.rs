@@ -61,7 +61,7 @@ fn zram_check(codec: &str, mut z: Zram) {
     let frames: [usize; 3] = core::array::from_fn(|_| mem::alloc(mem::OWNER_KERNEL).expect("frame"));
     // SAFETY: every `pa` passed is a frame just taken from `mem::alloc` for the kernel: inside RAM, page-aligned, owned by this
     // function, and each returned reference is used for one statement or call before another is made.
-    let page = |pa: usize| unsafe { &mut *(pa as *mut [u8; PAGE]) };
+    let page = |pa: usize| unsafe { &mut *(frame::phys::va(pa) as *mut [u8; PAGE]) };
     for i in 0..PAGE {
         page(frames[0])[i] = b"cold anonymous page "[i % 20];
         page(frames[1])[i] = 0;
@@ -129,13 +129,15 @@ extern "C" fn kmain() -> ! {
     unsafe { core::arch::asm!("msr tpidr_el1, xzr", options(nomem, nostack)) }; // core 0
     // Translation first: the locks behind the very first line printed are exclusive load/store pairs, which real
     // cores only support on cacheable memory (with the MMU off all memory is device memory and they fault).
-    mmu::init();
+    // RAM size from the harness (read with the MMU off: it is a device register); 128 MiB if it did not say. Beyond the first GiB the
+    // direct map works in 2 MiB blocks, so the size is rounded down to a multiple of them there.
+    let ram = platform::ram_size().filter(|&s| (8 << 20..=frame::phys::MAX_RAM as u64).contains(&s)).map_or(128 << 20, |s| s as usize);
+    let ram = mem::usable_ram(ram);
+    mmu::init(ram);
     kprintln!("Metal OS 0.1 (aarch64, microkernel) booting{}", platform::BANNER_SUFFIX);
     platform::early_boot();
     // SAFETY: `__kernel_end` is a linker symbol; only its address is taken, it is never read.
     let kernel_end = unsafe { &__kernel_end as *const u8 as usize };
-    // RAM size from the harness; 128 MiB if it did not say.
-    let ram = platform::ram_size().filter(|&s| (8 << 20..=1 << 30).contains(&s)).map_or(128 << 20, |s| s as usize);
     platform::entropy_report();
     platform::init_flags();
     rand::init(platform::flag(b"opt/metal/noaslr"));
@@ -156,7 +158,7 @@ extern "C" fn kmain() -> ! {
         // the image moved: what it left behind is free memory, and holds a copy of the kernel; clear it
         // SAFETY: `old..old+len` is the previous image's RAM; `kaslr` placed the copy disjoint from it, `mem::init` just listed it as free,
         // and the boot core is alone (no allocation or secondary core yet), so nothing else uses it.
-        unsafe { core::ptr::write_bytes(old as *mut u8, 0, len) };
+        unsafe { core::ptr::write_bytes(frame::phys::va(old) as *mut u8, 0, len) };
     }
     kprintln!(
         "[mem] MMU on; {} MiB RAM, {} frames free, kernel at {:#x}..{:#x}",
@@ -184,6 +186,11 @@ extern "C" fn kmain() -> ! {
         v(wxn),
         v(pan)
     );
+    kprintln!("[mem] TEST every task's frames are on a per-owner list that is counted and freed without scanning RAM: {}", v(mem::owner_lists_selftest()));
+    match mem::highmem_selftest() {
+        Some(r) => kprintln!("[mem] TEST RAM above the first GiB is reached through the direct map: {}", v(r)),
+        None => kprintln!("[mem] TEST RAM above the first GiB is reached through the direct map: SKIPPED (RAM ends inside the first GiB)"),
+    }
     kprintln!("[mem] TEST the reverse map holds the addresses of the whole user space (up to 256 GiB): {}", v(mem::rmap_selftest()));
     timer::init();
     sched::init();

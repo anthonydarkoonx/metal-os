@@ -181,7 +181,7 @@ impl Smmu {
                 if s.ntables == MAX_TABLES {
                     return Err(());
                 }
-                let t = mem::alloc(mem::OWNER_KERNEL).ok_or(())?;
+                let t = mem::alloc_identity(mem::OWNER_KERNEL).ok_or(())?;
                 crate::cache::clean(t, mem::PAGE); // the SMMU walks it: its zeroes must be in memory
                 s.tables[s.ntables] = t;
                 s.ntables += 1;
@@ -220,7 +220,7 @@ pub fn init() {
         kprintln!("[smmu] too few stream id bits (IDR1={idr1:#x})");
         return;
     }
-    let (strtab, cmdq, evtq) = (mem::alloc(mem::OWNER_KERNEL), mem::alloc(mem::OWNER_KERNEL), mem::alloc(mem::OWNER_KERNEL));
+    let (strtab, cmdq, evtq) = (mem::alloc_identity(mem::OWNER_KERNEL), mem::alloc_identity(mem::OWNER_KERNEL), mem::alloc_identity(mem::OWNER_KERNEL));
     let (Some(strtab), Some(cmdq), Some(evtq)) = (strtab, cmdq, evtq) else {
         kprintln!("[smmu] out of memory");
         return;
@@ -302,7 +302,7 @@ pub fn attach(sid: u16, role: u8, objs: &[u8]) {
     if s.streams[sid].attached {
         s.tear_down(sid); // never rewrite or free a table behind a valid entry
     }
-    let Some(l1) = mem::alloc(mem::OWNER_KERNEL) else { return };
+    let Some(l1) = mem::alloc_identity(mem::OWNER_KERNEL) else { return };
     s.streams[sid] = Stream { attached: true, cut_off: false, role, l1, tables: { let mut t = [0; MAX_TABLES]; t[0] = l1; t }, ntables: 1 };
     let mut pages = 0;
     for &(pa, np) in &regions[..n] {

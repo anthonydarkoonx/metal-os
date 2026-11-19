@@ -22,6 +22,23 @@ pub mod phys {
 
     static RAM_END: AtomicUsize = AtomicUsize::new(RAM_BASE);
 
+    /// The 1 GiB window around `RAM_BASE` that the kernel's own tables (TTBR0) identity-map: the kernel image lives in it.
+    pub const ID_BASE: usize = RAM_BASE & !(GIB - 1);
+    pub const ID_END: usize = ID_BASE + GIB;
+    pub const GIB: usize = 1 << 30;
+    /// RAM at or above `ID_END` is reached through the direct map in TTBR1 (`mmu::init` builds it): virtual address = `DIRECT_BASE + pa`.
+    /// (TTBR0 holds the user windows from 0x8000_0000 up, so the kernel cannot identity-map more RAM there.)
+    pub const DIRECT_BASE: usize = 0xFFFF_FF80_0000_0000;
+    /// The most RAM the kernel supports: the direct map spans 512 GiB, and QEMU's `virt` puts the PCIe ECAM at 256 GiB.
+    pub const MAX_RAM: usize = 255 * GIB;
+
+    /// The address the kernel uses to reach physical address `pa` (which must lie in RAM): itself inside the identity window, else
+    /// through the direct map.
+    #[inline]
+    pub fn va(pa: usize) -> usize {
+        if pa < ID_END { pa } else { DIRECT_BASE + pa }
+    }
+
     /// Record how much RAM there is (once, from `mem::init`).
     pub fn set_ram_size(bytes: usize) {
         RAM_END.store(RAM_BASE + bytes, Ordering::Relaxed);
@@ -29,6 +46,39 @@ pub mod phys {
 
     fn in_ram(pa: usize, len: usize, align: usize) -> bool {
         pa % align == 0 && pa >= RAM_BASE && pa.checked_add(len).is_some_and(|end| end <= RAM_END.load(Ordering::Relaxed))
+    }
+
+    /// The allocator's per-frame tables (see `meta_tables`).
+    pub struct MetaTables {
+        pub rmap: &'static mut [u64],
+        pub next: &'static mut [u32],
+        pub prev: &'static mut [u32],
+        pub owner: &'static mut [u8],
+        pub kind: &'static mut [crate::mem::FKind],
+    }
+
+    /// The per-frame tables of the allocator, carved out of RAM at `pa` (page-aligned, `meta_bytes(n)` long, inside RAM) for `n` frames:
+    /// owner, kind (all `Free`), reverse map and the two per-owner list links (all 0). Hands them out once; a second call panics.
+    pub fn meta_tables(pa: usize, n: usize) -> MetaTables {
+        static TAKEN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+        assert!(!TAKEN.swap(true, Ordering::AcqRel), "frame::phys: the frame tables were carved twice");
+        let len = crate::mem::meta_bytes(n);
+        check(pa, len, PAGE);
+        let base = va(pa);
+        // SAFETY: `pa..pa+len` is whole frames of RAM (checked), not yet handed to anyone (the allocator reserves it), and `TAKEN`
+        // makes this the only call, so the slices are the only references into it. They do not overlap (offsets 0, 8n, 12n, 16n and 17n,
+        // widest element first so every slice is aligned for its type) and are zeroed before the slices exist; zero is a valid
+        // `u8`, `u32`, `u64` and `FKind::Free`.
+        unsafe {
+            core::ptr::write_bytes(base as *mut u8, 0, len);
+            MetaTables {
+                rmap: core::slice::from_raw_parts_mut(base as *mut u64, n),
+                next: core::slice::from_raw_parts_mut((base + 8 * n) as *mut u32, n),
+                prev: core::slice::from_raw_parts_mut((base + 12 * n) as *mut u32, n),
+                owner: core::slice::from_raw_parts_mut((base + 16 * n) as *mut u8, n),
+                kind: core::slice::from_raw_parts_mut((base + 17 * n) as *mut crate::mem::FKind, n),
+            }
+        }
     }
 
     /// Is `pa` the start of a whole, aligned frame of RAM?
@@ -44,37 +94,37 @@ pub mod phys {
 
     pub fn read_u8(pa: usize) -> u8 {
         check(pa, 1, 1);
-        // SAFETY: `check` above made `pa..pa+1` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // SAFETY: `check` above made `pa..pa+1` lie inside RAM, aligned for the width; RAM is mapped normal memory (identity or direct map, `va`). Volatile
         // because a user program or device may share the frame; no reference to it is created.
-        unsafe { read_volatile(pa as *const u8) }
+        unsafe { read_volatile(va(pa) as *const u8) }
     }
 
     pub fn read_u32(pa: usize) -> u32 {
         check(pa, 4, 4);
-        // SAFETY: `check` above made `pa..pa+4` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // SAFETY: `check` above made `pa..pa+4` lie inside RAM, aligned for the width; RAM is mapped normal memory (identity or direct map, `va`). Volatile
         // because a user program or device may share the frame; no reference to it is created.
-        unsafe { read_volatile(pa as *const u32) }
+        unsafe { read_volatile(va(pa) as *const u32) }
     }
 
     pub fn read_u64(pa: usize) -> u64 {
         check(pa, 8, 8);
-        // SAFETY: `check` above made `pa..pa+8` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // SAFETY: `check` above made `pa..pa+8` lie inside RAM, aligned for the width; RAM is mapped normal memory (identity or direct map, `va`). Volatile
         // because a user program or device may share the frame; no reference to it is created.
-        unsafe { read_volatile(pa as *const u64) }
+        unsafe { read_volatile(va(pa) as *const u64) }
     }
 
     pub fn write_u32(pa: usize, v: u32) {
         check(pa, 4, 4);
-        // SAFETY: `check` above made `pa..pa+4` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // SAFETY: `check` above made `pa..pa+4` lie inside RAM, aligned for the width; RAM is mapped normal memory (identity or direct map, `va`). Volatile
         // because a user program or device may share the frame; no reference to it is created.
-        unsafe { write_volatile(pa as *mut u32, v) }
+        unsafe { write_volatile(va(pa) as *mut u32, v) }
     }
 
     pub fn write_u64(pa: usize, v: u64) {
         check(pa, 8, 8);
-        // SAFETY: `check` above made `pa..pa+8` lie inside RAM, aligned for the width; RAM is identity-mapped normal memory. Volatile
+        // SAFETY: `check` above made `pa..pa+8` lie inside RAM, aligned for the width; RAM is mapped normal memory (identity or direct map, `va`). Volatile
         // because a user program or device may share the frame; no reference to it is created.
-        unsafe { write_volatile(pa as *mut u64, v) }
+        unsafe { write_volatile(va(pa) as *mut u64, v) }
     }
 
     pub fn write_i64(pa: usize, v: i64) {
@@ -113,21 +163,34 @@ pub mod phys {
         check(pa, 4, 4);
         // SAFETY: `check` made the word in RAM and 4-aligned (valid for `AtomicU32`), and RAM stays mapped for the kernel's life, so
         // `'static` holds. Mixing these with non-atomic `copy_*` on the same word would be a race; callers use it for ring words only.
-        unsafe { AtomicU32::from_ptr(pa as *mut u32) }
+        unsafe { AtomicU32::from_ptr(va(pa) as *mut u32) }
+    }
+
+    /// Run `f(pa, offset, len)` over `pa..pa+len` in pieces that each lie on one side of `ID_END` (the identity window and the direct map
+    /// are not adjacent in the virtual address space, so one pointer cannot cover a range across the boundary).
+    fn pieces(pa: usize, len: usize, mut f: impl FnMut(usize, usize, usize)) {
+        if pa < ID_END && len > ID_END - pa {
+            f(pa, 0, ID_END - pa);
+            f(ID_END, ID_END - pa, len - (ID_END - pa));
+        } else {
+            f(pa, 0, len);
+        }
     }
 
     /// Copy `src` into RAM at `pa`.
     pub fn copy_to(pa: usize, src: &[u8]) {
         check(pa, src.len(), 1);
-        // SAFETY: `check` covered `pa..pa+len` in RAM; `src` is a live slice and `ptr::copy` allows overlap; raw pointers only.
-        unsafe { core::ptr::copy(src.as_ptr(), pa as *mut u8, src.len()) }
+        // SAFETY: `check` covered `pa..pa+len` in RAM and `pieces` keeps each part on one side of the identity/direct-map boundary, so
+        // each pointer range is contiguous and mapped; `src` is a live slice and `ptr::copy` allows overlap; raw pointers only.
+        pieces(pa, src.len(), |p, off, n| unsafe { core::ptr::copy(src.as_ptr().add(off), va(p) as *mut u8, n) })
     }
 
     /// Copy RAM at `pa` into `dst`.
     pub fn copy_from(pa: usize, dst: &mut [u8]) {
         check(pa, dst.len(), 1);
-        // SAFETY: `check` covered `pa..pa+len` in RAM; `dst` is a live exclusive slice and `ptr::copy` allows overlap; raw pointers only.
-        unsafe { core::ptr::copy(pa as *const u8, dst.as_mut_ptr(), dst.len()) }
+        let d = dst.as_mut_ptr();
+        // SAFETY: as in `copy_to`; `dst` is a live exclusive slice and `ptr::copy` allows overlap; raw pointers only.
+        pieces(pa, dst.len(), |p, off, n| unsafe { core::ptr::copy(va(p) as *const u8, d.add(off), n) })
     }
 
     /// Copy one whole frame to another.
@@ -135,20 +198,21 @@ pub mod phys {
         check(dst, PAGE, PAGE);
         check(src, PAGE, PAGE);
         // SAFETY: both frames were `check`ed whole, page-aligned and inside RAM; `ptr::copy` is correct even if they were the same frame.
-        unsafe { core::ptr::copy(src as *const u8, dst as *mut u8, PAGE) }
+        unsafe { core::ptr::copy(va(src) as *const u8, va(dst) as *mut u8, PAGE) }
     }
 
     #[allow(dead_code)]
     pub fn zero(pa: usize, len: usize) {
         check(pa, len, 1);
-        // SAFETY: `check` covered `pa..pa+len` in RAM; byte writes need no alignment; no reference to the range exists here.
-        unsafe { core::ptr::write_bytes(pa as *mut u8, 0, len) }
+        // SAFETY: `check` covered `pa..pa+len` in RAM, `pieces` keeps each part contiguous in the virtual space; byte writes need no
+        // alignment; no reference to the range exists here.
+        pieces(pa, len, |p, _, n| unsafe { core::ptr::write_bytes(va(p) as *mut u8, 0, n) })
     }
 
     pub fn zero_page(pa: usize) {
         check(pa, PAGE, PAGE);
         // SAFETY: `check` covered the whole frame in RAM; byte writes, no reference to the frame is created.
-        unsafe { core::ptr::write_bytes(pa as *mut u8, 0, PAGE) }
+        unsafe { core::ptr::write_bytes(va(pa) as *mut u8, 0, PAGE) }
     }
 
     // Frames lent out as `&` / `&mut` by `with_page` / `with_page_mut`. Lending a frame that is already lent (the same page
@@ -187,7 +251,7 @@ pub mod phys {
         // SAFETY: the page is inside RAM and aligned (checked); the loan table guarantees no other reference from here exists
         // for the duration; the caller's contract (it owns the frame: no mapping, no device) covers everything that is not a
         // reference.
-        f(unsafe { &*(pa as *const [u8; PAGE]) })
+        f(unsafe { &*(va(pa) as *const [u8; PAGE]) })
     }
 
     /// Modify the frame at `pa` for the duration of `f`. The caller owns the frame; a second loan of it while this one
@@ -196,7 +260,7 @@ pub mod phys {
         check(pa, PAGE, PAGE);
         let _loan = Lent::new(pa);
         // SAFETY: as in `with_page`.
-        f(unsafe { &mut *(pa as *mut [u8; PAGE]) })
+        f(unsafe { &mut *(va(pa) as *mut [u8; PAGE]) })
     }
 }
 

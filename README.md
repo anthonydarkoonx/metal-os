@@ -53,6 +53,7 @@ operations + unconsumed completions stay below the CQ size, so the CQ cannot ove
 dies with calls in flight completes them with `E_DEAD`.
 
 ## Memory management and the compaction daemon
+RAM is sized at boot (8 MiB to 255 GiB). The allocator's per-frame tables (18 bytes a frame, including a list of each owner's frames, so a dying task's memory is found without scanning RAM) are carved out of the last frames of RAM. The kernel identity-maps the first GiB of RAM (its image lives there) and reaches the rest through a direct map in TTBR1 (`0xFFFF_FF80_0000_0000 + pa`), so the user windows in TTBR0 never collide with RAM.
 Every physical frame has a kind: unmovable (kernel, page tables, DMA/shared objects) or movable (a
 private user page with exactly one mapping, recorded in a reverse map). Unmovable frames are taken from
 the bottom of RAM and movable ones from the top, so they do not interleave. The kernel provides the

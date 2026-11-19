@@ -7,6 +7,7 @@
 //!   left unmapped, so an overflow faults instead of overwriting what lies below). No page is both writable and executable
 //!   (SCTLR_EL1.WXN makes that a rule rather than a habit), and where the CPU has PAN the kernel cannot touch a page
 //!   that EL0 can reach by accident.
+//! * TTBR1 0xFFFF_FF80_0000_0000 + pa: the direct map of the RAM above the first GiB of it (`frame::phys::va`), read + write, never executable.
 //! * L1[2] 0x8000_0000..3G   per-task user window (4 KiB pages, EL0 access)
 //! * L1[8..256] 8G..256G     per-task window for the images of position-independent programs (same, tables made on demand)
 use crate::mem;
@@ -48,6 +49,10 @@ struct Table([u64; 512]);
 
 static KERNEL_L1: Global<Table> = Global::new(Table([0; 512]));
 static KERNEL_L2: Global<Table> = Global::new(Table([0; 512]));
+/// TTBR1: the direct map of the RAM above the identity window (`frame::phys::va`): 1 GiB blocks, and for the last, partial GiB the
+/// 2 MiB blocks of `KERNEL_L2_HI`. The same for every task; the user windows live in TTBR0.
+static KERNEL_L1_HI: Global<Table> = Global::new(Table([0; 512]));
+static KERNEL_L2_HI: Global<Table> = Global::new(Table([0; 512]));
 /// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 5 MiB with its stacks, at any page: at most four blocks).
 const KERNEL_L3_N: usize = 4;
 static KERNEL_L3: Global<[Table; KERNEL_L3_N]> = Global::new([const { Table([0; 512]) }; KERNEL_L3_N]);
@@ -74,11 +79,15 @@ pub fn kstack_guard_hit(addr: u64) -> Option<usize> {
     })
 }
 
-pub fn init() {
+/// `ram` is the size of RAM in bytes (a multiple of 2 MiB where it reaches past the identity window).
+pub fn init(ram: usize) {
     // The MMU is off until the end of this function, so no atomic operations (the checked `Global::get` uses them: on the board
     // they fault on Device memory); only the boot core runs and nothing else touches these tables yet.
     // SAFETY: boot core only, before secondaries start; each table is borrowed once, here.
     let (l1_guard, l2_guard, l3s) = unsafe { (KERNEL_L1.boot_get(), KERNEL_L2.boot_get(), KERNEL_L3.boot_get()) };
+    // SAFETY: as above, for the two direct-map tables.
+    let (hi1_guard, hi2_guard) = unsafe { (KERNEL_L1_HI.boot_get(), KERNEL_L2_HI.boot_get()) };
+    build_direct_map(&mut hi1_guard.0, &mut hi2_guard.0, ram);
     let l1 = &mut l1_guard.0;
     crate::platform::map_devices(l1);
     // RAM: 2 MiB blocks, except where the kernel stacks are (4 KiB pages, the guards unmapped)
@@ -123,6 +132,26 @@ pub fn init() {
     enable_this_cpu();
 }
 
+/// The direct map: RAM from the end of the identity window to the end of RAM, read + write, never executable, global.
+fn build_direct_map(l1: &mut [u64; 512], l2: &mut [u64; 512], ram: usize) {
+    use crate::frame::phys::{GIB, ID_END};
+    let normal = ATTR_NORMAL | SH_INNER | AF | UXN | PXN;
+    let end = crate::platform::RAM_BASE + ram;
+    let mut gib = ID_END;
+    while gib < end {
+        let left = end - gib;
+        if left >= GIB {
+            l1[gib >> 30] = gib as u64 | VALID_BLOCK | normal;
+        } else {
+            for (i, e) in l2.iter_mut().enumerate().take(left.div_ceil(2 << 20)) {
+                *e = (gib + i * (2 << 20)) as u64 | VALID_BLOCK | normal;
+            }
+            l1[gib >> 30] = l2.as_ptr() as u64 | VALID_TABLE;
+        }
+        gib += GIB;
+    }
+}
+
 /// Turn the MMU on for the calling core with the shared kernel tables.
 pub fn enable_this_cpu() {
     let mair: u64 = 0x00FF; // attr0 = normal write-back, attr1 = device-nGnRnE
@@ -132,9 +161,13 @@ pub fn enable_this_cpu() {
     let tcr: u64 = 25            // T0SZ: 39-bit VA
         | (1 << 8) | (1 << 10)   // IRGN0/ORGN0 write-back
         | (3 << 12)              // SH0 inner shareable
-        | (1 << 23)              // EPD1: TTBR1 walks disabled
+        | (25 << 16)             // T1SZ: 39-bit VA (the direct map, 512 GiB at `frame::phys::DIRECT_BASE`)
+        | (1 << 24) | (1 << 26)  // IRGN1/ORGN1 write-back
+        | (3 << 28)              // SH1 inner shareable
+        | (2 << 30)              // TG1: 4 KiB granule
         | ((parange & 7) << 32); // IPS
     let ttbr0 = KERNEL_L1.addr() as u64;
+    let ttbr1 = KERNEL_L1_HI.addr() as u64;
     // SAFETY: KERNEL_L1 (device block + RAM identity map, built by `init`) maps this very code and stack, so execution continues
     // after the M bit is set; the cache/TLB maintenance first makes the tables visible. Run once per core, interrupts masked.
     unsafe {
@@ -148,6 +181,7 @@ pub fn enable_this_cpu() {
             "msr mair_el1, {mair}",
             "msr tcr_el1, {tcr}",
             "msr ttbr0_el1, {ttbr}",
+            "msr ttbr1_el1, {ttbr1}",
             "isb",
             "tlbi vmalle1",
             "dsb nsh",
@@ -161,7 +195,7 @@ pub fn enable_this_cpu() {
             "orr {t}, {t}, #(1 << 26)",  // UCI: userspace may clean / flush its DMA buffers (DC CVAC, DC CIVAC)
             "msr sctlr_el1, {t}",
             "isb",
-            mair = in(reg) mair, tcr = in(reg) tcr, ttbr = in(reg) ttbr0,
+            mair = in(reg) mair, tcr = in(reg) tcr, ttbr = in(reg) ttbr0, ttbr1 = in(reg) ttbr1,
             t = out(reg) _,
         );
     }
@@ -251,7 +285,7 @@ fn table(pa: usize) -> &'static mut [u64; 512] {
     assert!(crate::frame::phys::is_ram_page(pa), "mmu::table: {pa:#x} is not a RAM frame");
     // SAFETY: `pa` is a whole RAM frame (checked). A table is only reached while the owning task's lock (or boot, single core)
     // is held, which is what keeps two live `&mut` to one table from existing; callers use the reference within one operation.
-    unsafe { &mut *(pa as *mut [u64; 512]) }
+    unsafe { &mut *(crate::frame::phys::va(pa) as *mut [u64; 512]) }
 }
 
 /// New user address space: kernel mappings copied in, empty user window.
@@ -557,7 +591,7 @@ pub fn migrate_user_page(l1: usize, va: usize, old_pa: usize, new_pa: usize) -> 
     flush_tlb();
     // SAFETY: sole caller (`compact::migrate`) passes a Movable frame and a Free frame re-validated under the mem lock, so both are
     // distinct whole RAM frames; the mapping was just broken and TLBs flushed, so no core is using `old_pa`. Not itself range-checked.
-    unsafe { core::ptr::copy(old_pa as *const u8, new_pa as *mut u8, mem::PAGE) };
+    unsafe { core::ptr::copy(crate::frame::phys::va(old_pa) as *const u8, crate::frame::phys::va(new_pa) as *mut u8, mem::PAGE) };
     if old & UXN == 0 {
         sync_icache(new_pa, mem::PAGE); // executable page: fresh bytes must be visible to fetch
     }

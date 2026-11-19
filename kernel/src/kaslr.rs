@@ -69,12 +69,14 @@ extern "C" fn kaslr_place() -> usize {
     let start = unsafe { &__kernel_start as *const u8 as usize };
     // SAFETY: `__kernel_end` is a linker symbol; only its address is taken, it is never read.
     let size = (unsafe { &__kernel_end as *const u8 as usize } - start + PAGE - 1) & !(PAGE - 1);
-    let Some(ram) = crate::platform::ram_size().filter(|&s| (8 << 20..=1 << 30).contains(&s)) else {
+    let Some(ram) = crate::platform::ram_size().filter(|&s| (8 << 20..=crate::frame::phys::MAX_RAM as u64).contains(&s)) else {
         OUTCOME.store(NO_RAM_SIZE, Ordering::Relaxed);
         return 0;
     };
-    // only as much RAM as the allocator tracks
-    let top = RAM_BASE + (ram as usize).min(crate::mem::MAX_FRAMES * PAGE);
+    // only the identity-mapped window (the first GiB), and clear of the frame tables the allocator puts in the last frames of RAM
+    let ram = crate::mem::usable_ram(ram as usize);
+    let tables = if ram <= crate::frame::phys::GIB { crate::mem::meta_bytes(ram / PAGE) } else { 0 };
+    let top = RAM_BASE + ram.min(crate::frame::phys::ID_END - RAM_BASE) - tables;
     if top < LINK_BASE + size {
         OUTCOME.store(NO_ROOM, Ordering::Relaxed);
         return 0;

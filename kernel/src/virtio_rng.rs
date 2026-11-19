@@ -75,7 +75,7 @@ fn read(f: &pci::Func, cursor: &mut usize) -> Option<[u8; BYTES]> {
     let notify_end = bars[nb as usize % 6].0 + nlen;
     pci::enable(f);
     pci::disable_intx(f);
-    let page = mem::alloc(mem::OWNER_KERNEL)?;
+    let page = mem::alloc_identity(mem::OWNER_KERNEL)?;
     // SAFETY: `page` was just returned by `mem::alloc` for the kernel: a whole, aligned, RAM frame owned here; the device is not attached yet.
     unsafe { core::ptr::write_bytes(page as *mut u8, 0, mem::PAGE) };
     obj::set_rng_dma(page);

@@ -1,4 +1,4 @@
-//! Physical frame allocator over static per-frame tables, behind one lock.
+//! Physical frame allocator over per-frame tables carved out of the top of RAM at boot (sized from the RAM it finds), behind one lock.
 //!
 //! Every frame records its owner (so a crashed task's memory is reclaimed in
 //! one pass), a kind, and, for movable pages, a reverse map to the single task
@@ -19,9 +19,19 @@ use crate::sync::{Guard, SpinLock, R_MEM};
 use metal_compact::Frames;
 
 pub const RAM_BASE: usize = crate::platform::RAM_BASE;
-/// Tracked frames: up to 256 MiB of RAM.
-pub const MAX_FRAMES: usize = 65536;
 pub const PAGE: usize = 4096;
+/// End of a per-owner list.
+const NIL: u32 = u32::MAX;
+
+/// The RAM the kernel uses out of `ram` bytes: beyond the first GiB the direct map works in 2 MiB blocks, so the size is rounded down to them.
+pub const fn usable_ram(ram: usize) -> usize {
+    if ram > crate::frame::phys::GIB { ram & !((2 << 20) - 1) } else { ram }
+}
+
+/// Bytes of per-frame tables (owner 1 + kind 1 + reverse map 8 + two list links of 4) for `n` frames, rounded up to whole pages. They sit in the last frames of RAM.
+pub const fn meta_bytes(n: usize) -> usize {
+    (n * 18).div_ceil(PAGE) * PAGE
+}
 
 pub const OWNER_FREE: u8 = 0;
 pub const OWNER_KERNEL: u8 = 1;
@@ -43,11 +53,17 @@ pub enum FKind {
 }
 
 pub struct MemState {
-    owner: [u8; MAX_FRAMES],
-    kind: [FKind; MAX_FRAMES],
+    owner: &'static mut [u8],
+    kind: &'static mut [FKind],
     /// For movable frames: `tid << 32 | (virtual address >> 12)`. (The page number of an address in the 39-bit user space takes 27 bits, more
     /// than the 24 that fit beside a task number in 32: a position-independent image is placed as high as 256 GiB.)
-    rmap: [u64; MAX_FRAMES],
+    rmap: &'static mut [u64],
+    /// Per-owner lists of the frames each owner holds (not for `OWNER_FREE`): a doubly linked list through these, so that a task's
+    /// frames are found, counted and freed without scanning all of RAM.
+    next: &'static mut [u32],
+    prev: &'static mut [u32],
+    head: [u32; 256],
+    held: [u32; 256],
     nframes: usize,
     /// No free frame exists below `low_hint`, nor above `high_hint`.
     low_hint: usize,
@@ -56,9 +72,13 @@ pub struct MemState {
 }
 
 static MEM: SpinLock<MemState> = SpinLock::new(MemState {
-    owner: [OWNER_FREE; MAX_FRAMES],
-    kind: [FKind::Free; MAX_FRAMES],
-    rmap: [0; MAX_FRAMES],
+    owner: &mut [],
+    kind: &mut [],
+    rmap: &mut [],
+    next: &mut [],
+    prev: &mut [],
+    head: [NIL; 256],
+    held: [0; 256],
     nframes: 0,
     low_hint: 0,
     high_hint: 0,
@@ -71,19 +91,73 @@ pub fn lock() -> Guard<'static, MemState> {
 }
 
 impl MemState {
-    fn claim(&mut self, i: usize, owner: u8, kind: FKind) -> usize {
+    /// Put frame `i` on `owner`'s list (unless the owner is nobody).
+    fn link(&mut self, i: usize, owner: u8) {
         self.owner[i] = owner;
+        if owner == OWNER_FREE {
+            return;
+        }
+        let h = self.head[owner as usize];
+        (self.next[i], self.prev[i]) = (h, NIL);
+        if h != NIL {
+            self.prev[h as usize] = i as u32;
+        }
+        self.head[owner as usize] = i as u32;
+        self.held[owner as usize] += 1;
+    }
+
+    /// Take frame `i` off its owner's list and make it nobody's.
+    fn unlink(&mut self, i: usize) {
+        let owner = self.owner[i];
+        self.owner[i] = OWNER_FREE;
+        if owner == OWNER_FREE {
+            return;
+        }
+        let (p, n) = (self.prev[i], self.next[i]);
+        if p == NIL {
+            self.head[owner as usize] = n;
+        } else {
+            self.next[p as usize] = n;
+        }
+        if n != NIL {
+            self.prev[n as usize] = p;
+        }
+        self.held[owner as usize] -= 1;
+    }
+
+    fn claim(&mut self, i: usize, owner: u8, kind: FKind) -> usize {
+        self.link(i, owner);
         self.kind[i] = kind;
         self.free -= 1;
         RAM_BASE + i * PAGE
     }
 
     fn release(&mut self, i: usize) {
-        self.owner[i] = OWNER_FREE;
+        self.unlink(i);
         self.kind[i] = FKind::Free;
         self.free += 1;
         self.low_hint = self.low_hint.min(i);
         self.high_hint = self.high_hint.max(i);
+    }
+
+    /// Every list is well formed and accounts for exactly the frames that have an owner.
+    fn lists_intact(&self) -> bool {
+        let mut total = 0usize;
+        for o in 1..256usize {
+            let (mut n, mut prev, mut i) = (0u32, NIL, self.head[o]);
+            while i != NIL {
+                let k = i as usize;
+                if k >= self.nframes || self.owner[k] as usize != o || self.prev[k] != prev || n > self.nframes as u32 {
+                    return false;
+                }
+                (n, prev, i) = (n + 1, i, self.next[k]);
+            }
+            if n != self.held[o] {
+                return false;
+            }
+            total += n as usize;
+        }
+        total + self.free == self.nframes
     }
 
     pub fn kind_at(&self, i: usize) -> FKind {
@@ -97,7 +171,7 @@ impl MemState {
 
     /// Relocation bookkeeping: `dst` takes over `src`'s role and `src` becomes free.
     pub fn move_meta(&mut self, src: usize, dst: usize) {
-        self.owner[dst] = self.owner[src];
+        self.link(dst, self.owner[src]);
         self.kind[dst] = FKind::Movable;
         self.rmap[dst] = self.rmap[src];
         self.free -= 1; // `dst` was free and is now in use ...
@@ -121,20 +195,25 @@ impl Frames for MemState {
 /// link address (QEMU puts the device tree there) stays reserved; wherever the image was before it moved is free.
 pub fn init(ram_size: usize, kernel: core::ops::Range<usize>) {
     let mut m = lock();
-    let n = (ram_size / PAGE).min(MAX_FRAMES);
-    m.nframes = n;
+    let n = ram_size / PAGE;
     crate::frame::phys::set_ram_size(n * PAGE);
+    // the tables take the last frames of RAM (`kaslr` keeps the kernel image clear of them)
+    let meta = n - meta_bytes(n) / PAGE;
+    assert!(kernel.end <= RAM_BASE + meta * PAGE, "the kernel image overlaps the frame tables");
+    let t = crate::frame::phys::meta_tables(RAM_BASE + meta * PAGE, n);
+    (m.owner, m.kind, m.rmap, m.next, m.prev) = (t.owner, t.kind, t.rmap, t.next, t.prev);
     let low = (crate::kaslr::LINK_BASE - RAM_BASE) / PAGE;
     let (k0, k1) = ((kernel.start - RAM_BASE) / PAGE, (kernel.end - RAM_BASE).div_ceil(PAGE));
     let mut free = 0;
     for i in 0..n {
-        let kernel = i < low || (k0..k1).contains(&i);
-        m.owner[i] = if kernel { OWNER_KERNEL } else { OWNER_FREE };
+        let kernel = i < low || i >= meta || (k0..k1).contains(&i);
+        m.link(i, if kernel { OWNER_KERNEL } else { OWNER_FREE });
         m.kind[i] = if kernel { FKind::Kernel } else { FKind::Free };
         free += !kernel as usize;
     }
+    m.nframes = n;
     m.low_hint = (0..n).find(|&i| m.kind[i] == FKind::Free).unwrap_or(n);
-    m.high_hint = n.saturating_sub(1);
+    m.high_hint = meta.saturating_sub(1);
     m.free = free;
 }
 
@@ -160,6 +239,18 @@ pub fn alloc_kind(owner: u8, kind: FKind) -> Option<usize> {
     };
     zero(pa);
     Some(pa)
+}
+
+/// Allocate an unmovable kernel-owned frame that lies in the identity-mapped window, for the code that reaches a frame through its
+/// physical address used as a pointer (the SMMU's tables and queues, a probe's DMA page). Frames come from the bottom of RAM, so this
+/// fails only when the whole first GiB is taken by unmovable memory.
+pub fn alloc_identity(owner: u8) -> Option<usize> {
+    let pa = alloc_kind(owner, FKind::Kernel)?;
+    if pa < crate::frame::phys::ID_END {
+        return Some(pa);
+    }
+    free(pa);
+    None
 }
 
 /// Allocate an unmovable kernel-owned frame.
@@ -203,6 +294,48 @@ pub fn rmap_selftest() -> bool {
     back == (tid, va)
 }
 
+/// Boot-time check of the per-owner lists: counts follow allocation, release, re-owning and `free_owned`, and every list is intact
+/// (each frame on a list names its owner, links agree both ways, the lengths match the counts, held + free = all frames).
+pub fn owner_lists_selftest() -> bool {
+    const O1: u8 = 250;
+    const O2: u8 = 251;
+    let mut ok = count_owned(O1) == 0 && count_owned(O2) == 0;
+    let (a, b, c) = (alloc(O1), alloc_movable(O1, 0, 0), alloc_kind(O1, FKind::Pinned));
+    let (Some(a), Some(b), Some(c)) = (a, b, c) else { return false };
+    ok &= count_owned(O1) == 3 && owner_of(b) == O1;
+    free(b); // (the middle of the list)
+    ok &= count_owned(O1) == 2 && owner_of(b) == OWNER_FREE;
+    set_owner(a, O2);
+    ok &= count_owned(O1) == 1 && count_owned(O2) == 1 && owner_of(a) == O2 && owner_of(c) == O1;
+    ok &= free_owned(O1) == 1 && free_owned(O2) == 1 && count_owned(O1) == 0 && count_owned(O2) == 0;
+    ok &= lock().lists_intact();
+    ok
+}
+
+/// Boot-time check of the direct map: frames above the identity window are zeroed when allocated, hold what is written, copy to each
+/// other, and are found by the checked accessors. `None` if the machine's RAM does not reach past the window.
+pub fn highmem_selftest() -> Option<bool> {
+    use crate::frame::phys;
+    let end = RAM_BASE + lock().nframes * PAGE;
+    if end <= phys::ID_END {
+        return None;
+    }
+    // (movable frames come from the top of RAM, so they are above the window as soon as RAM reaches past it)
+    let (Some(a), Some(b)) = (alloc_movable(OWNER_KERNEL, 0, 0), alloc_movable(OWNER_KERNEL, 0, 0)) else { return Some(false) };
+    let mut ok = a >= phys::ID_END && b >= phys::ID_END && phys::is_ram_page(a) && phys::va(a) == phys::DIRECT_BASE + a;
+    ok &= (0..PAGE / 8).all(|i| phys::read_u64(a + 8 * i) == 0);
+    for i in 0..PAGE / 8 {
+        phys::write_u64(a + 8 * i, (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ a as u64);
+    }
+    phys::copy_page(b, a);
+    ok &= (0..PAGE / 8).all(|i| phys::read_u64(b + 8 * i) == (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ a as u64);
+    let mut buf = [0u8; 64];
+    ok &= phys::try_copy_from(b + 100, &mut buf) && phys::try_copy_to(a + 100, &buf);
+    free(a);
+    free(b);
+    Some(ok)
+}
+
 /// Is the frame at `pa` a private, relocatable user page (as opposed to shared or device memory, which never moves)?
 pub fn is_movable(pa: usize) -> bool {
     // (an address outside RAM, a device page for one, is no frame at all, and never movable)
@@ -222,7 +355,8 @@ pub fn set_owner(pa: usize, owner: u8) {
     let mut m = lock();
     let i = (pa - RAM_BASE) / PAGE;
     assert!(m.kind[i] != FKind::Free, "owner of a free frame");
-    m.owner[i] = owner;
+    m.unlink(i);
+    m.link(i, owner);
 }
 
 /// Free a single frame.
@@ -235,19 +369,17 @@ pub fn free(pa: usize) {
 
 /// How many frames `owner` holds.
 pub fn count_owned(owner: u8) -> usize {
-    let m = lock();
-    (0..m.nframes).filter(|&i| m.owner[i] == owner).count()
+    lock().held[owner as usize] as usize
 }
 
 /// Free every frame owned by `owner`; returns how many were reclaimed.
 pub fn free_owned(owner: u8) -> usize {
     let mut m = lock();
     let mut n = 0;
-    for i in 0..m.nframes {
-        if m.owner[i] == owner {
-            m.release(i);
-            n += 1;
-        }
+    while m.head[owner as usize] != NIL {
+        let i = m.head[owner as usize] as usize;
+        m.release(i);
+        n += 1;
     }
     n
 }

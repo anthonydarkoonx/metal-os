@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "metallium-aead"
+version = "0.1.0"
+dependencies = [
+ "metallium-rand",
+]
+
+[[package]]
+name = "metallium-crypt"
+version = "0.1.0"
+dependencies = [
+ "metallium-aead",
+ "metallium-ed25519",
+]
+
+[[package]]
 name = "metallium-ed25519"
 version = "0.1.0"
 
@@ -21,6 +36,11 @@ dependencies = [
 name = "metallium-programs"
 version = "0.1.0"
 dependencies = [
+ "metallium-crypt",
  "metallium-loader",
  "metallium-map",
 ]
+
+[[package]]
+name = "metallium-rand"
+version = "0.1.0"

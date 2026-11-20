@@ -15,6 +15,8 @@ Metallium-OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C boar
 
 **`/data` directory table (2026-11-20):** the table was one 4 KiB block with 51 entries and 64-byte paths for the whole machine; it is now `VFS3`: 1024 entries of 144 bytes over 37 blocks (`META_KEY`, then `META_MORE + b`; journal blocks `JOURNAL_KEY`, `JOURNAL_MORE + b`), paths up to 127 bytes, and a commit rewrites only the blocks whose bytes changed (hash cache). A `VFS2` table is read as before and replaced by the first commit. The in-memory arrays are `Vec`s (they no longer fit the stack). `make table-test` (`only=12`) covers migration from a crafted `VFS2` table, 300 files across restarts, and long paths. This was the first obstacle of the multi-user plan (`docs/MULTIUSER-PLAN.md`).
 
+**Multi-user, phase 1 (2026-11-20):** per-scope entry quotas and inherited confinement in the VFS (`V_SCOPE` w2 = quota, path `/data` = the same scope as the caller's; `Command::quota`, manifest `quota`), `programs/src/bin/sessiond.rs` (accounts, login, a confined session per user; `homeprobe` is the stand-in session payload) and `make session-test`; see `docs/MULTIUSER-PLAN.md` *Status*.
+
 **Repository:** https://github.com/anthonydarkoonx/metallium-os (public; disk images, signing keys and build output are not in it; the board port is https://github.com/anthonydarkoonx/metallium-os-rock3c).
 **Rules from the user:** OS changes only in the general tree, the board folder holds drivers only (`docs/BOARD-SYNC.md` logs every change); say "program", not "app";
 do not add programs nobody asked for; run only fast host tests unless asked.

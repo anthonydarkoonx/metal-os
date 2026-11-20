@@ -1392,3 +1392,80 @@ pub fn net_tests() {
     let (frames1, nodes1) = (sysinfo(0)[3], sysinfo(1)[5]);
     println!("[client] TEST net: nothing is left behind (frames {frames0} -> {frames1}, nodes {nodes0} -> {nodes1}): {}", verdict(frames1 + 64 >= frames0 && nodes1 <= nodes0 + 2));
 }
+
+/// `make session-test` (`opt/metallium/only=13`): the conductor plays the greeter against the session service (`programs/src/bin/sessiond.rs`): first account, logins, a
+/// second and third account, two sessions at once, each confined to its home. The sessions' own lines (`[homeprobe ...]`) are checked by tools/session-test.py.
+pub fn session_test() {
+    sleep(30);
+    let _ = mem_map(10, 0x8034_0000, true);
+    let v = Vfs::new(9, 0x8034_0000);
+    let img = (0..20).find_map(|_| v.read_file("/system/bin/sessiond").ok().filter(|b| b.len() > 32).or_else(|| { sleep(20); None })).unwrap_or_default();
+    let ctl = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64;
+    let rq = Req::new().fs().heap(4096).budget(8000).give_masked(0, ctl as u8, 0b111).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF);
+    let tid = if img.is_empty() || ctl < 0 { -1 } else { rq.go(&img) };
+    println!("[session] sessiond started: task {tid}");
+    if tid < 0 {
+        return;
+    }
+    sleep(30);
+    let ctl = ctl as u64;
+    // the greeter's calls
+    let begin = |action: u64, admin: bool, acting: u64, name: &str| {
+        let mut raw = [0u8; 16];
+        raw[..name.len()].copy_from_slice(name.as_bytes());
+        call(ctl, [1 | action << 8 | (admin as u64) << 16 | acting << 32, u64::from_le_bytes(raw[..8].try_into().unwrap()), u64::from_le_bytes(raw[8..].try_into().unwrap())])
+    };
+    let secret = |pass: &[u8]| {
+        let mut last = (0i64, [99u64, 0, 0]);
+        for off in (0..pass.len()).step_by(16) {
+            let mut chunk = [0u8; 16];
+            let n = (pass.len() - off).min(16);
+            chunk[..n].copy_from_slice(&pass[off..off + n]);
+            last = call(ctl, [2 | (pass.len() as u64) << 8 | (off as u64) << 24, u64::from_le_bytes(chunk[..8].try_into().unwrap()), u64::from_le_bytes(chunk[8..].try_into().unwrap())]);
+            if last.1[0] != 4 {
+                break;
+            }
+        }
+        last.1
+    };
+    let act = |action: u64, admin: bool, acting: u64, name: &str, pass: &[u8]| {
+        let b = begin(action, admin, acting, name);
+        if b.0 != 0 || b.1[0] != 0 {
+            return [90, 0, 0];
+        }
+        secret(pass)
+    };
+    let status = call(ctl, [4, 0, 0]).1;
+    println!("[session] TEST a new machine has no accounts: {}", verdict(status[0] == 0));
+    let r = act(1, false, 0, "admin", b"admin-passphrase-1");
+    println!("[session] TEST the first account is made (it becomes the administrator): {}", verdict(r[0] == 0 && r[1] == 1));
+    let r = act(1, false, 0, "admin", b"another");
+    println!("[session] TEST a name that exists cannot be made again: {}", verdict(r[0] == 2));
+    let r = act(1, false, 0, "bob", b"bobs-passphrase");
+    println!("[session] TEST with an administrator, an account is made only from an administrator's session (none given: refused): {}", verdict(r[0] == 5));
+    let r = act(2, false, 0, "admin", b"wrong passphrase");
+    println!("[session] TEST a wrong passphrase does not log in: {}", verdict(r[0] == 7));
+    let r = act(2, false, 0, "nobody", b"admin-passphrase-1");
+    println!("[session] TEST an unknown name gives the same answer as a wrong passphrase: {}", verdict(r[0] == 7));
+    let r = act(2, false, 0, "admin", b"admin-passphrase-1");
+    let admin_session = r[1];
+    println!("[session] TEST the administrator logs in (session {admin_session}): {}", verdict(r[0] == 0 && admin_session != 0));
+    let r = act(1, false, admin_session, "alice", b"alices-passphrase");
+    let r2 = act(1, false, admin_session, "bob", b"bobs-passphrase");
+    println!("[session] TEST the administrator's session makes two more accounts: {}", verdict(r[0] == 0 && r2[0] == 0));
+    let r = act(1, false, admin_session, "Bad Name!", b"x");
+    println!("[session] TEST a name with capitals or spaces is refused: {}", verdict(r[0] == 1));
+    let a = act(2, false, 0, "alice", b"alices-passphrase");
+    let b = act(2, false, 0, "bob", b"bobs-passphrase");
+    println!("[session] TEST two users are logged in at once (sessions {} and {}): {}", a[1], b[1], verdict(a[0] == 0 && b[0] == 0 && a[1] != b[1]));
+    let r = act(2, false, 0, "alice", b"alices-passphrase");
+    println!("[session] TEST a user who already has a session cannot start a second: {}", verdict(r[0] == 8));
+    sleep(900); // (the sessions run their probes: their lines are in the log)
+    let st = call(ctl, [4, 0, 0]).1;
+    println!("[session] TEST three accounts, three sessions: {}", verdict(st[0] == 3 && st[1] == 3));
+    let r = call(ctl, [3, a[1], 0]).1;
+    sleep(50);
+    let again = act(2, false, 0, "alice", b"alices-passphrase");
+    println!("[session] TEST after a logout the user can log in again: {}", verdict(r[0] == 0 && again[0] == 0));
+    println!("[session] done");
+}

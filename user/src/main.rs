@@ -119,6 +119,10 @@ fn client() -> ! {
             programs::scale_tests(); // make scale: every slot of a table of 1024 tasks
             exit(0)
         }
+        13 => {
+            programs::session_test(); // make session-test: the session service
+            exit(0)
+        }
         12 => {
             vfs::table_test(); // make table-test: the directory table of /data
             exit(0)

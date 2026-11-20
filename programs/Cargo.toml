@@ -10,6 +10,7 @@ description = "Programs that run on Metallium-OS as ordinary tasks (started with
 [dependencies]
 metallium-loader = { path = "../libs/metallium-loader" }
 metallium-map = { path = "../libs/metallium-map" }
+metallium-crypt = { path = "../libs/metallium-crypt" }
 
 [profile.release]
 panic = "abort"

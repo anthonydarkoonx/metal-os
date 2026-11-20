@@ -1,4 +1,4 @@
-# Multiple users: a plan (2026-11-20, not built)
+# Multiple users: a plan (2026-11-20; phase 1 partly built, see *Status*)
 
 ## What the OS already gives
 * **Processes are isolated by capabilities**, not by user ids: a task can touch another task, a file or a device only through a capability it was given. So *process*
@@ -88,3 +88,17 @@ First boot therefore shows two things to write down: the admin's home recovery k
 * The VFS must learn session identity without trusting clients: the kernel's sender id plus the session service's table (the same trust the VFS already puts in a program's
   parent for `V_SCOPE`).
 * Nothing here changes the kernel's isolation guarantees; the risk is in the services (session service, VFS, greeter), which are all in the trusted base of a login.
+
+## Status (2026-11-20)
+Built and tested (phase 1, without the desktop and the encryption domains):
+* **`/data` table**: 1024 entries, 127-byte paths (`VFS3`), so homes fit (`make table-test`).
+* **Per-scope quotas and inherited confinement** (VFS `V_SCOPE`): a scope carries an entry quota (a manifest's `quota = N`, default 12, never more than the parent's); the quotas of every
+  directory above also bind (a home's quota covers what its programs make). `/data` as the scope path means "the same as mine": a confined program hands its own confinement to its
+  children, and `Command` asks for it by default, so a session cannot launder its confinement by starting programs; an unconfined parent leaves children unconfined as before.
+* **`sessiond`** (`programs/src/bin/sessiond.rs`): accounts in `/data/accounts` (only it, unconfined, can see the file; PBKDF2-HMAC-SHA512 hashes until phase 2 makes the credential a key
+  slot), the first account is the administrator, further accounts only from an administrator's live session, login/logout, one session per user, several sessions at once, each a
+  program confined to `/data/home/<name>` with a quota. One answer for an unknown name and a wrong passphrase.
+* **`make session-test`**: the conductor plays the greeter; three accounts, two users logged in at once, each session cannot see the account store, the other home, `..` or `/home`, has its own
+  files and its quota, its child programs are confined to the same home; no passphrase is on the disk in the clear. (A control without confinement fails eight of those checks.)
+Not built yet: the real session payload (a desktop and a program manager per session: phase 3), the greeter's login screen and the first-boot setup (recovery keys), per-user encryption
+(phase 2), the tty switch, roles beyond the administrator, per-user byte quotas, removing an account.

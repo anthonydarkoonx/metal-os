@@ -183,6 +183,15 @@ fn probe_gic() {
     }
 }
 
+/// What the machine's display and storage are, for `fetch` (at most 16 bytes each).
+pub fn gpu_name() -> &'static str {
+    "virtio-gpu"
+}
+
+pub fn storage_name() -> &'static str {
+    "virtio-blk"
+}
+
 /// Without a tree: the cores the firmware started are the machine's cores (called once, after `start_secondaries`).
 pub fn set_cpu_count_if_unknown(n: usize) {
     if NCPUS.load(Ordering::Relaxed) == 0 {

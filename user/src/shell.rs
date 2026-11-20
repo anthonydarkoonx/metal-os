@@ -202,13 +202,14 @@ impl Shell {
         const LOGO_COLS: usize = 21;
         let f = &self.facts;
         let tasks = sysinfo(1);
+        let dev = device_names();
         let rows = [
             ("KERNEL", String::from("Metallium-OS 0.1 aarch64 microkernel")),
             ("UPTIME", info::uptime(f)),
             ("CPU", format!("{}x {}", f.ncpus, info::cpu_name(f.midr))),
-            ("GPU", format!("virtio-gpu {}x{} (2D)", f.gpu_w, f.gpu_h)),
+            ("GPU", format!("{} {}x{}", dev.0, f.gpu_w, f.gpu_h)),
             ("RAM", info::ram(f)),
-            ("STORAGE", format!("{} MiB virtio-blk (EROFS + LFS)", f.sectors * 512 >> 20)),
+            ("STORAGE", format!("{} MiB {} (EROFS + LFS)", f.sectors * 512 >> 20, dev.1)),
             ("IOMMU", if tasks[1] != 0 { format!("Arm SMMUv3, {} devices confined", tasks[2]) } else { String::from("none") }),
             ("TASKS", format!("{} running, {} driver restarts", tasks[3], tasks[4])),
         ];
@@ -1097,4 +1098,17 @@ fn errno(e: i64) -> &'static str {
         _ if e == E_DEAD => "the file system service is restarting, try again",
         _ => "I/O error",
     }
+}
+
+/// What the display and the storage are called, as the kernel's platform says (an older kernel that has no such page: the QEMU devices).
+fn device_names() -> (String, String) {
+    let r = sysinfo(19);
+    if r[0] as i64 != 0 {
+        return (String::from("virtio-gpu"), String::from("virtio-blk"));
+    }
+    let name = |a: u64, b: u64| {
+        let bytes: alloc::vec::Vec<u8> = a.to_le_bytes().iter().chain(b.to_le_bytes().iter()).copied().take_while(|&c| c != 0).collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    (name(r[1], r[2]), name(r[3], r[4]))
 }

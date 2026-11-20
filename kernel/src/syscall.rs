@@ -662,6 +662,22 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             f.x[2] = task::limit() as u64;
             Out::Ret(0)
         }
+        19 => {
+            // what the machine's display and storage are called (16 bytes each, NUL padded, in x1,x2 and x3,x4): `fetch` shows them
+            let pack = |s: &str| {
+                let mut w = [0u64; 2];
+                for (i, b) in s.bytes().take(16).enumerate() {
+                    w[i / 8] |= (b as u64) << (8 * (i % 8));
+                }
+                w
+            };
+            let (g, s) = (pack(crate::platform::gpu_name()), pack(crate::platform::storage_name()));
+            f.x[1] = g[0];
+            f.x[2] = g[1];
+            f.x[3] = s[0];
+            f.x[4] = s[1];
+            Out::Ret(0)
+        }
         15 => {
             // how many capability nodes there are (the Capabilities program draws its meter against it)
             f.x[1] = crate::cap::NODES as u64;

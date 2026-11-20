@@ -1,0 +1,7 @@
+id = fsq
+name = Files probe with a larger quota
+version = 1.0.0
+heap_pages = 64
+permission = files
+quota = 100
+ability = main service bin/fsprog

@@ -347,6 +347,9 @@ impl Mgr {
             let dir = data_dir(&id);
             let _ = fs::create_dir(&dir);
             cmd.scope(&dir);
+            if m.quota != 0 {
+                cmd.quota(m.quota as u64);
+            }
         }
         cmd.arg(&id);
         cmd.image(elf).numeric_arg(entry as u64).heap_pages(m.heap_pages).class(m.class.number()).threads(m.threads).files(files || allfiles).network(network);

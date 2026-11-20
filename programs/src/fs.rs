@@ -113,7 +113,7 @@ impl Fs {
 
     /// Confine the program `child` (one this program started, not yet running) to the directory `dir`: its `/data` becomes `dir`.
     pub fn scope(&self, child: u64, dir: &str) -> Result<(), Error> {
-        self.with(|s| s.scope(child, dir))
+        self.with(|s| s.scope(child, dir, 0))
     }
 
     /// Whole-file write (created or truncated; the close commits it).
@@ -237,9 +237,15 @@ impl Sess {
         self.rpc(V_SYNC, 0, 0).map(|_| ())
     }
 
-    /// Confine the program `child` (one this program started, not yet running) to the directory `dir`: its `/data` becomes `dir`.
-    fn scope(&self, child: u64, dir: &str) -> Result<(), Error> {
-        self.with_path(dir, V_SCOPE, child).map(|_| ())
+    /// Confine the program `child` (one this program started, not yet running) to the directory `dir`: its `/data` becomes `dir`. `quota`: the entries (files and
+    /// directories) it may have there, 0 for the default.
+    fn scope(&self, child: u64, dir: &str, quota: u64) -> Result<(), Error> {
+        if dir.len() >= DATA {
+            return Err(6);
+        }
+        self.put(0, dir.as_bytes());
+        self.put_byte(dir.len(), 0);
+        self.rpc(V_SCOPE, child, quota).map(|_| ())
     }
 
     /// Whole-file write (created or truncated; the close commits it).
@@ -459,7 +465,12 @@ pub fn sync() -> io::Result<()> {
 
 /// Confine a program this one has just started (and that has not run yet) to `dir`: for it, `/data` is `dir`. See `Command::scope`.
 pub fn scope(child: u64, dir: &str) -> io::Result<()> {
-    session(|fs| fs.scope(child, dir))
+    session(|fs| fs.scope(child, dir, 0))
+}
+
+/// The same with an entry quota (0: the default). `dir` may be `/data`: "the same as mine" (a confined program hands its own confinement on; an unconfined one leaves the child unconfined).
+pub fn scope_with_quota(child: u64, dir: &str, quota: u64) -> io::Result<()> {
+    session(|fs| fs.scope(child, dir, quota))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

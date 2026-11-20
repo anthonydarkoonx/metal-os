@@ -65,6 +65,8 @@ pub struct Command {
     image: Option<alloc::sync::Arc<Vec<u8>>>,
     /// Confine the child's file access to this directory (see `scope`).
     scope: Option<String>,
+    /// The entry quota of that directory (0: the default).
+    quota: u64,
 }
 
 pub struct Child {
@@ -89,6 +91,7 @@ impl Command {
             inherit_stdio: true,
             image: None,
             scope: None,
+            quota: 0,
         }
     }
 
@@ -175,6 +178,12 @@ impl Command {
         self
     }
 
+    /// How many files and directories the confined child may have in its directory (see `scope`; the default is 12). It can never be more than the parent's own quota.
+    pub fn quota(&mut self, entries: u64) -> &mut Command {
+        self.quota = entries;
+        self
+    }
+
     fn find_image(&self) -> Result<alloc::sync::Arc<Vec<u8>>> {
         if let Some(i) = &self.image {
             return Ok(i.clone());
@@ -256,10 +265,13 @@ impl Command {
             let mut rq = self.request(console, fs, net);
             rq[40..48].copy_from_slice(&(block.as_ptr() as u64).to_le_bytes());
             rq[48..56].copy_from_slice(&(block.len() as u64).to_le_bytes());
-            let scope = self.scope.clone().filter(|_| fs);
+            // a child that has file access is confined to the directory asked for or, by default, to *the same directory as its parent* (`/data` as the parent sees it): a
+            // confined parent never hands out an unconfined file session, and an unconfined one leaves the child unconfined
+            let scope = self.scope.clone().or_else(|| Some(String::from("/data"))).filter(|_| fs);
+            let quota = self.quota;
             let mut hook = |tid: u64| -> i64 {
                 match &scope {
-                    Some(dir) => match crate::fs::scope(tid, dir) {
+                    Some(dir) => match crate::fs::scope_with_quota(tid, dir, quota) {
                         Ok(()) => 0,
                         Err(_) => -5,
                     },

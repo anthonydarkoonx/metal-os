@@ -50,6 +50,15 @@ pub const EPERM: u64 = 10; // (V_SCOPE: not the program's parent)
 /// store has few, and one program must not be able to use them all up.
 const SCOPE_MAX_ENTRIES: usize = 12;
 
+/// A confined program's scope: the generation of its session, the directory it is confined to, and the quotas that bind it (that directory's, and those of every directory
+/// above it that has one: a home's quota covers everything the programs under it make).
+type Scope = (u64, String, Vec<(String, usize)>);
+
+/// Would one more entry exceed a quota of the chain?
+fn over_quota(ds: &Datafs, quotas: &[(String, usize)]) -> bool {
+    quotas.iter().any(|(dir, limit)| scope_entries(ds, dir) >= *limit)
+}
+
 pub const O_READ: u64 = 1;
 pub const O_WRITE: u64 = 2;
 pub const O_CREATE: u64 = 4;
@@ -1079,7 +1088,7 @@ pub fn vfs_server() -> ! {
     let mut fds: Vec<Vec<Fd>> = (0..slots).map(|_| vec![Fd::Free; FDS]).collect();
     let mut gens = vec![0u64; slots];
     // per program: (the generation of its session, the directory it is confined to); valid only while the generation matches
-    let mut scopes: Vec<Option<(u64, String)>> = (0..slots).map(|_| None).collect();
+    let mut scopes: Vec<Option<Scope>> = (0..slots).map(|_| None).collect();
     loop {
         let m = recv(0);
         let Some((va, fresh, who)) = client_page(m.sender, &mut gens) else {
@@ -1095,12 +1104,12 @@ pub fn vfs_server() -> ! {
         }
         let pg = page(va);
         if m.w[0] == V_SCOPE {
-            reply(scope_request(&ds, &mut scopes, &gens, who, pg, m.w[1]));
+            reply(scope_request(&ds, &mut scopes, &gens, who, pg, m.w[1], m.w[2]));
             continue;
         }
         let table = &mut fds[who];
-        let scope = scopes[who].as_ref().filter(|(g, _)| *g == gens[who]).map(|(_, d)| d.clone());
-        let r = handle(&mut ds, table, pg, m.w, scope.as_deref());
+        let scope = scopes[who].as_ref().filter(|(g, _, _)| *g == gens[who]).map(|(_, d, q)| (d.clone(), q.clone()));
+        let r = handle(&mut ds, table, pg, m.w, scope.as_ref().map(|(d, _)| d.as_str()), scope.as_ref().map_or(&[][..], |(_, q)| q.as_slice()));
         reply(r);
     }
 }
@@ -1109,7 +1118,7 @@ pub fn vfs_server() -> ! {
 /// (the kernel says who that is), only while the child has a file session, and the directory is named as the *caller* sees it, so
 /// a caller that is itself confined can only narrow, never widen. The child is confined from its first request: it is
 /// normally still an embryo when this arrives (see `metallium_loader::spawn_with`).
-fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64], who: usize, pg: Pg, child: u64) -> [u64; 3] {
+fn scope_request(ds: &Datafs, scopes: &mut [Option<Scope>], gens: &[u64], who: usize, pg: Pg, child: u64, quota: u64) -> [u64; 3] {
     let err = |e: u64| [e, 0, 0];
     let child = child as usize;
     if child >= scopes.len() || child == who {
@@ -1124,12 +1133,32 @@ fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64]
         return err(EPERM);
     }
     let Some(p) = get_path(pg) else { return err(EINVAL) };
-    let mine = scopes[who].as_ref().filter(|(g, _)| *g == gens[who]).map(|(_, d)| d.as_str());
-    let Some(Route::Data(full)) = route_scoped(&p, mine) else { return err(EINVAL) };
+    let mine = scopes[who].as_ref().filter(|(g, _, _)| *g == gens[who]).map(|(_, d, q)| (d.clone(), q.clone()));
+    let Some(Route::Data(full)) = route_scoped(&p, mine.as_ref().map(|(d, _)| d.as_str())) else { return err(EINVAL) };
+    match &mine {
+        // "the same as mine": `/data` as the caller sees it. A confined caller hands its own confinement on (so a confined program that starts programs does not hand them
+        // an unconfined file session: `Command` asks for this by default); an unconfined caller has nothing to hand on, and the child stays unconfined too
+        Some((dir, q)) if full == *dir => {
+            scopes[child] = Some((gen, dir.clone(), q.clone()));
+            return [0, 0, 0];
+        }
+        None if full == "/" => {
+            scopes[child] = None;
+            return [0, 0, 0];
+        }
+        _ => {}
+    }
     if full == "/" || ds.find(&full).map_or(true, |s| ds.ents[s].kind != KIND_DIR) {
         return err(ENOENT);
     }
-    scopes[child] = Some((gen, full));
+    // the child's entry quota: the default unless asked for, never more than the caller's own, never more than the table holds
+    let mut limit = if quota == 0 { SCOPE_MAX_ENTRIES } else { (quota as usize).min(NENT) };
+    let mut chain = mine.map(|(_, q)| q).unwrap_or_default();
+    if let Some((_, own)) = chain.last() {
+        limit = limit.min(*own);
+    }
+    chain.push((full.clone(), limit));
+    scopes[child] = Some((gen, full, chain));
     [0, 0, 0]
 }
 
@@ -1138,7 +1167,7 @@ fn fd_slot(table: &[Fd], fd: u64) -> Option<usize> {
     (i < FDS && !matches!(table[i], Fd::Free)).then_some(i)
 }
 
-fn handle(ds: &mut Datafs, table: &mut [Fd], pg: Pg, w: [u64; 3], scope: Option<&str>) -> [u64; 3] {
+fn handle(ds: &mut Datafs, table: &mut [Fd], pg: Pg, w: [u64; 3], scope: Option<&str>, quotas: &[(String, usize)]) -> [u64; 3] {
     let err = |e: u64| [e, 0, 0];
     match w[0] {
         V_OPEN => {
@@ -1167,7 +1196,7 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: Pg, w: [u64; 3], scope: Option<
                     }
                     let slot = match ds.find(&rest) {
                         Some(s) => s,
-                        None if flags & O_CREATE != 0 && scope.is_some_and(|sc| scope_entries(ds, sc) >= SCOPE_MAX_ENTRIES) => return err(ENOSPC),
+                        None if flags & O_CREATE != 0 && over_quota(ds, quotas) => return err(ENOSPC),
                         None if flags & O_CREATE != 0 => match ds.create(&rest, KIND_FILE) {
                             Ok(s) => s,
                             Err(e) => return err(e),
@@ -1301,7 +1330,7 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: Pg, w: [u64; 3], scope: Option<
                 }
                 (_, Route::Data(r)) if r != "/" => {
                     let res = if w[0] == V_MKDIR {
-                        if scope.is_some_and(|sc| scope_entries(ds, sc) >= SCOPE_MAX_ENTRIES) {
+                        if over_quota(ds, quotas) {
                             return err(ENOSPC);
                         }
                         ds.create(&r, KIND_DIR).map(|_| Vec::new())

@@ -24,6 +24,7 @@
 //! unsigned   = true               # phase 1: no signature check yet, the flag says so out loud
 //! heap_pages = 128                # memory limit, 1..=16384 (default 128)
 //! threads    = 0                  # extra threads, 0..=8
+//! quota      = 12                 # files and directories the program may have in its own directory, 1..=1024 (default 12)
 //! class      = interactive        # interactive | background | heavy
 //! role = desktop                  # the desktop (taskbar, Start menu): the manager gives the compositor its role; implies shell
 //! permission = files              # files | network | display | shell | allfiles | admin | spawn (repeatable)
@@ -58,6 +59,7 @@ pub const MAX_ABILITIES: usize = 8;
 pub const MAX_ID: usize = 16;
 pub const MAX_HEAP_PAGES: u32 = 16384;
 pub const MAX_THREADS: u8 = 8;
+pub const MAX_QUOTA: u16 = 1024;
 pub const DEFAULT_HEAP_PAGES: u32 = 128;
 /// What a program with `permission = spawn` may hand down to the programs it starts, unless `spawn_pages` says otherwise.
 pub const DEFAULT_SPAWN_PAGES: u32 = 4096;
@@ -139,6 +141,8 @@ pub struct Manifest {
     pub unsigned: bool,
     pub heap_pages: u32,
     pub threads: u8,
+    /// How many files and directories its own directory may hold (0: the default, 12).
+    pub quota: u16,
     pub class: Class,
     pub files: bool,
     pub network: bool,
@@ -193,6 +197,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
         unsigned: false,
         heap_pages: DEFAULT_HEAP_PAGES,
         threads: 0,
+        quota: 0,
         class: Class::Interactive,
         files: false,
         network: false,
@@ -266,6 +271,12 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, Error> {
                 m.threads = v.parse().map_err(|_| bad("bad threads"))?;
                 if m.threads > MAX_THREADS {
                     return Err(bad("threads out of range"));
+                }
+            }
+            "quota" => {
+                m.quota = v.parse().map_err(|_| bad("bad quota"))?;
+                if m.quota == 0 || m.quota > MAX_QUOTA {
+                    return Err(bad("quota out of range"));
                 }
             }
             "class" => {

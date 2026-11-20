@@ -166,7 +166,7 @@ erofs-check:
 # Independent check: the Rust package parser must accept what tools/mkmap.py builds (and refuse the flawed fixtures).
 map-check: programs
 	python3 tools/mkmap.py
-	@for f in counter crasher hog probefs probenofs probespawn probespawnall fsa fsb nosign mismatch rogue tampered; do cargo run -q --release -p metallium-map --example mapinfo -- programs/build/maps/$$f.map | grep -q '^ok ' || { echo "map-check: $$f.map not accepted"; exit 1; }; done
+	@for f in counter crasher hog probefs probenofs probespawn probespawnall fsa fsb fsq nosign mismatch rogue tampered; do cargo run -q --release -p metallium-map --example mapinfo -- programs/build/maps/$$f.map | grep -q '^ok ' || { echo "map-check: $$f.map not accepted"; exit 1; }; done
 	@cargo run -q --release -p metallium-map --example mapinfo -- programs/build/maps/corrupt.map | grep -q 'refused BadChecksum' || { echo "map-check: corrupt.map not refused"; exit 1; }
 	@echo "== MAP CHECK: ALL PASS =="
 

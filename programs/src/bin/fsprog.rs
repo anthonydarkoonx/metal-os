@@ -44,7 +44,8 @@ impl Ability for Probe {
                 made += 1;
             }
         }
-        if (8..=12).contains(&made) {
+        // (the default quota is 12 entries, with the note and the file already made; `fsq` has `quota = 100` in its manifest: all 40 fit)
+        if (self.id == "fsq" && made == 40) || (self.id != "fsq" && (8..=12).contains(&made)) {
             code |= 32;
         }
         if fs::read("/system/hello.txt").is_ok() {

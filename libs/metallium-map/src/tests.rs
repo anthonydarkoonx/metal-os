@@ -76,6 +76,10 @@ fn manifest_rules() {
     assert!(!ok(&std::format!("{base}permission = root\n")), "unknown permission");
     assert!(!ok(&std::format!("{base}heap_pages = 0\n")) && !ok(&std::format!("{base}heap_pages = 20000\n")));
     assert!(!ok(&std::format!("{base}threads = 9\n")));
+    assert!(ok(&std::format!("{base}quota = 100\n")) && ok(&std::format!("{base}quota = 1024\n")));
+    assert!(!ok(&std::format!("{base}quota = 0\n")) && !ok(&std::format!("{base}quota = 1025\n")) && !ok(&std::format!("{base}quota = many\n")), "quota range");
+    assert_eq!(parse_manifest(&std::format!("{base}quota = 100\n")).unwrap().quota, 100);
+    assert_eq!(parse_manifest(base).unwrap().quota, 0, "no quota: the default");
     assert!(!ok(&std::format!("{base}ability = m ui bin/b\n")), "duplicate ability");
     assert!(!ok("id = A\nversion = 1\nability = m ui bin/a\n"), "upper case id");
     assert!(!ok("id = abcdefghijklmnopq\nversion = 1\nability = m ui bin/a\n"), "id too long");

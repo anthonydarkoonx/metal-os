@@ -188,7 +188,7 @@ program!("progctl", |c| {
 
     // The data partition outlives a boot (and `make test` boots several times on one disk image): start from nothing, and
     // leave nothing (the programs are uninstalled at the end, which removes their directories).
-    let ids = ["counter", "crasher", "hog", "probefs", "probenofs", "probespawn", "probespawnall", "fsa", "fsb"];
+    let ids = ["counter", "crasher", "hog", "probefs", "probenofs", "probespawn", "probespawnall", "fsa", "fsb", "fsq"];
     for id in ids {
         ask(OP_STOP, 0, id);
     }
@@ -296,6 +296,11 @@ program!("progctl", |c| {
     check("each program's files are where the manager put them and hold only that program's data", na == b"secret-of-fsa" && nb == b"secret-of-fsb" && fs::read("/data/programdata/fsa/f0").is_ok(), "");
     let fsb_files = fs::read_dir("/data/programdata/fsb").map(|l| l.len()).unwrap_or(0);
     check("... and a program that makes files until it is stopped holds at most 12 of the store's entries", (9..=13).contains(&fsb_files), &alloc::format!("({fsb_files} files)"));
+    let sq = ask(OP_START, 0, "fsq");
+    let answered_q = until(300, || saved("fsq", 0).1 == 0xFEED);
+    let aq = saved("fsq", 0).0;
+    let fsq_files = fs::read_dir("/data/programdata/fsq").map(|l| l.len()).unwrap_or(0);
+    check("a manifest's `quota` raises the entry limit of the program's directory (all 40 files fit where the default holds 12)", sq[0] == 0 && answered_q && aq == 0x1FF && fsq_files >= 41, &alloc::format!("(answer {aq:#x}, {fsq_files} entries)"));
     check("uninstalling a program removes its data", ask(OP_UNINSTALL, 0, "fsa")[0] == 0 && fs::read_dir("/data/programdata/fsa").is_err() && fs::read("/data/programdata/fsb/note.txt").is_ok(), "");
 
     // ---- stopping ----

@@ -72,7 +72,7 @@ pub const OBJ_USB_MMIO: u16 = 25;
 pub const OBJ_USB_PCICFG: u16 = 26;
 pub const OBJ_USB_DMA: u16 = 27;
 /// Pages of the USB DMA memory.
-pub const USB_DMA_PAGES: usize = 32;
+pub const USB_DMA_PAGES: usize = 80;
 /// The network device: registers, config copy, the two virtqueue pages, the packet buffers (shared with `netd`), the
 /// ring the driver and `netd` talk through, and the session pages of programs with network access (40..48).
 pub const OBJ_NET_MMIO: u16 = 32;

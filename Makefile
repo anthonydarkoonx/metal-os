@@ -27,6 +27,8 @@ NET_FWD_PORT ?= 18077
 QEMU_INPUT := -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on
 QEMU_USB_INPUT := -device qemu-xhci,id=xhci -device usb-kbd,id=kbd0,bus=xhci.0 -device usb-tablet,id=tab0,bus=xhci.0
 # ... or with a hub on the first port and both devices behind it
+# a hub with seven keyboards, a keyboard and a tablet beside it: ten devices (the driver used to take six)
+QEMU_USB_MANY_INPUT := -device qemu-xhci,id=xhci -device usb-hub,id=hub1,bus=xhci.0,port=1 -device usb-kbd,id=kbd1,bus=xhci.0,port=1.1 -device usb-kbd,id=kbd2,bus=xhci.0,port=1.2 -device usb-kbd,id=kbd3,bus=xhci.0,port=1.3 -device usb-kbd,id=kbd4,bus=xhci.0,port=1.4 -device usb-kbd,id=kbd5,bus=xhci.0,port=1.5 -device usb-kbd,id=kbd6,bus=xhci.0,port=1.6 -device usb-kbd,id=kbd7,bus=xhci.0,port=1.7 -device usb-kbd,id=kbd0,bus=xhci.0,port=2 -device usb-tablet,id=tab0,bus=xhci.0,port=3
 QEMU_USB_HUB_INPUT := -device qemu-xhci,id=xhci -device usb-hub,id=hub1,bus=xhci.0,port=1 -device usb-kbd,id=kbd0,bus=xhci.0,port=1.1 -device usb-tablet,id=tab0,bus=xhci.0,port=1.2
 QEMU_DEV := -drive if=none,id=d0,file=$(DISK),format=raw -device virtio-blk-pci,drive=d0,disable-legacy=on,iommu_platform=on \
             -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1024,yres=768 \
@@ -56,7 +58,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: elf-boot-test usb-test usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -474,7 +476,7 @@ stack-guard: kernel disk
 	 out31=$$(timeout 90 $(QEMU) -machine virt,gic-version=3,iommu=smmuv3 -smp 32 -fw_cfg name=opt/metal/stack-overflow-core,string=31 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$out31" | grep -q "kernel stack overflow on core 31 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0, core 1 and core 31 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$out31 / $$outb =="; exit 1; }
 
-test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-noncoherent
+test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-many usb-test-noncoherent
 
 # Licensing hygiene: the ZSTD constants must equal RFC 8878's tables (needs network once).
 provenance-check:
@@ -537,6 +539,10 @@ usb-test-noncoherent: kernel disk
 usb-test-hub: kernel disk
 	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' hub
 	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1' hub
+
+# ... and with ten devices (hub with seven keyboards)
+usb-test-many: kernel disk
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_MANY_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' many
 
 # The ELF file instead of the flat Image: QEMU passes no device tree, so the kernel asks the firmware how many cores there are (8 here).
 elf-boot-test: kernel disk

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """USB input test: boot the kernel under QEMU with an xHCI controller, a USB keyboard and a USB tablet, press keys and move the pointer through QMP, and check the
-driver reported each one. Usage: usb-test.py '<qemu command line>' flat|hub (the command line must not already have a -qmp option; `hub`: the devices sit behind a hub,
+driver reported each one. Usage: usb-test.py '<qemu command line>' flat|hub|many (the command line must not already have a -qmp option; `hub`: the devices sit behind a hub,
 so the hub path is the only way to them; `flat`: they are on root ports, and the test also plugs a second keyboard in and out and holds a key down)."""
 import json, os, shlex, socket, subprocess, sys, time
 
@@ -100,6 +100,9 @@ def run(qemu):
             ("a keyboard plugged in later is found", mid.count("[usb] device attached") >= 3 and "error" not in r),
             ("a keyboard unplugged is forgotten", "device removed" in end[len(mid):] and "error" not in r2),
         ]
+    elif mode == "many":
+        o = open(LOG, errors="replace").read()
+        extra = [("the hub is found", "[usb] hub attached" in o), ("all ten devices are found (more than the old limit of six)", o.count("[usb] device attached") >= 9 and "too many devices" not in o)]
     else:
         extra = [("the hub is found", "[usb] hub attached" in open(LOG, errors="replace").read()), ("the devices behind it are found", open(LOG, errors="replace").read().count("[usb] device attached") >= 2)]
     out = open(LOG, errors="replace").read()

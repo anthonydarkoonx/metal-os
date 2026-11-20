@@ -6,7 +6,7 @@
 //!
 //! Devices may sit on a root port or behind hubs (up to three tiers); they can be plugged and unplugged while the system runs (the controller's port-change
 //! events, and a hub's status-change endpoint, say so). A held key repeats (after half a second, thirty times a second: the device does not do it). Not done:
-//! SuperSpeed hubs, hubs with a transaction translator per port, more than six devices at once.
+//! SuperSpeed hubs, hubs with a transaction translator per port, more than 16 devices at once.
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
 use metal_driver_rt::dma;
@@ -20,7 +20,7 @@ const DMA_H: usize = 0xA010_0000;
 const SLOT_MMIO: u64 = 7;
 const SLOT_DMA: u64 = 8;
 
-// layout of the shared memory (the kernel makes it USB_DMA_PAGES = 32 pages)
+// layout of the shared memory (the kernel makes it USB_DMA_PAGES = 80 pages: the end of the scratchpad buffers)
 const O_DCBAA: usize = 0x0000; // device context base address array: 256 entries
 const O_SCRATCH_ARRAY: usize = 0x0800;
 const O_CMD: usize = 0x1000; // command ring (64 TRBs used)
@@ -29,8 +29,8 @@ const O_ERST: usize = 0x3000;
 const O_INPUT: usize = 0x4000; // input context (also the one for every command: commands are one at a time)
 const O_DEV0: usize = 0x8000; // per device: 4 pages
 const DEV_STRIDE: usize = 0x4000;
-const MAX_DEVS: usize = 6; // (6 * 0x4000 ends where the scratchpad buffers start)
-const O_SCRATCH: usize = 0x18000; // scratchpad buffers: up to 8 pages
+const MAX_DEVS: usize = 16; // (16 * 0x4000 ends where the scratchpad buffers start)
+const O_SCRATCH: usize = O_DEV0 + MAX_DEVS * DEV_STRIDE; // scratchpad buffers: up to 8 pages
 const MAX_SCRATCH: usize = 8;
 const EVT_TRBS: usize = 256;
 const RING_TRBS: usize = 64;
@@ -240,7 +240,7 @@ impl Usb {
         if !wait_for(|| r32(op) & 2 == 0 && r32(op + 4) & (1 << 11) == 0, 500) {
             return Err("controller reset timed out");
         }
-        w32(op + 0x38, max_slots.min(8)); // CONFIG
+        w32(op + 0x38, max_slots.min(MAX_DEVS as u32)); // CONFIG
         w64(op + 0x30, dma_pa + O_DCBAA as u64); // DCBAAP
         if scratch > 0 {
             for i in 0..scratch {
@@ -452,7 +452,7 @@ impl Usb {
         }
         let _ = self.command(0, T_DISABLE_SLOT << 10 | (slot as u32) << 24);
         w64(self.dma_va + O_DCBAA + 8 * slot as usize, 0);
-        dma::clean(self.dma_va + O_DCBAA, 8 * 16);
+        dma::clean(self.dma_va + O_DCBAA, 8 * (MAX_DEVS + 1));
         // SAFETY: the area is `DEV_STRIDE` bytes inside the shared memory, and the slot was just disabled: the controller no longer reads or writes it.
         unsafe { core::ptr::write_bytes(d.va as *mut u8, 0, DEV_STRIDE) };
         dma::clean(d.va, DEV_STRIDE);
@@ -482,7 +482,7 @@ impl Usb {
     fn enumerate(&mut self, root_port: u32, speed: u32, route: u32, tier: u32, parent: Option<(u8, u32, bool)>) -> Result<u8, &'static str> {
         let area = self.used.iter().position(|u| !u).ok_or("too many devices")?;
         let (cc, slot) = self.command(0, T_ENABLE_SLOT << 10)?;
-        if cc != CC_SUCCESS || slot == 0 || slot > 8 || self.devs.iter().any(|d| d.slot as u32 == slot) {
+        if cc != CC_SUCCESS || slot == 0 || slot > MAX_DEVS as u32 || self.devs.iter().any(|d| d.slot as u32 == slot) {
             return Err("no device slot");
         }
         let slot = slot as u8;
@@ -510,7 +510,7 @@ impl Usb {
         w32(ic + 2 * csz + 16, 8);
         dma::clean(ic, 4096);
         w64(self.dma_va + O_DCBAA + 8 * slot as usize, pa);
-        dma::clean(self.dma_va + O_DCBAA, 8 * 16);
+        dma::clean(self.dma_va + O_DCBAA, 8 * (MAX_DEVS + 1));
         dma::flush(va, 4096);
         self.devs.push(Dev {
             slot,

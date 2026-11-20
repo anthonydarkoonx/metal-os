@@ -378,7 +378,7 @@ simply fills and eviction stops (pages stay resident) rather than failing.
                               \-> lfs-server  -> blk-driver                           (/data: log-structured)
 The VFS (`user/src/vfs.rs`) gives applications open/read/write/seek/close/stat/list/mkdir/unlink with
 per-client file descriptors. `/data` is a small file layer on the log-structured store: a directory
-table (key 0, up to 51 entries, full paths so directories nest) plus data blocks keyed by inode.
+table (up to 1024 entries over several blocks, full paths of up to 127 bytes so directories nest) plus data blocks keyed by inode.
 **Replacing a file is atomic.** Every file owns a *pair* of inode numbers, and the directory table points at
 one. A writer that opens with `O_TRUNC` builds the new version in the other, readers keep seeing the
 committed version, and the close that rewrites the table (one LFS checkpoint) flips the file over; only then
@@ -408,8 +408,8 @@ file. While a session is open, other readers see the in-place bytes (it is atomi
 isolated from concurrent readers). Seven tests kill the VFS mid-update, across another file's checkpoint,
 while growing a file, with abandoned and superseded writers, and after an unlink (each fails if undo
 logging is switched off).
-The data layer's directory table is format `VFS2` (inode numbers in pairs): a table in the older layout is
-not read, so an old `/data` partition starts out empty. The `prog` task holds only a VFS capability.
+The data layer's directory table is format `VFS3` (several blocks, 1024 entries, 127-byte paths); a `VFS2` table (one block, 51 entries) is still read and the next commit
+writes the new layout (`make table-test`); a table older than `VFS2` is not read, so such a `/data` partition starts out empty. The `prog` task holds only a VFS capability.
 
 Disk layout (`tools/mkdisk.py`; `EROFS_OPTS` picks the compression, default ZSTD + 16 KiB clusters): sector 0 magic, 1024..3071 EROFS image, 4096..16383 LFS store.
 Servers pass bulk data through shared pages; each block-driver client has its own DMA buffer, chosen by
@@ -535,8 +535,8 @@ isolation here is plain EL0 + MMU); an IOMMU for devices other than the block de
 behind the SMMU; the SMMU is driven with polling command completion, wired interrupts and stage 2
 only, with no ATS/PRI/MSI);
 POSIX semantics beyond the basics
-(no permissions, timestamps, hard links, mmap; `/data` holds at most 51 files and directories, names
-under 64 bytes, 4 KiB per IPC round trip); EROFS tail-packing, fragments/packed inodes, MicroLZMA and
+(no permissions, timestamps, hard links, mmap; `/data` holds at most 1024 files and directories, paths
+under 128 bytes, 4 KiB per IPC round trip); EROFS tail-packing, fragments/packed inodes, MicroLZMA and
 DEFLATE and ZSTD dictionaries -- such images are rejected, never
 misread; a
 secure/verified boot.

@@ -177,7 +177,7 @@ fn norm(p: &str) -> Option<String> {
     if out.is_empty() {
         out.push('/');
     }
-    (out.len() < 64).then_some(out)
+    (out.len() < PATH_MAX).then_some(out)
 }
 
 enum Route {
@@ -207,7 +207,7 @@ fn route_scoped(p: &str, scope: Option<&str>) -> Option<Route> {
     match (route(p)?, scope) {
         (Route::Data(rest), Some(sc)) => {
             let full = if rest == "/" { String::from(sc) } else { alloc::format!("{sc}{rest}") };
-            (full.len() < 64).then_some(Route::Data(full))
+            (full.len() < PATH_MAX).then_some(Route::Data(full))
         }
         (r, _) => Some(r),
     }
@@ -266,25 +266,38 @@ const META_KEY: u64 = 0;
 /// The block listing the in-place update sessions that have not committed yet (see `Session`).
 const JOURNAL_KEY: u64 = 1;
 const JOURNAL_MAGIC: u32 = 0x4C4E_4A56; // "VJNL"
-/// "VFS2": inode numbers come in pairs (see `Shadow`); a table of the older layout is not read.
-const MAGIC: u32 = 0x3253_4656;
-const NENT: usize = 51;
-const ENT_SZ: usize = 80;
+/// "VFS3": the directory table spans several blocks (up to `NENT` entries, paths of up to `PATH_MAX` bytes). "VFS2" (inode numbers in pairs, see `Shadow`;
+/// one block, `OLD_NENT` entries of `OLD_ENT_SZ` bytes with 64-byte paths) is still read, and the next commit writes the new layout; a table older than that is not read.
+const MAGIC: u32 = 0x3353_4656;
+const MAGIC_V2: u32 = 0x3253_4656;
+const OLD_NENT: usize = 51;
+const OLD_ENT_SZ: usize = 80;
+const NENT: usize = 1024;
+const PATH_MAX: usize = 128;
+const ENT_SZ: usize = 144;
+/// Entries per metadata block (the first 16 bytes of each block are its header) and the blocks the table takes. Block 0 is `META_KEY`, block b is `META_MORE + b`.
+const EPB: usize = (BS - 16) / ENT_SZ;
+const META_BLOCKS: usize = NENT.div_ceil(EPB);
+const META_MORE: u64 = 0x1000;
+/// The journal is spread the same way: 16 bytes per entry, block b at `JOURNAL_MORE + b` (block 0 is `JOURNAL_KEY`).
+const JEPB: usize = (BS - 16) / 16;
+const JOURNAL_BLOCKS: usize = NENT.div_ceil(JEPB);
+const JOURNAL_MORE: u64 = 0x2000;
 const KIND_FILE: u8 = 1;
 const KIND_DIR: u8 = 2;
 
 #[derive(Clone, Copy)]
 struct Ent {
-    path: [u8; 64],
+    path: [u8; PATH_MAX],
     ino: u32, // 0 = free slot
     kind: u8,
     size: u64,
 }
 
 impl Ent {
-    const FREE: Ent = Ent { path: [0; 64], ino: 0, kind: 0, size: 0 };
+    const FREE: Ent = Ent { path: [0; PATH_MAX], ino: 0, kind: 0, size: 0 };
     fn path(&self) -> &str {
-        let n = self.path.iter().position(|&c| c == 0).unwrap_or(64);
+        let n = self.path.iter().position(|&c| c == 0).unwrap_or(PATH_MAX);
         core::str::from_utf8(&self.path[..n]).unwrap_or("")
     }
 }
@@ -384,45 +397,84 @@ fn undo_key(ino: u32, gen: u32, blk: u64) -> u64 {
 
 struct Datafs {
     next_ino: u32,
-    ents: [Ent; NENT],
+    ents: Vec<Ent>,
     dirty: bool,
     /// The uncommitted next version of each entry, if a writer has one (memory only: lost with the VFS).
-    shadow: [Option<Shadow>; NENT],
+    shadow: Vec<Option<Shadow>>,
     /// Bumped whenever a writer opens: an older writer's descriptor stops working, so a client that
     /// died holding a file open can never wedge it.
-    wgen: [u32; NENT],
+    wgen: Vec<u32>,
     /// The in-place update in progress for each entry, if any (also recorded in the journal block).
-    session: [Option<Session>; NENT],
+    session: Vec<Option<Session>>,
     next_gen: u32,
     /// The journal block has to be rewritten at the next flush.
     jdirty: bool,
+    /// What each metadata block held when it was last read or written (a hash of its bytes; 0: never written): a commit writes only the blocks that changed.
+    meta_hash: Vec<u64>,
+    /// The same for the journal blocks after the first (0: empty and never written).
+    jhash: Vec<u64>,
+}
+
+fn fnv(b: &[u8]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for &x in b {
+        h = (h ^ x as u64).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h | 1 // (never 0: 0 means "not written")
 }
 
 impl Datafs {
     fn load() -> Datafs {
         let mut d = Datafs {
             next_ino: 2,
-            ents: [Ent::FREE; NENT],
+            ents: vec![Ent::FREE; NENT],
             dirty: false,
-            shadow: [None; NENT],
-            wgen: [0; NENT],
-            session: core::array::from_fn(|_| None),
+            shadow: vec![None; NENT],
+            wgen: vec![0; NENT],
+            session: (0..NENT).map(|_| None).collect(),
             next_gen: 1,
             jdirty: false,
+            meta_hash: vec![0; META_BLOCKS],
+            jhash: vec![0; JOURNAL_BLOCKS],
         };
         match lfs_get(META_KEY) {
             Ok(true) => {
                 let copy = page(va(VA_LFS)).vec(0, BS); // (parse a private copy)
                 let pg = &copy[..];
-                if u32::from_le_bytes(pg[0..4].try_into().unwrap()) == MAGIC {
+                let magic = u32::from_le_bytes(pg[0..4].try_into().unwrap());
+                if magic == MAGIC_V2 {
+                    // the older table: one block, 51 entries with 64-byte paths; the next commit writes the new layout
                     d.next_ino = u32::from_le_bytes(pg[4..8].try_into().unwrap());
                     d.next_gen = u32::from_le_bytes(pg[8..12].try_into().unwrap()).max(1);
-                    for (i, e) in d.ents.iter_mut().enumerate() {
-                        let b = &pg[16 + i * ENT_SZ..16 + (i + 1) * ENT_SZ];
-                        e.path.copy_from_slice(&b[..64]);
+                    for (i, e) in d.ents.iter_mut().enumerate().take(OLD_NENT) {
+                        let b = &pg[16 + i * OLD_ENT_SZ..16 + (i + 1) * OLD_ENT_SZ];
+                        e.path[..64].copy_from_slice(&b[..64]);
                         e.ino = u32::from_le_bytes(b[64..68].try_into().unwrap());
                         e.kind = b[68];
                         e.size = u64::from_le_bytes(b[72..80].try_into().unwrap());
+                    }
+                } else if magic == MAGIC {
+                    d.next_ino = u32::from_le_bytes(pg[4..8].try_into().unwrap());
+                    d.next_gen = u32::from_le_bytes(pg[8..12].try_into().unwrap()).max(1);
+                    d.parse_meta(0, pg);
+                    for b in 1..META_BLOCKS {
+                        match lfs_get(META_MORE + b as u64) {
+                            Ok(true) => {
+                                let more = page(va(VA_LFS)).vec(0, BS);
+                                d.parse_meta(b, &more[..]);
+                            }
+                            Ok(false) => {} // (never written: all of its entries are free)
+                            Err(_) => {
+                                println!("[vfs] cannot read /data metadata; refusing to start");
+                                exit(1)
+                            }
+                        }
+                    }
+                    // what is on the disk now, so that a commit rewrites only what changes
+                    for b in 0..META_BLOCKS {
+                        if b == 0 || d.meta_present(b) {
+                            d.meta_hash[b] = fnv(&d.meta_block(b));
+                        }
                     }
                 }
             }
@@ -437,6 +489,71 @@ impl Datafs {
         d
     }
 
+    /// Entries `b * EPB ..` from the bytes of metadata block `b`.
+    fn parse_meta(&mut self, b: usize, pg: &[u8]) {
+        for k in 0..EPB {
+            let i = b * EPB + k;
+            if i >= NENT {
+                break;
+            }
+            let r = &pg[16 + k * ENT_SZ..16 + (k + 1) * ENT_SZ];
+            let e = &mut self.ents[i];
+            e.path.copy_from_slice(&r[..PATH_MAX]);
+            e.ino = u32::from_le_bytes(r[PATH_MAX..PATH_MAX + 4].try_into().unwrap());
+            e.kind = r[PATH_MAX + 4];
+            e.size = u64::from_le_bytes(r[PATH_MAX + 8..PATH_MAX + 16].try_into().unwrap());
+        }
+    }
+
+    /// Does metadata block `b` hold any entry in use?
+    fn meta_present(&self, b: usize) -> bool {
+        self.ents[b * EPB..((b + 1) * EPB).min(NENT)].iter().any(|e| e.ino != 0)
+    }
+
+    /// The bytes of metadata block `b` (block 0 also carries the counters).
+    fn meta_block(&self, b: usize) -> Vec<u8> {
+        let mut pg = vec![0u8; BS];
+        if b == 0 {
+            pg[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+            pg[4..8].copy_from_slice(&self.next_ino.to_le_bytes());
+            pg[8..12].copy_from_slice(&self.next_gen.to_le_bytes());
+        } else {
+            pg[0..4].copy_from_slice(&MAGIC.to_le_bytes());
+        }
+        for k in 0..EPB {
+            let i = b * EPB + k;
+            if i >= NENT {
+                break;
+            }
+            let e = &self.ents[i];
+            let r = &mut pg[16 + k * ENT_SZ..16 + (k + 1) * ENT_SZ];
+            r[..PATH_MAX].copy_from_slice(&e.path);
+            r[PATH_MAX..PATH_MAX + 4].copy_from_slice(&e.ino.to_le_bytes());
+            r[PATH_MAX + 4] = e.kind;
+            r[PATH_MAX + 8..PATH_MAX + 16].copy_from_slice(&e.size.to_le_bytes());
+        }
+        pg
+    }
+
+    /// The bytes of journal block `b`: the in-place update sessions of entries `b * JEPB ..`.
+    fn journal_block(&self, b: usize) -> Vec<u8> {
+        let mut pg = vec![0u8; BS];
+        pg[0..4].copy_from_slice(&JOURNAL_MAGIC.to_le_bytes());
+        for k in 0..JEPB {
+            let i = b * JEPB + k;
+            if i >= NENT {
+                break;
+            }
+            if let Some(s) = &self.session[i] {
+                let r = &mut pg[16 + k * 16..32 + k * 16];
+                r[0..4].copy_from_slice(&self.ents[i].ino.to_le_bytes());
+                r[4..8].copy_from_slice(&s.gen.to_le_bytes());
+                r[8..16].copy_from_slice(&s.old_size.to_le_bytes());
+            }
+        }
+        pg
+    }
+
     /// Roll back every in-place update that was in progress when the previous VFS died or the power failed.
     fn recover(&mut self) {
         match lfs_get(JOURNAL_KEY) {
@@ -448,14 +565,36 @@ impl Datafs {
             }
         }
         let copy = page(va(VA_LFS)).vec(0, BS); // (parse a private copy)
-        let pg = &copy[..];
-        if u32::from_le_bytes(pg[0..4].try_into().unwrap()) != JOURNAL_MAGIC {
+        if u32::from_le_bytes(copy[0..4].try_into().unwrap()) != JOURNAL_MAGIC {
             return;
         }
-        let mut found = [(0u32, 0u32, 0u64); NENT];
-        for (i, f) in found.iter_mut().enumerate() {
-            let b = &pg[16 + i * 16..32 + i * 16];
-            *f = (u32::from_le_bytes(b[0..4].try_into().unwrap()), u32::from_le_bytes(b[4..8].try_into().unwrap()), u64::from_le_bytes(b[8..16].try_into().unwrap()));
+        let mut found = vec![(0u32, 0u32, 0u64); NENT];
+        let mut fill = |blk: &[u8], b: usize, found: &mut Vec<(u32, u32, u64)>| {
+            for k in 0..JEPB {
+                let i = b * JEPB + k;
+                if i >= NENT {
+                    break;
+                }
+                let r = &blk[16 + k * 16..32 + k * 16];
+                found[i] = (u32::from_le_bytes(r[0..4].try_into().unwrap()), u32::from_le_bytes(r[4..8].try_into().unwrap()), u64::from_le_bytes(r[8..16].try_into().unwrap()));
+            }
+        };
+        fill(&copy[..], 0, &mut found);
+        for b in 1..JOURNAL_BLOCKS {
+            match lfs_get(JOURNAL_MORE + b as u64) {
+                Ok(true) => {
+                    let more = page(va(VA_LFS)).vec(0, BS);
+                    if u32::from_le_bytes(more[0..4].try_into().unwrap()) == JOURNAL_MAGIC {
+                        fill(&more[..], b, &mut found);
+                        self.jhash[b] = 1; // (written once: the next commit rewrites it, empty if the rollback cleared it)
+                    }
+                }
+                Ok(false) => {}
+                Err(_) => {
+                    println!("[vfs] cannot read the /data journal; refusing to start");
+                    exit(1)
+                }
+            }
         }
         let mut rolled = 0;
         let mut garbage = Vec::new();
@@ -500,34 +639,34 @@ impl Datafs {
 
     /// Persist directory table and make everything written so far durable.
     fn flush(&mut self) -> Result<(), u64> {
-        let mut pg = vec![0u8; BS]; // (built privately, then copied into the page)
-        pg[0..4].copy_from_slice(&MAGIC.to_le_bytes());
-        pg[4..8].copy_from_slice(&self.next_ino.to_le_bytes());
-        pg[8..12].copy_from_slice(&self.next_gen.to_le_bytes());
-        for (i, e) in self.ents.iter().enumerate() {
-            let b = &mut pg[16 + i * ENT_SZ..16 + (i + 1) * ENT_SZ];
-            b[..64].copy_from_slice(&e.path);
-            b[64..68].copy_from_slice(&e.ino.to_le_bytes());
-            b[68] = e.kind;
-            b[72..80].copy_from_slice(&e.size.to_le_bytes());
-        }
-        page(va(VA_LFS)).put(0, &pg);
-        lfs_put(META_KEY)?;
-        if self.jdirty {
-            pg.fill(0);
-            pg[0..4].copy_from_slice(&JOURNAL_MAGIC.to_le_bytes());
-            for (i, s) in self.session.iter().enumerate() {
-                if let Some(s) = s {
-                    let b = &mut pg[16 + i * 16..32 + i * 16];
-                    b[0..4].copy_from_slice(&self.ents[i].ino.to_le_bytes());
-                    b[4..8].copy_from_slice(&s.gen.to_le_bytes());
-                    b[8..16].copy_from_slice(&s.old_size.to_le_bytes());
-                }
+        // the metadata blocks that changed since they were last read or written (block 0 always: it has the counters); one that was never written and holds nothing is skipped
+        let mut hashes = self.meta_hash.clone();
+        for b in 0..META_BLOCKS {
+            let blk = self.meta_block(b);
+            let h = fnv(&blk);
+            if h == self.meta_hash[b] || (b != 0 && self.meta_hash[b] == 0 && !self.meta_present(b)) {
+                continue;
             }
-            page(va(VA_LFS)).put(0, &pg);
-            lfs_put(JOURNAL_KEY)?;
+            page(va(VA_LFS)).put(0, &blk);
+            lfs_put(if b == 0 { META_KEY } else { META_MORE + b as u64 })?;
+            hashes[b] = h;
+        }
+        let mut jhashes = self.jhash.clone();
+        if self.jdirty {
+            for b in 0..JOURNAL_BLOCKS {
+                let blk = self.journal_block(b);
+                let used = self.session[b * JEPB..((b + 1) * JEPB).min(NENT)].iter().any(|s| s.is_some());
+                if b != 0 && !used && self.jhash[b] == 0 {
+                    continue; // never written and nothing to write
+                }
+                page(va(VA_LFS)).put(0, &blk);
+                lfs_put(if b == 0 { JOURNAL_KEY } else { JOURNAL_MORE + b as u64 })?;
+                jhashes[b] = if used { fnv(&blk) } else { 0 };
+            }
         }
         lfs_sync()?;
+        self.meta_hash = hashes;
+        self.jhash = jhashes;
         self.dirty = false;
         self.jdirty = false;
         Ok(())
@@ -839,12 +978,12 @@ impl Datafs {
             .filter(|(_, e)| e.ino != 0 && (e.path() == from || (is_dir && e.path().starts_with(prefix.as_str()))))
             .map(|(k, e)| (k, alloc::format!("{to}{}", &e.path()[from.len()..])))
             .collect();
-        if moves.iter().any(|(_, p)| p.len() >= 64) {
+        if moves.iter().any(|(_, p)| p.len() >= PATH_MAX) {
             return Err(EINVAL); // a new path would not fit an entry: nothing moves
         }
         for (k, p) in moves {
             let e = &mut self.ents[k];
-            e.path = [0; 64];
+            e.path = [0; PATH_MAX];
             e.path[..p.len()].copy_from_slice(p.as_bytes());
         }
         self.dirty = true;
@@ -1815,4 +1954,86 @@ pub fn volume_test() {
     }
     // a file call while open must still work after all this
     println!("[vol] done");
+}
+
+const C_LFS_SHM2: usize = 0x8035_0000;
+
+/// `make table-test` (`opt/metallium/only=12`): the directory table of `/data`. A table in the older layout (one block, 51 entries) is still read and the next commit
+/// writes the new one; the new one holds hundreds of entries across a restart; long paths work up to the limit.
+pub fn table_test() {
+    fn verdict_line(what: &str, ok: bool) {
+        println!("[table] TEST {what}: {}", if ok { "PASS" } else { "FAIL" });
+    }
+    let m = mem_map(10, C_VFS_SHM, true);
+    let l = mem_map(8, C_LFS_SHM2, true);
+    if (m != 0 && m != E_INVAL) || (l != 0 && l != E_INVAL) {
+        println!("[table] cannot map the pages");
+        return;
+    }
+    let v = Vfs::new(9, C_VFS_SHM);
+    let sync = || {
+        let _ = call(9, [V_SYNC, 0, 0]);
+    };
+    // ---- an older-layout table: written to the store behind the VFS's back, then the VFS restarts and reads it
+    // SAFETY: C_LFS_SHM2 is the conductor's page of the data store (mapped above); the store reads it only while this task is blocked in `call`.
+    let pg = unsafe { &mut *(va(C_LFS_SHM2) as *mut [u8; 4096]) };
+    pg.fill(0);
+    pg[0..4].copy_from_slice(&MAGIC_V2.to_le_bytes());
+    pg[4..8].copy_from_slice(&0x5002u32.to_le_bytes()); // next inode
+    pg[8..12].copy_from_slice(&1u32.to_le_bytes()); // next generation
+    let name = b"/old.txt";
+    pg[16..16 + name.len()].copy_from_slice(name);
+    pg[16 + 64..16 + 68].copy_from_slice(&0x5000u32.to_le_bytes()); // inode
+    pg[16 + 68] = KIND_FILE;
+    pg[16 + 72..16 + 80].copy_from_slice(&5u64.to_le_bytes()); // size
+    let (st1, _) = call(7, [LFS_PUT, META_KEY, 0]);
+    pg.fill(0);
+    pg[..5].copy_from_slice(b"hello");
+    let (st2, _) = call(7, [LFS_PUT, key(0x5000, 0), 0]);
+    let (st3, _) = call(7, [LFS_SYNC, 0, 0]);
+    let _ = v.crash(); // (the VFS restarts and loads what the store holds now)
+    let old = v.read_file("/data/old.txt");
+    verdict_line("a table in the older layout (51 entries, 64-byte paths) is read", st1 == 0 && st2 == 0 && st3 == 0 && old.as_ref().map_or(false, |b| b == b"hello"));
+    let w = v.write_file("/data/new.txt", b"second");
+    sync();
+    let _ = v.crash();
+    let (a, b) = (v.read_file("/data/old.txt"), v.read_file("/data/new.txt"));
+    verdict_line(
+        "the next commit writes the new layout, and the old file and the new one survive a restart",
+        w.is_ok() && a.map_or(false, |x| x == b"hello") && b.map_or(false, |x| x == b"second"),
+    );
+    // ---- hundreds of entries
+    let made = v.mkdir("/data/many").is_ok();
+    let mut ok = made;
+    for i in 0..300 {
+        ok &= v.write_file(&alloc::format!("/data/many/f{i:03}"), alloc::format!("file {i}").as_bytes()).is_ok();
+    }
+    sync();
+    let count = |v: &Vfs| v.list("/data/many").map_or(0, |l| l.lines().count());
+    verdict_line("300 files in one directory (the table used to hold 51 entries in all)", ok && count(&v) == 300);
+    let _ = v.crash();
+    let again = count(&v) == 300 && v.read_file("/data/many/f299").map_or(false, |b| b == b"file 299");
+    verdict_line("... and they are all there after a restart (the table spans several blocks)", again);
+    let mut gone = true;
+    for i in 0..150 {
+        gone &= v.unlink(&alloc::format!("/data/many/f{i:03}")).is_ok();
+    }
+    sync();
+    let _ = v.crash();
+    verdict_line("removing half of them is kept across a restart", gone && count(&v) == 150 && v.read_file("/data/many/f000").is_err() && v.read_file("/data/many/f200").is_ok());
+    // ---- long paths
+    let mut dir = String::from("/data");
+    let mut deep = true;
+    while dir.len() + 12 < 92 {
+        dir.push_str("/dddddddddd"); // 11 bytes a level
+        deep &= v.mkdir(&dir).is_ok();
+    }
+    let long = alloc::format!("{dir}/file-with-a-longer-name.txt");
+    let w = v.write_file(&long, b"deep");
+    let too_long = alloc::format!("{dir}/{}", "x".repeat(60));
+    verdict_line(
+        &alloc::format!("a path of {} bytes works and one past the limit is refused", long.len()),
+        deep && long.len() > 100 && long.len() < PATH_MAX && w.is_ok() && v.read_file(&long).map_or(false, |b| b == b"deep") && v.write_file(&too_long, b"x").is_err(),
+    );
+    println!("[table] done");
 }

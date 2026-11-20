@@ -125,17 +125,23 @@ pub fn overflow_stack_bigframe(seed: u8) -> u8 {
 }
 
 #[no_mangle]
-extern "C" fn kmain() -> ! {
+extern "C" fn kmain(dtb: usize) -> ! {
     // SAFETY: writes TPIDR_EL1 (the core number, 0 for the boot core); only `smp::cpu_id` reads it; no memory is accessed.
     unsafe { core::arch::asm!("msr tpidr_el1, xzr", options(nomem, nostack)) }; // core 0
     // Translation first: the locks behind the very first line printed are exclusive load/store pairs, which real
     // cores only support on cacheable memory (with the MMU off all memory is device memory and they fault).
     // RAM size from the harness (read with the MMU off: it is a device register); 128 MiB if it did not say. Beyond the first GiB the
     // direct map works in 2 MiB blocks, so the size is rounded down to a multiple of them there.
+    platform::set_dtb(dtb);
     let ram = platform::ram_size().filter(|&s| (8 << 20..=frame::phys::MAX_RAM as u64).contains(&s)).map_or(128 << 20, |s| s as usize);
     let ram = mem::usable_ram(ram);
     mmu::init(ram);
+    platform::init_machine(); // (device tree: interrupt controller, cores, firmware conduit)
     kprintln!("Metal OS 0.1 (aarch64, microkernel) booting{}", platform::BANNER_SUFFIX);
+    match platform::cpu_count() {
+        Some(n) => kprintln!("[machine] device tree at {:#x}: {n} cores, {}", platform::dtb_addr(), platform::intc_name()),
+        None => kprintln!("[machine] no device tree (x0 = {dtb:#x}): cores found by asking the firmware, {}", platform::intc_name()),
+    }
     platform::early_boot();
     // SAFETY: `__kernel_end` is a linker symbol; only its address is taken, it is never read.
     let kernel_end = unsafe { &__kernel_end as *const u8 as usize };
@@ -200,8 +206,9 @@ extern "C" fn kmain() -> ! {
     kprintln!("[kernel] {tasks} task slots, {} endpoints, {} memory objects, {} file and {} network sessions", ipc::nep(), obj::objs_for(tasks), obj::sessions(), obj::sessions());
     timer::init();
     sched::init();
+    sched::init_placement();
     platform::init_devices();
-    kprintln!("[timer] {} + generic timer at {} Hz", platform::INTC_NAME, timer::HZ);
+    kprintln!("[timer] {} + generic timer at {} Hz", platform::intc_name(), timer::HZ);
     zram_selftest();
     if platform::HAS_SMMU {
         smmu::init();

@@ -14,6 +14,7 @@ metal-compact = { path = "../libs/metal-compact" }
 metal-rand = { path = "../libs/metal-rand" }
 metal-aead = { path = "../libs/metal-aead" }
 metal-loader = { path = "../libs/metal-loader" }
+metal-fdt = { path = "../libs/metal-fdt" }
 
 [features]
 # The machine to build for (kernel/src/platform.rs). Exactly one.

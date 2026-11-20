@@ -10,7 +10,9 @@ use crate::{gic, kprintln, mmu, sched, timer};
 use core::arch::asm;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-pub const MAX_CPUS: usize = 4;
+/// The most cores the kernel runs (the tables sized by it are small; the stacks are static: 80 KiB a core in the image's .bss). The machine's
+/// own number comes from its device tree (`platform::cpu_count`).
+pub const MAX_CPUS: usize = 16;
 const SGI_WAKE: u32 = 0;
 
 /// Cores sleeping in `idle()`.
@@ -94,7 +96,8 @@ fn psci_cpu_on(core: usize) -> i64 {
 /// Boot core: power up whatever other cores exist.
 pub fn start_secondaries() -> usize {
     let mut started = 0;
-    for core in 1..MAX_CPUS {
+    // (the device tree says how many cores there are; without one, ask until the firmware says there is no such core)
+    for core in 1..crate::platform::cpu_count().unwrap_or(MAX_CPUS) {
         match psci_cpu_on(core) {
             0 => started += 1,
             -2 => break, // INVALID_PARAMETERS: no such core

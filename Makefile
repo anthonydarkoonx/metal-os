@@ -3,11 +3,13 @@ TARGET  := aarch64-unknown-none-softfloat
 USER_ELF := user/target/$(TARGET)/release/metal-user
 KERNEL   := kernel/target/$(TARGET)/release/metal-kernel
 # QEMU loads the kernel as an ELF file (entry point and load address come from the ELF headers).
-KERNEL_BIN := $(KERNEL)
+KERNEL_BIN := $(KERNEL).img
 DISK     ?= disk.img
 # the interactive console runs with more memory: every fullscreen program has a 3 MiB surface
 UI_RAM_MIB ?= 128
 SMP ?= 4
+# the interrupt controller QEMU emulates (2 or 3); the kernel reads which from the device tree
+GIC ?= 2
 RAM_MIB ?= 64
 # System-image compression (see tools/mkdisk.py); the 1-CPU test run uses LZ4 so both decoders run in QEMU.
 EROFS_OPTS ?= -zzstd,level=19 -C16384
@@ -29,7 +31,7 @@ QEMU_DEV := -drive if=none,id=d0,file=$(DISK),format=raw -device virtio-blk-pci,
             -device virtio-rng-pci,disable-legacy=on,iommu_platform=on
 # (a fresh 32 random bytes for every make run: the kernel mixes them into its layout generator, see kernel/src/rand.rs)
 SEED_FILE := $(shell head -c 32 /dev/urandom > build-seed.bin && echo build-seed.bin)
-QEMU     := qemu-system-aarch64 -fw_cfg name=opt/metal/seed,file=$(SEED_FILE) -machine virt,gic-version=2,iommu=smmuv3 -cpu max -smp $(SMP) -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) \
+QEMU     := qemu-system-aarch64 -fw_cfg name=opt/metal/seed,file=$(SEED_FILE) -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) \
             -nographic -semihosting $(QEMU_DEV) -kernel $(KERNEL_BIN)
 
 # The command line the tests use (for the scripts in tools/ that start the guest themselves)
@@ -96,8 +98,13 @@ user:
 	mkdir -p user/build
 	cp $(USER_ELF) user/build/user.elf
 
+# The kernel as a flat Linux-style "Image" (see boot.S): what QEMU and boot loaders take when they should hand over the device tree.
+OBJCOPY ?= $(shell command -v aarch64-linux-gnu-objcopy || command -v rust-objcopy || echo objcopy)
+KERNEL_IMG = $(OBJCOPY) -O binary $(1) $(1).img
+
 kernel: user
 	cd kernel && cargo build --release
+	$(call KERNEL_IMG,$(KERNEL))
 
 # Programs started with SPAWN (programs/): position-independent ELF files in programs/build (random image base each run; the
 # loader relocates them), packed into the system image under /bin. `sleeper` stays a flat image (the user crate embeds
@@ -488,19 +495,21 @@ run-window: export KEEP_DATA = 1
 run-window: export DATA_MIB ?= 1024
 run-window: user disk
 	cd kernel && cargo build --release --features park-on-exit --target-dir target-window
-	qemu-system-aarch64 -machine virt,gic-version=2,iommu=smmuv3 -cpu max -smp $(SMP) -m $(UI_RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(UI_RAM_MIB) * 1048576 ))) \
+	$(call KERNEL_IMG,kernel/target-window/$(TARGET)/release/metal-kernel)
+	qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(UI_RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(UI_RAM_MIB) * 1048576 ))) \
 	  -fw_cfg name=opt/metal/interactive,string=1 -display gtk,zoom-to-fit=on -serial vc:900x600 -monitor none -qmp unix:build-window.sock,server,nowait -semihosting $(QEMU_DEV) \
-	  -name "Metal OS" -kernel kernel/target-window/$(TARGET)/release/metal-kernel
+	  -name "Metal OS" -kernel kernel/target-window/$(TARGET)/release/metal-kernel.img
 
 # A/B evidence for priority inheritance: on one CPU the polling test must pass with it and fail without.
 inherit-ab: user disk
 	cd kernel && cargo build --release --features no-inherit --target-dir target-noinherit
+	$(call KERNEL_IMG,kernel/target-noinherit/$(TARGET)/release/metal-kernel)
 	@echo "--- without inheritance (1 CPU):"
-	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=2,iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
-	  -kernel kernel/target-noinherit/$(TARGET)/release/metal-kernel 2>&1 | grep "priority inheritance" || true
+	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
+	  -kernel kernel/target-noinherit/$(TARGET)/release/metal-kernel.img 2>&1 | grep "priority inheritance" || true
 	@$(MAKE) -s kernel
 	@echo "--- with inheritance (1 CPU):"
-	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=2,iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
+	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
 	  -kernel $(KERNEL_BIN) 2>&1 | grep "priority inheritance" || true
 
 # Hardening lints (fast, no QEMU): deny-level clippy plus the unsafe_op_in_unsafe_fn / undocumented_unsafe_blocks rules from each Cargo.toml.

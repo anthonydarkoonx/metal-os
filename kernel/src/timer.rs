@@ -96,7 +96,7 @@ pub fn init_core() {
     unsafe { asm!("msr cntkctl_el1, {}", in(reg) 3u64) };
     let core = crate::smp::cpu_id();
     let (base, iv) = (BASE.load(Ordering::Relaxed), interval());
-    let phase = iv / MAX_CPUS as u64 * core as u64;
+    let phase = iv / crate::platform::cpu_count().unwrap_or(MAX_CPUS) as u64 * core as u64;
     let k = (counter() - base) / iv + 1;
     NEXT_JIFFY[core].store(base + k * iv + phase, Ordering::Relaxed);
     // SAFETY: enables this core's physical timer (ENABLE=1, IMASK=0); no memory is accessed.

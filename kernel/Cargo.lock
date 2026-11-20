@@ -14,11 +14,16 @@ name = "metal-compact"
 version = "0.1.0"
 
 [[package]]
+name = "metal-fdt"
+version = "0.1.0"
+
+[[package]]
 name = "metal-kernel"
 version = "0.1.0"
 dependencies = [
  "metal-aead",
  "metal-compact",
+ "metal-fdt",
  "metal-loader",
  "metal-lz4",
  "metal-rand",

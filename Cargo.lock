@@ -34,6 +34,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "metal-fdt"
+version = "0.1.0"
+
+[[package]]
 name = "metal-gfx"
 version = "0.1.0"
 

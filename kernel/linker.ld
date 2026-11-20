@@ -31,7 +31,7 @@ SECTIONS
     }
     . = ALIGN(4096);
     __stack_bottom = .;
-    . += 0x50000;
+    . += 0x140000; /* 16 cores: 0x14000 each (64 KiB stack + 16 KiB guard), see smp::MAX_CPUS and mmu::KSTACK_STRIDE */
     __stack_top = .;
     __kernel_end = .;
     __image_size = ABSOLUTE(__kernel_end - __kernel_start);

@@ -64,7 +64,8 @@ fn rndr() -> Option<u64> {
 
 /// Called from `boot.S` with the MMU off. The address to move the image to, or 0 to leave it where it is.
 #[no_mangle]
-extern "C" fn kaslr_place() -> usize {
+extern "C" fn kaslr_place(dtb: usize) -> usize {
+    crate::platform::set_dtb(dtb);
     // SAFETY: `__kernel_start` is a linker symbol; only its address is taken, it is never read.
     let start = unsafe { &__kernel_start as *const u8 as usize };
     // SAFETY: `__kernel_end` is a linker symbol; only its address is taken, it is never read.
@@ -100,7 +101,9 @@ extern "C" fn kaslr_place() -> usize {
     let n = ((top - size - LINK_BASE) / PAGE + 1) as u64;
     for _ in 0..64 {
         let at = LINK_BASE + rng.below(n) as usize * PAGE;
-        if at + size <= start || at >= start + size {
+        // (clear of the old image, which is still being read, and of the device tree, which is read after the move)
+        let clear_of = |lo: usize, len: usize| at + size <= lo || at >= lo + len;
+        if clear_of(start, size) && crate::platform::dtb_span().is_none_or(|(d, n)| clear_of(d, n)) {
             OUTCOME.store(MOVED, Ordering::Relaxed);
             return at;
         }

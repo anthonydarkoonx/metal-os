@@ -29,11 +29,28 @@
 kaslr_old_base:
     .quad   0
 
+// The Linux arm64 "Image" header (Documentation/arch/arm64/booting): the first 64 bytes of the flat image (`make kernel` makes it with objcopy). QEMU, U-Boot
+// (`booti`) and most boot loaders recognise it by the magic number and then pass the device tree's address in x0 and place it clear of the image; a
+// loader that reads the ELF file instead jumps to `_start` and passes nothing, and the kernel carries on without a tree where it can (see platform.rs).
+.section .text.boot0, "ax"
+.global _image_header
+_image_header:
+    b       _start                  // code0: executable code, the entry
+    .long   0                       // code1
+    .quad   0x80000                 // text_offset: the image's place in RAM (the link address minus the RAM base)
+    .quad   __image_size            // image_size: including .bss and the stacks, so the tree is placed after all of it
+    .quad   0x2                     // flags: little endian, 4 KiB pages, text_offset is honoured
+    .quad   0                       // res2
+    .quad   0                       // res3
+    .quad   0                       // res4
+    .long   0x644d5241              // magic "ARM\x64"
+    .long   0                       // res5
+
 .section .text.boot, "ax"
-// (QEMU loads this kernel as an ELF file: the entry point and load address come from the ELF headers.
-// No boot-protocol header of any other system is needed or present.)
+// (The ELF file has the same entry point and load address in its headers; the Image header above is for loaders that look for it.)
 .global _start
 _start:
+    mov     x28, x0                 // the device tree's address (firmware's x0), kept in a callee-saved register for `kaslr_place` and `kmain`
     mrs     x9, mpidr_el1
     and     x9, x9, #0xff
     cbnz    x9, park                // only core 0 boots
@@ -84,6 +101,7 @@ _start:
 6:
     EARLY_SETUP
     // Kernel address randomisation (kaslr.rs): where should the image live? x0 = the new address, 0 = stay.
+    mov     x0, x28
     bl      kaslr_place
     cbz     x0, 20f
     // Move there. Copy the image up to .bss, make the copy's relocated slots point into itself, enter the copy.
@@ -134,6 +152,7 @@ _start:
     br      x14
 20:
     EARLY_SETUP
+    mov     x0, x28
     bl      kmain
 park:
     wfe
@@ -336,4 +355,4 @@ enter_user:
 .balign 16
 .global emergency_stacks
 emergency_stacks:
-    .space  4 * 16384
+    .space  16 * 16384

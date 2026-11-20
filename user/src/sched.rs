@@ -311,7 +311,7 @@ pub fn sched_tests() {
     let b = rt_set(8100, 10_000, rt_core);
     let c = rt_set(0, 10_000, rt_core);
     let d = rt_set(11_000, 10_000, rt_core);
-    let e = rt_set(1000, 10_000, 9);
+    let e = rt_set(1000, 10_000, 63); // (no core has this number: the kernel runs 16 at most)
     let f = rt_set(1000, 10_000, rt_core); // the failed attempts must not have left a reservation behind
     rt_clear();
     let g = rt_set(8000, 10_000, rt_core);

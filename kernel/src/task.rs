@@ -643,7 +643,8 @@ impl World {
         }
         // (the endpoints on which a receive capability is being revoked: a task asleep in receive on one must not sleep for ever)
         let mut hit = [0u64; ipc::MAX_EPS.div_ceil(64)];
-        for tid in 0..limit() {
+        // (a free slot holds nothing, and a task made after the nodes were marked cannot get a capability under them: the sweep skips it)
+        for tid in (0..limit()).filter(|&t| sched::state(t) != State::Free) {
             let mut t = lock(tid);
             for c in t.caps.iter_mut() {
                 if c.kind != Kind::None && marked.has(c.node as usize) {
@@ -686,7 +687,7 @@ impl World {
 
     /// Does any task still hold a live capability on shared-memory object `id`?
     fn memory_held(id: u16) -> bool {
-        (0..limit()).any(|t| lock(t).caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()))
+        (0..limit()).filter(|&t| sched::state(t) != State::Free).any(|t| lock(t).caps.iter().any(|c| c.kind == Kind::Memory && c.obj == id && c.alive()))
     }
 
     /// Shared memory whose creator is gone is freed when nothing holds it any more.

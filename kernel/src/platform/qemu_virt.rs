@@ -1,4 +1,4 @@
-//! The QEMU `virt` machine: its early devices (`pl011`, `gicv2`, `psci`, the PL031 clock below), its fixed parameters and its test-harness switches.
+//! The QEMU `virt` machine: its early devices (`pl011`, `gicv2` or `gicv3` as the device tree says, `psci`, the PL031 clock below), its fixed parameters and its test-harness switches.
 //! A new machine is a sibling of this file (`platform/<machine>.rs`) selected by a cargo feature in `platform.rs`; the shared kernel never names QEMU.
 //!
 //! The harness switches come from QEMU's documented `fw_cfg`
@@ -9,13 +9,13 @@ use crate::hal::{PowerControl, Rtc};
 use core::ptr::{read_volatile, write_volatile};
 
 mod gicv2;
+mod gicv3;
 mod pl011;
 mod psci;
 
 /// The machine's early devices, as the shared kernel names them (see `hal.rs`).
 pub type Uart = pl011::Pl011;
-pub type Intc = gicv2::GicV2;
-pub type Power = psci::PsciHvc;
+pub type Power = psci::Psci;
 pub type Clock = Pl031;
 
 const FW_CFG: usize = 0x0902_0000;
@@ -69,8 +69,181 @@ fn find_file(name: &[u8]) -> Option<(u16, u32)> {
     None
 }
 
-/// RAM size in bytes if the harness provided one.
+// ---- the device tree -------------------------------------------------------------------------------------------------------------------
+
+use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use metal_fdt::{Conduit, Fdt, Gic};
+
+/// Where firmware put the device tree (x0 at entry); 0 if it did not say.
+static DTB: AtomicUsize = AtomicUsize::new(0);
+/// The most bytes read from it (the QEMU tree is about 10 KiB).
+const DTB_LIMIT: usize = 1 << 20;
+
+/// Boot code: the address firmware gave in x0. Called with the MMU off (a plain store), and again once it is on, because the copy of the image
+/// `kaslr` makes starts with zeroed statics. QEMU loads an ELF kernel without passing the tree in x0 but still puts it at the start of RAM, so
+/// that is tried when x0 does not point at one.
+pub fn set_dtb(addr: usize) {
+    // a tree lies in RAM and starts with its magic number; anything else (no tree, a stray register value) is ignored rather than read
+    let is_tree = |a: usize| {
+        let ok = a % 8 == 0 && (RAM_BASE..RAM_BASE + (1 << 30) - 64).contains(&a);
+        // SAFETY: `a` is an 8-aligned address inside the first GiB of RAM (checked just above); single-byte volatile loads, valid with the MMU off.
+        ok && [0xd0u8, 0x0d, 0xfe, 0xed].iter().enumerate().all(|(i, &m)| unsafe { read_volatile((a + i) as *const u8) } == m)
+    };
+    DTB.store(if is_tree(addr) { addr } else if is_tree(RAM_BASE) { RAM_BASE } else { 0 }, Ordering::Relaxed);
+}
+
+fn dtb_ram() -> Option<(u64, u64)> {
+    let d = DTB.load(Ordering::Relaxed);
+    if d == 0 {
+        return None;
+    }
+    // SAFETY: `set_dtb` accepted `d` as an 8-aligned address inside RAM, and the limit keeps the read inside the first GiB of it; every load is a
+    // single-byte volatile one (see `early_memory`), so it is also safe with the MMU off.
+    unsafe { metal_fdt::early_memory(d as *const u8, DTB_LIMIT.min(RAM_BASE + (1 << 30) - d)) }
+}
+
+/// What the tree says about the machine, kept in plain atomics once read (`init_machine`).
+static NCPUS: AtomicUsize = AtomicUsize::new(0);
+static MPIDRS: [AtomicU64; crate::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
+static CONDUIT_SMC: AtomicU8 = AtomicU8::new(0);
+/// 2 or 3: the interrupt controller's version (2 until the tree says otherwise).
+static GIC_VERSION: AtomicU8 = AtomicU8::new(2);
+
+fn read_machine() -> Option<metal_fdt::Machine> {
+    let d = DTB.load(Ordering::Relaxed);
+    if d == 0 {
+        return None;
+    }
+    let max = RAM_BASE + (1 << 30) - d;
+    // SAFETY: as in `dtb_ram`; the MMU is on here, so ordinary loads are fine. The header's own size field bounds the slice, `Fdt::new` checks it.
+    let head = unsafe { core::slice::from_raw_parts(d as *const u8, 8.min(max)) };
+    let total = u32::from_be_bytes(head.get(4..8)?.try_into().ok()?) as usize;
+    // SAFETY: `total` bytes at `d` are inside the first GiB of RAM (checked against `max`), and nothing writes the tree.
+    let blob = unsafe { core::slice::from_raw_parts(d as *const u8, total.min(max).min(DTB_LIMIT)) };
+    Some(metal_fdt::machine(&Fdt::new(blob)?))
+}
+
+/// Read the tree (MMU on, boot core, before anything that needs the interrupt controller or the core list): sets the controller's version and
+/// addresses, the number of cores and their MPIDRs (the boot core first), and how firmware is called.
+pub fn init_machine() {
+    let boot: u64;
+    // SAFETY: reads MPIDR_EL1, a read-only register; no memory is accessed.
+    unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) boot, options(nomem, nostack)) };
+    let boot = boot & 0xFF_00FF_FFFF;
+    MPIDRS[0].store(boot, Ordering::Relaxed);
+    NCPUS.store(0, Ordering::Relaxed);
+    let Some(m) = read_machine() else { return };
+    match m.gic {
+        Some(Gic::V2 { dist, cpu }) => {
+            gicv2::GICD_BASE.store(dist as usize, Ordering::Relaxed);
+            gicv2::GICC_BASE.store(cpu as usize, Ordering::Relaxed);
+        }
+        Some(Gic::V3 { dist, redist, redist_size }) => {
+            GIC_VERSION.store(3, Ordering::Relaxed);
+            gicv3::GICD.store(dist as usize, Ordering::Relaxed);
+            gicv3::GICR.store(redist as usize, Ordering::Relaxed);
+            gicv3::GICR_SIZE.store(redist_size as usize, Ordering::Relaxed);
+        }
+        None => {}
+    }
+    CONDUIT_SMC.store((m.conduit == Some(Conduit::Smc)) as u8, Ordering::Relaxed);
+    // the cores: this one first (it is core 0 whatever its place in the tree), then the rest in tree order
+    let mut n = 1;
+    for &c in &m.cpus[..m.ncpus] {
+        if c != boot && n < crate::smp::MAX_CPUS {
+            MPIDRS[n].store(c, Ordering::Relaxed);
+            n += 1;
+        }
+    }
+    NCPUS.store(if m.ncpus == 0 { 0 } else { n }, Ordering::Relaxed);
+}
+
+/// How many cores the machine has, as far as the tree says (at most `MAX_CPUS`); `None` if it did not say.
+pub fn cpu_count() -> Option<usize> {
+    Some(NCPUS.load(Ordering::Relaxed)).filter(|&n| n != 0)
+}
+
+/// Core `core`'s MPIDR affinity (the number PSCI and the interrupt controller name it by). Without a tree a core's number is its Aff0.
+pub fn cpu_mpidr(core: usize) -> u64 {
+    if NCPUS.load(Ordering::Relaxed) == 0 && core != 0 {
+        return core as u64;
+    }
+    MPIDRS[core].load(Ordering::Relaxed)
+}
+
+/// The memory the device tree occupies, which nothing may be placed over until it has been read: (start, bytes), or `None` without one.
+/// (Readable with the MMU off: single-byte volatile loads.)
+pub fn dtb_span() -> Option<(usize, usize)> {
+    let d = DTB.load(Ordering::Relaxed);
+    if d == 0 {
+        return None;
+    }
+    // SAFETY: `set_dtb` accepted `d`: 8-aligned, inside RAM, with the magic number in its first four bytes; the size field is the next four.
+    let size = (4..8).fold(0usize, |v, i| v << 8 | unsafe { read_volatile((d + i) as *const u8) } as usize);
+    Some((d, size.clamp(64, DTB_LIMIT)))
+}
+
+/// Where the device tree was found (0: none).
+pub fn dtb_addr() -> usize {
+    DTB.load(Ordering::Relaxed)
+}
+
+pub fn intc_name() -> &'static str {
+    if GIC_VERSION.load(Ordering::Relaxed) == 3 {
+        "GICv3"
+    } else {
+        "GICv2"
+    }
+}
+
+/// The interrupt controller: whichever the tree described (GICv2 if it did not), chosen at run time by one load.
+pub struct Intc;
+
+macro_rules! gic_call {
+    ($f:ident($($a:expr),*)) => {
+        if GIC_VERSION.load(Ordering::Relaxed) == 3 { gicv3::GicV3::$f($($a),*) } else { gicv2::GicV2::$f($($a),*) }
+    };
+}
+
+impl crate::hal::IrqController for Intc {
+    fn init_dist() {
+        gic_call!(init_dist())
+    }
+    fn init_cpu() {
+        gic_call!(init_cpu())
+    }
+    fn send_sgi_to(mask: u32, id: u32) {
+        gic_call!(send_sgi_to(mask, id))
+    }
+    fn enable(id: u32) {
+        gic_call!(enable(id))
+    }
+    fn disable(id: u32) {
+        gic_call!(disable(id))
+    }
+    fn configure_spi(id: u32) {
+        gic_call!(configure_spi(id))
+    }
+    fn set_urgent(id: u32) {
+        gic_call!(set_urgent(id))
+    }
+    fn set_edge(id: u32) {
+        gic_call!(set_edge(id))
+    }
+    fn ack() -> u32 {
+        gic_call!(ack())
+    }
+    fn eoi(iar: u32) {
+        gic_call!(eoi(iar))
+    }
+}
+
+/// RAM size in bytes: the harness's number if it gave one, else the tree's.
 pub fn ram_size() -> Option<u64> {
+    harness_ram_size().or_else(|| dtb_ram().filter(|&(base, _)| base == RAM_BASE as u64).map(|(_, size)| size))
+}
+
+fn harness_ram_size() -> Option<u64> {
     if !present() {
         return None;
     }
@@ -214,7 +387,6 @@ pub const LINK_BASE: usize = 0x4008_0000;
 pub const RAM_UNMAPPED_BELOW: usize = 0;
 /// The first banner line ends with this; the interrupt controller's and the entropy source's names for the log.
 pub const BANNER_SUFFIX: &str = "";
-pub const INTC_NAME: &str = "GICv2";
 pub const SEED_SOURCE: &str = "fw_cfg ";
 /// Whether the machine has the SMMUv3 the kernel confines devices with.
 pub const HAS_SMMU: bool = true;

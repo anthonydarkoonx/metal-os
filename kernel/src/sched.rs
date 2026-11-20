@@ -196,6 +196,9 @@ pub fn doom(tid: usize, why: Doom) {
 
 pub fn set_irq_deadline(tid: usize, deadline: u64) {
     IRQ_DEADLINE[tid].store(deadline, Ordering::SeqCst);
+    if deadline != 0 {
+        NEXT_TIMED.fetch_min(deadline, Ordering::SeqCst);
+    }
 }
 
 /// Has `tid` been condemned and not yet killed?
@@ -219,6 +222,11 @@ pub fn state(tid: usize) -> State {
 /// core that missed the lagging bit while going to sleep is woken by the interrupt.)
 static READY: TaskMask = TaskMask::new();
 static TIMED: TaskMask = TaskMask::new();
+/// Tasks the machine is not finished with: runnable, sleeping, waiting for an interrupt, or waiting on a ring (`alive`).
+static LIVE: TaskMask = TaskMask::new();
+/// A time no timed task is due before (`u64::MAX`: none waits for a time): `wake_sleepers` looks at no task until the clock gets there. Lowered by whoever starts
+/// a timed wait, recomputed by the scan.
+static NEXT_TIMED: AtomicU64 = AtomicU64::new(u64::MAX);
 
 /// One bit per task slot, in as many words as `MAX_TASKS` needs (the scheduler's hints and the real-time set live in these).
 const TASK_WORDS: usize = task::MAX_TASKS.div_ceil(64);
@@ -287,10 +295,26 @@ fn publish(tid: usize) {
             State::WordWait(d) if d != 0 => (false, true),
             _ => (false, false),
         };
+        let live = ready || timed || matches!(s, State::RingWait(_));
+        match s {
+            State::Sleep(d) => {
+                NEXT_TIMED.fetch_min(d, Ordering::SeqCst);
+            }
+            State::WordWait(d) if d != 0 => {
+                NEXT_TIMED.fetch_min(d, Ordering::SeqCst);
+            }
+            State::IrqWait(_) => {
+                let d = IRQ_DEADLINE[tid].load(Ordering::SeqCst);
+                if d != 0 {
+                    NEXT_TIMED.fetch_min(d, Ordering::SeqCst);
+                }
+            }
+            _ => {}
+        }
         // (one word each now: add before removing, so that a task changing from one kind of wait to the other is
         // never in neither mask, which a core deciding how long to sleep could take for "nothing to wake for")
         for add in [true, false] {
-            for (mask, want) in [(&READY, ready), (&TIMED, timed)] {
+            for (mask, want) in [(&READY, ready), (&TIMED, timed), (&LIVE, live)] {
                 if want == add && mask.has(tid) != want {
                     mask.set(tid, want);
                 }
@@ -675,20 +699,28 @@ pub fn core_stats(core: usize) -> (u32, u64) {
 
 // ---- placement ------------------------------------------------------------------------------
 
-/// Mock 2+2 DynamIQ-style topology (QEMU gives us identical cores). Boot-time only.
+/// The placement table: each core's kind (`core_kind`: a mock DynamIQ-style topology, QEMU gives us identical cores) and the weight of the tasks placed on it.
 ///
 /// The loads change when tasks are created on one core and die on another, so the table is behind a lock (it was a
 /// lock-free global that two cores could write at once).
-static CORES: SpinLock<[Core; 4]> = SpinLock::new([
-    Core { kind: CoreKind::Little, load: 0, throttled: false },
-    Core { kind: CoreKind::Little, load: 0, throttled: false },
-    Core { kind: CoreKind::Big, load: 0, throttled: false },
-    Core { kind: CoreKind::Big, load: 0, throttled: false },
-]);
+static CORES: SpinLock<[Core; MAX_CPUS]> = SpinLock::new([const { Core { kind: CoreKind::Big, load: 0, throttled: false } }; MAX_CPUS]);
+
+/// The cores a task may be placed on: all the machine has (4 if its device tree did not say).
+fn placeable() -> usize {
+    crate::platform::cpu_count().unwrap_or(4).min(MAX_CPUS)
+}
+
+/// Give the placement table its kinds; once at boot.
+pub fn init_placement() {
+    let mut cores = CORES.lock(R_RT);
+    for (c, core) in cores.iter_mut().enumerate() {
+        core.kind = core_kind(c);
+    }
+}
 
 pub fn assign_core(class: Class) -> usize {
     let mut cores = CORES.lock(R_RT);
-    let c = place(&*cores, class).unwrap_or(0);
+    let c = place(&cores[..placeable()], class).unwrap_or(0);
     cores[c].load += match class {
         Class::Background => 10,
         Class::Interactive => 25,
@@ -714,12 +746,12 @@ pub fn home_core(tid: usize) -> usize {
 }
 
 pub fn core_kind(core: usize) -> CoreKind {
-    // (the topology is fixed: cores 0 and 1 are the little ones, 2 and 3 the big ones)
+    // (the topology is fixed: cores 0 and 1 are the little ones, all the others the big ones)
     if core < 2 { CoreKind::Little } else { CoreKind::Big }
 }
 
 fn big_online() -> bool {
-    smp::online_mask() & (1 << 2 | 1 << 3) != 0
+    smp::online_mask() & !0b11 != 0
 }
 
 /// A new task (or a new instance of one): where it starts, with no history.
@@ -1033,23 +1065,42 @@ fn starved(i: usize, now: u64) -> bool {
 }
 
 fn wake_sleepers(now: u64) {
+    if now < NEXT_TIMED.load(Ordering::SeqCst) {
+        return; // nobody is due yet: no need to look at the sleepers at all
+    }
+    // (starting over: a wait begun while this scan runs lowers the time itself; the ones the scan sees and leaves lower it to theirs)
+    NEXT_TIMED.store(u64::MAX, Ordering::SeqCst);
+    let mut next = u64::MAX;
     for i in timed_mask().iter() {
         match state(i) {
-            State::Sleep(deadline) if deadline <= now => {
-                if wake_if(i, State::Sleep(deadline)) {
-                    SLOT[i].due_at.store(deadline, Ordering::Relaxed); // it was due then, not when we noticed
+            State::Sleep(deadline) => {
+                if deadline <= now {
+                    if wake_if(i, State::Sleep(deadline)) {
+                        SLOT[i].due_at.store(deadline, Ordering::Relaxed); // it was due then, not when we noticed
+                    }
+                } else {
+                    next = next.min(deadline);
                 }
             }
             State::IrqWait(idx) => {
                 let d = IRQ_DEADLINE[i].load(Ordering::SeqCst);
                 if d != 0 && d <= now {
                     crate::irq::expire(i, idx);
+                } else if d != 0 {
+                    next = next.min(d);
                 }
             }
-            State::WordWait(d) if d != 0 && d <= now => crate::thread::expire(i, d),
+            State::WordWait(d) if d != 0 => {
+                if d <= now {
+                    crate::thread::expire(i, d);
+                } else {
+                    next = next.min(d);
+                }
+            }
             _ => {}
         }
     }
+    NEXT_TIMED.fetch_min(next, Ordering::SeqCst);
 }
 
 /// Best candidate (not in `skip`) for `core`: real-time work first (earliest deadline), then tasks
@@ -1095,8 +1146,8 @@ fn best_candidate(core: usize, cur: usize, now: u64, skip: &TaskSet) -> Option<u
 }
 
 fn alive() -> bool {
-    (0..task::limit()).any(|i| matches!(state(i), State::Ready | State::Sleep(_) | State::IrqWait(_) | State::RingWait(_)))
-        || crate::ring::async_ops_outstanding()
+    // (the mask is a hint that may lag a state change, but never leaves a task in none of its masks while it changes between kinds of wait)
+    LIVE.load(Ordering::SeqCst).any() || crate::ring::async_ops_outstanding()
 }
 
 /// May `core` take (or be interrupted for) the ready task `i`?

@@ -54,7 +54,7 @@ static KERNEL_L2: Global<Table> = Global::new(Table([0; 512]));
 static KERNEL_L1_HI: Global<Table> = Global::new(Table([0; 512]));
 static KERNEL_L2_HI: Global<Table> = Global::new(Table([0; 512]));
 /// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 5 MiB with its stacks, at any page: at most four blocks).
-const KERNEL_L3_N: usize = 4;
+const KERNEL_L3_N: usize = 6;
 static KERNEL_L3: Global<[Table; KERNEL_L3_N]> = Global::new([const { Table([0; 512]) }; KERNEL_L3_N]);
 
 /// Per core: 64 KiB of kernel stack and an unmapped guard below it (boot.S and linker.ld use the same numbers).

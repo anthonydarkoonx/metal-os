@@ -1,4 +1,4 @@
-//! Metal OS userspace image. One binary, four roles selected by the role id
+//! Metallium-OS userspace image. One binary, four roles selected by the role id
 //! the kernel passes in x0. Every task gets its own private copy of the image.
 #![no_std]
 #![no_main]

@@ -95,7 +95,7 @@ fn lorem_prefix(n: usize) -> Vec<u8> {
     let mut v = Vec::new();
     let mut i = 0;
     while v.len() < n {
-        v.extend_from_slice(format!("Metal OS system image, line {i:05}: the quick brown fox\n").as_bytes());
+        v.extend_from_slice(format!("Metallium-OS system image, line {i:05}: the quick brown fox\n").as_bytes());
         i += 1;
     }
     v.truncate(n);
@@ -214,7 +214,7 @@ impl Work {
     }
 
     fn rofs(&mut self) -> bool {
-        let hello = self.v.read_file("/system/hello.txt").map_or(false, |b| b == b"Hello from the Metal OS system image!\n");
+        let hello = self.v.read_file("/system/hello.txt").map_or(false, |b| b == b"Hello from the Metallium-OS system image!\n");
         let lorem = self.v.open("/system/usr/share/lorem.txt", O_READ).ok().map_or(false, |fd| {
             let mut buf = alloc::vec![0u8; 4096];
             let n = self.v.read(fd, &mut buf);

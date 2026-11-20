@@ -1,4 +1,4 @@
-//! The smallest runtime a Metal OS program needs: system calls, console output, and the entry/exit glue.
+//! The smallest runtime a Metallium-OS program needs: system calls, console output, and the entry/exit glue.
 //!
 //! A program is a flat image whose 32-byte header the linker script writes (see ../link.ld); the kernel starts it at
 //! the first instruction after the header with x0 = 32 (the "program" role), x1 = the argument its parent gave, x2 =

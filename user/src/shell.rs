@@ -203,7 +203,7 @@ impl Shell {
         let f = &self.facts;
         let tasks = sysinfo(1);
         let rows = [
-            ("KERNEL", String::from("Metal OS 0.1 aarch64 microkernel")),
+            ("KERNEL", String::from("Metallium-OS 0.1 aarch64 microkernel")),
             ("UPTIME", info::uptime(f)),
             ("CPU", format!("{}x {}", f.ncpus, info::cpu_name(f.midr))),
             ("GPU", format!("virtio-gpu {}x{} (2D)", f.gpu_w, f.gpu_h)),

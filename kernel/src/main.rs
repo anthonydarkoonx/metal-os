@@ -1,4 +1,4 @@
-//! Metal OS microkernel entry point.
+//! Metallium-OS microkernel entry point.
 #![no_std]
 #![no_main]
 
@@ -137,7 +137,7 @@ extern "C" fn kmain(dtb: usize) -> ! {
     let ram = mem::usable_ram(ram);
     mmu::init(ram);
     platform::init_machine(); // (device tree: interrupt controller, cores, firmware conduit)
-    kprintln!("Metal OS 0.1 (aarch64, microkernel) booting{}", platform::BANNER_SUFFIX);
+    kprintln!("Metallium-OS 0.1 (aarch64, microkernel) booting{}", platform::BANNER_SUFFIX);
     match platform::cpu_count() {
         Some(n) => kprintln!("[machine] device tree at {:#x}: {n} cores, {}", platform::dtb_addr(), platform::intc_name()),
         None => kprintln!("[machine] no device tree (x0 = {dtb:#x}): cores found by asking the firmware, {}", platform::intc_name()),

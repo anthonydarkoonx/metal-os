@@ -1,4 +1,4 @@
-# Metal OS (prototype)
+# Metallium-OS (prototype)
 
 A Rust `no_std` AArch64 microkernel that boots on QEMU `virt` (1-4 cores), with userspace tasks, a
 capability/IPC syscall ABI with async rings, fault-isolated restartable driver and filesystem
@@ -230,7 +230,7 @@ tasks 500 times through one word, time out waits, crash and kill programs whose 
 through the shared session, start 150 threads in a row and check that every frame and capability node comes back.
 
 ## The std-like layer
-`programs/src/` (the library `metal_programs`) is what a Metal OS program links: a native API shaped like Rust's `std` where that
+`programs/src/` (the library `metal_programs`) is what a Metallium-OS program links: a native API shaped like Rust's `std` where that
 fits, with no POSIX in it. `heap` is the allocator (a coalescing free list over `HEAP_GROW`), so `Vec`, `String`, `Box`,
 `BTreeMap` and `Arc` work; `io` has `Read`/`Write`, `stdin`/`stdout`/`stderr` (standard error is its own operation on the
 console endpoint) and `print!`/`println!`/`eprintln!`; `fs` has `File`, `OpenOptions`, `read`/`write`, `metadata`,
@@ -458,7 +458,7 @@ VFS server); beyond its screen it holds three capabilities: the keyboard driver,
 that page. What you see after boot:
 
     METAL OS
-    KERNEL   Metal OS 0.1 aarch64 microkernel
+    KERNEL   Metallium-OS 0.1 aarch64 microkernel
     UPTIME   0h 0m 4s
     CPU      4x Cortex-A72           <- MIDR_EL1, through the SYSINFO syscall
     GPU      virtio-gpu 640x480 (2D)

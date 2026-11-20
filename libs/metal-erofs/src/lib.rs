@@ -311,7 +311,7 @@ mod tests {
         put(&mut img, 1280, &compact(2, S_IFDIR | 0o755, root.len() as u32, 0));
         put(&mut img, 1280 + 32, &root);
         // hello.txt (nid 64 @2048), inline
-        let hello = b"Hello from Metal OS EROFS!";
+        let hello = b"Hello from Metallium-OS EROFS!";
         put(&mut img, 2048, &compact(2, S_IFREG | 0o644, hello.len() as u32, 0));
         put(&mut img, 2048 + 32, hello);
         // sub (nid 80 @2560)
@@ -336,7 +336,7 @@ mod tests {
         let h = fs.lookup("/hello.txt").unwrap();
         let mut b = [0u8; 64];
         let n = fs.read(&h, 0, &mut b).unwrap();
-        assert_eq!(&b[..n], b"Hello from Metal OS EROFS!");
+        assert_eq!(&b[..n], b"Hello from Metallium-OS EROFS!");
 
         let i = fs.lookup("sub/inner.txt").unwrap();
         let n = fs.read(&i, 0, &mut b).unwrap();

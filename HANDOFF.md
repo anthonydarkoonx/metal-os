@@ -1,7 +1,7 @@
-# Metal OS handoff (rewritten 2026-11-16)
+# Metallium-OS handoff (rewritten 2026-11-16)
 
 ## Where things stand
-Metal OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C board port lives in the separate GPL-2.0-only repository `metal-os-rock3c` (formerly `rock 3c test/`; see its `README.md`).
+Metallium-OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C board port lives in the separate GPL-2.0-only repository `metal-os-rock3c` (formerly `rock 3c test/`; see its `README.md`).
 **There is no window system in the tree.** The OS is meant to be paired with a separate window manager or desktop environment (see `docs/DESKTOP-INTERFACE.md`).
 **What the screen shows now:** `user/src/screen.rs` is a stub: a backdrop with the terminal (`user/src/shell.rs`, `console.rs`, drawn with the bitmap font in
 `libs/metal-gfx`) centred on it, keyboard input only. `make run-window` boots to it (checked by screenshot on QEMU).
@@ -11,7 +11,7 @@ Metal OS is a Rust `no_std` AArch64 microkernel (QEMU `virt`; a ROCK 3C board po
 **Desktop seam (2026-11-17):** `make run-window DESKTOP=<path to a desktop repo>` links that repo's `metal-desktop-boot` into the screen task (`user/src/screen.rs`, `#[cfg(desktop)]`) and puts its packages in the image, installed by default (`/system/etc/program-defaults`, `role = desktop`); see `docs/DESKTOP-INTERFACE.md`. Default builds are unchanged. With `../metal-os-desktop` the compositor, taskbar and Start menu boot on QEMU; the other desktop programs are not packaged yet.
 **Display endpoint:** the display endpoint that `progmgr` still hands to programs with the `window` permission (`docs/PROGRAMS.md`, `metal-map`'s permission list).
 **Memory safety (2026-11-17):** see `docs/BOARD-SYNC.md` and the git log. Miri passes on all the libs' tests; the long ones run reduced under Miri (`cfg!(miri)`: strided byte sweeps, 2 RFC 8032 vectors, 2,000 loader images; native counts unchanged). Deny-level lints `unsafe_op_in_unsafe_fn` and `clippy::undocumented_unsafe_blocks` apply to every crate (`make clippy`). Every `unsafe` site has a SAFETY comment; the kernel's lock-free globals are borrow-checked at run time (`kernel/src/sync.rs`); the board runs the new kernel (self-test 88/13/1, same as before).
-**Repository:** https://github.com/anthonydarkoonx/metal-os (public; disk images, signing keys and build output are not in it; the board port is https://github.com/anthonydarkoonx/metal-os-rock3c).
+**Repository:** https://github.com/anthonydarkoonx/metallium-os (public; disk images, signing keys and build output are not in it; the board port is https://github.com/anthonydarkoonx/metal-os-rock3c).
 **Rules from the user:** OS changes only in the general tree, the board folder holds drivers only (`docs/BOARD-SYNC.md` logs every change); say "program", not "app";
 do not add programs nobody asked for; run only fast host tests unless asked.
 

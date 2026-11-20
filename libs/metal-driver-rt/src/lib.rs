@@ -1,4 +1,4 @@
-//! The runtime every Metal OS user-space task is built on, and what the device drivers share: the system-call layer (`svc` and its wrappers), the console
+//! The runtime every Metallium-OS user-space task is built on, and what the device drivers share: the system-call layer (`svc` and its wrappers), the console
 //! (`println!`), the mapping layer (boot-time services name their mappings by handle and the kernel chooses the address), virtio, DMA cache maintenance
 //! and the protocols between drivers and their clients (`proto`).
 //!

@@ -1,4 +1,4 @@
-// Metal OS boot code and exception vectors (AArch64, QEMU virt).
+// Metallium-OS boot code and exception vectors (AArch64, QEMU virt).
 
 // Stack, zeroed .bss, FP enabled, exception vectors: for the image at the address it now runs at.
 .macro EARLY_SETUP

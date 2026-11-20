@@ -71,7 +71,7 @@ def build(tree):
     return bytes(img)
 
 
-LOREM = "".join("Metal OS system image, line %05d: the quick brown fox\n" % i for i in range(4000)).encode()
+LOREM = "".join("Metallium-OS system image, line %05d: the quick brown fox\n" % i for i in range(4000)).encode()
 
 
 def write_tree(tree, root):
@@ -98,8 +98,8 @@ def programs():
 
 def system_tree():
     tree = {
-        "hello.txt": b"Hello from the Metal OS system image!\n",
-        "etc": {"os-release": b"NAME=MetalOS\nVERSION=0.1\n"},
+        "hello.txt": b"Hello from the Metallium-OS system image!\n",
+        "etc": {"os-release": b"NAME=Metallium-OS\nVERSION=0.1\n"},
         "bin": {"blob.bin": bytes((i * 7) % 251 for i in range(9000))},
         # compressible: exercises the LZ4 path when the image is built with mkfs.erofs -zlz4hc
         "usr": {"share": {"lorem.txt": LOREM}},

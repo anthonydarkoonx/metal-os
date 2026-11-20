@@ -1,6 +1,6 @@
 # Provenance and licensing
 
-Metal OS is licensed **Apache-2.0 OR MIT**. The rule for this repository: no code copied from, or
+Metallium-OS is licensed **Apache-2.0 OR MIT**. The rule for this repository: no code copied from, or
 directly derived from, GPL (or other copyleft) sources. Everything is written from public
 specifications, hardware documentation, or measurements of file formats.
 

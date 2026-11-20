@@ -171,7 +171,7 @@ pub fn get(url: &Url, poll: &mut dyn FnMut() -> bool) -> Result<Response, String
         }
         sleep_us(5_000);
     }
-    let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: metal-os\r\nConnection: close\r\n\r\n", url.path, url.host);
+    let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\nUser-Agent: metallium-os\r\nConnection: close\r\n\r\n", url.path, url.host);
     let mut sent = 0;
     while sent < req.len() {
         let n = (req.len() - sent).min(MAXIO);

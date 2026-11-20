@@ -1338,7 +1338,7 @@ pub fn program() -> ! {
 
     let os = v.read_file("/system/etc/os-release");
     println!("[program] TEST read /system/etc/os-release ({}): {}",
-        os.as_ref().map_or(0, |b| b.len()), verdict(os.map_or(false, |b| b.starts_with(b"NAME=MetalOS"))));
+        os.as_ref().map_or(0, |b| b.len()), verdict(os.map_or(false, |b| b.starts_with(b"NAME=Metallium-OS"))));
 
     let mut log = Vec::new();
     for i in 0..3 {
@@ -1433,14 +1433,14 @@ pub fn vfs_tests() {
 
     let h = v.read_file("/system/hello.txt");
     println!("[client] TEST VFS read /system/hello.txt: {}",
-        verdict(h.map_or(false, |b| b == b"Hello from the Metal OS system image!\n")));
+        verdict(h.map_or(false, |b| b == b"Hello from the Metallium-OS system image!\n")));
 
     let blob = v.read_file("/system/bin/blob.bin");
     println!("[client] TEST VFS read 9000-byte file via fd: {}",
         verdict(blob.map_or(false, |b| b.len() == 9000 && b.iter().enumerate().all(|(i, &x)| x == ((i * 7) % 251) as u8))));
 
     // a 224 KB text file: stored LZ4-compressed on the system partition
-    let lorem: Vec<u8> = (0..4000).flat_map(|i| alloc::format!("Metal OS system image, line {i:05}: the quick brown fox\n").into_bytes()).collect();
+    let lorem: Vec<u8> = (0..4000).flat_map(|i| alloc::format!("Metallium-OS system image, line {i:05}: the quick brown fox\n").into_bytes()).collect();
     let got = v.read_file("/system/usr/share/lorem.txt");
     println!("[client] TEST VFS read {} KB file from the compressed system image ({} bytes read): {}", lorem.len() / 1000,
         got.as_ref().map_or(0, |b| b.len()), verdict(got.map_or(false, |b| b == lorem)));

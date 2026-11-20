@@ -1,4 +1,4 @@
-# Porting Metal OS to single-board computers: what is QEMU-specific
+# Porting Metallium-OS to single-board computers: what is QEMU-specific
 
 An audit of 2026-11-13 (read-only: nothing was changed or run on a board). Everything here comes from reading the sources; facts about real boards are
 from memory and **must be checked against each board's documentation** before relying on them.

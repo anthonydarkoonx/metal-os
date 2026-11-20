@@ -1,6 +1,6 @@
 //! The kernel's *frame*: the safe API over the few things that need `unsafe`.
 //!
-//! Metal OS follows the framekernel layering (as in Asterinas): code that touches raw memory or CPU
+//! Metallium-OS follows the framekernel layering (as in Asterinas): code that touches raw memory or CPU
 //! registers lives in the *framework* modules (this one, `mmu`, `smmu`, `gic`, `trap`, `smp`, `sync`,
 //! `timer`, `cache`, `kaslr`, `boot.S`, device probing), and every other kernel module carries
 //! `#![forbid(unsafe_code)]`, so the compiler guarantees it cannot cause memory unsafety by itself.

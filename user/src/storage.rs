@@ -350,7 +350,7 @@ pub fn storage_tests() {
 
     // --- EROFS: read-only system image ---
     let (st, n, size) = rofs_read("/hello.txt", 0, 100);
-    let want = b"Hello from the Metal OS system image!\n";
+    let want = b"Hello from the Metallium-OS system image!\n";
     let ok = st == 0 && n as usize == want.len() && size == n && &cshm(C_ROFS_SHM)[DATA_OFF..DATA_OFF + want.len()] == want;
     println!("[client] TEST EROFS read /hello.txt ({n} bytes): {}", verdict(ok));
 

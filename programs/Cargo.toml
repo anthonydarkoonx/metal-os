@@ -3,7 +3,7 @@ name = "metal-programs"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
-description = "Programs that run on Metal OS as ordinary tasks (started with SPAWN from images in the system partition)"
+description = "Programs that run on Metallium-OS as ordinary tasks (started with SPAWN from images in the system partition)"
 
 [workspace]
 

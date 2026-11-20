@@ -954,7 +954,7 @@ pub fn tests() {
     // ---- files: a program reaches the VFS only through the session its parent asked for ---------------------------------
     let t = Req::new().fs().args(b"cat\0/system/hello.txt\0").go(&cat);
     let n = if t > 0 { wait(t, false) } else { t };
-    println!("[client] TEST a program started with file access reads a file through the VFS (cat printed {n} bytes of /system/hello.txt): {}", verdict(n == 38));
+    println!("[client] TEST a program started with file access reads a file through the VFS (cat printed {n} bytes of /system/hello.txt): {}", verdict(n == 42));
     let t = Req::new().args(b"cat\0/system/hello.txt\0").go(&cat);
     let code = if t > 0 { wait(t, false) } else { t };
     println!("[client] TEST without file access the same program finds no file-system capability (exit code {code}): {}", verdict(code == 1002));

@@ -328,7 +328,7 @@ mod tests {
             seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
             (seed >> 24) as u8
         };
-        let lorem: Vec<u8> = (0..).flat_map(|i: usize| format!("Metal OS system image, line {i:05}: the quick brown fox\n").into_bytes()).take(PAGE).collect();
+        let lorem: Vec<u8> = (0..).flat_map(|i: usize| format!("Metallium-OS system image, line {i:05}: the quick brown fox\n").into_bytes()).take(PAGE).collect();
         let source: Vec<u8> = (0..).flat_map(|i: usize| format!("    let value_{} = compute(state, {});\n", i % 13, i * 7).into_bytes()).take(PAGE).collect();
         let pages = [
             mk("zeros", |_| 0),

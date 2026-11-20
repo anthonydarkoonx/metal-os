@@ -1,4 +1,4 @@
-# Metal OS userspace ABI (version 1)
+# Metallium-OS userspace ABI (version 1)
 
 What a program can rely on. Everything here is tested (`make test`); the kernel is the reference.
 

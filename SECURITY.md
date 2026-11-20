@@ -1,4 +1,4 @@
-# Metal OS kernel security audit
+# Metallium-OS kernel security audit
 
 Date: 2026-11-18. Commit audited: `6406422`. Auditor: Claude (code review).
 

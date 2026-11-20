@@ -1,6 +1,6 @@
 # Desktop interface
 
-Metal OS has no desktop in its tree. A desktop environment is a separate repository that the OS image can be built with. Without
+Metallium-OS has no desktop in its tree. A desktop environment is a separate repository that the OS image can be built with. Without
 one the screen task (role 13, `user/src/screen.rs`) is the built-in terminal console.
 
 ## Using one

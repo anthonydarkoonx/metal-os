@@ -30,7 +30,7 @@ program!("fetch", |c| -> u64 {
             return 2;
         }
     };
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: metal-os\r\nConnection: close\r\n\r\n");
+    let request = format!("GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: metallium-os\r\nConnection: close\r\n\r\n");
     if s.write_all(request.as_bytes()).is_err() {
         return 3;
     }

@@ -69,7 +69,7 @@ DESKTOP ?=
 ifneq ($(DESKTOP),)
 DESKTOP_DIR := $(abspath $(DESKTOP))
 DESKTOP_OUT := $(DESKTOP_DIR)/target-metal-os/$(TARGET)/release
-DESKTOP_REPO := "https://github.com/anthonydarkoonx/metal-os"
+DESKTOP_REPO := "https://github.com/anthonydarkoonx/metallium-os"
 # (the desktop's dependencies sit in `deps/` or, with newer cargo, in `build/<crate>/<hash>/out/`: every such directory is searched)
 USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metal_desktop_boot=$(DESKTOP_OUT)/libmetal_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
 # The desktop's programs: its `os/` workspace builds them as position-independent programs; they are signed and put in the system image by
@@ -206,7 +206,7 @@ qemu-test: kernel disk
 	 grep -q "TEST LFS sync across a block-driver crash: PASS" build.log && \
 	 grep -q "TEST VFS read /system/hello.txt: PASS" build.log && \
 	 grep -q "TEST VFS read 9000-byte file via fd: PASS" build.log && \
-	 grep -q "TEST VFS read 220 KB file from the compressed system image.*PASS" build.log && \
+	 grep -q "TEST VFS read 236 KB file from the compressed system image.*PASS" build.log && \
 	 grep -q "TEST VFS list / and /system.*PASS" build.log && \
 	 grep -q "TEST VFS /system is read-only.*PASS" build.log && \
 	 grep -q "TEST VFS create+write+read /data/docs/note.txt.*PASS" build.log && \
@@ -505,7 +505,7 @@ run-window: user disk
 	$(call KERNEL_IMG,kernel/target-window/$(TARGET)/release/metal-kernel)
 	qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(UI_RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(UI_RAM_MIB) * 1048576 ))) \
 	  -fw_cfg name=opt/metal/interactive,string=1 -display gtk,zoom-to-fit=on -serial vc:900x600 -monitor none -qmp unix:build-window.sock,server,nowait -semihosting $(QEMU_DEV) \
-	  -name "Metal OS" -kernel kernel/target-window/$(TARGET)/release/metal-kernel.img
+	  -name "Metallium-OS" -kernel kernel/target-window/$(TARGET)/release/metal-kernel.img
 
 # A/B evidence for priority inheritance: on one CPU the polling test must pass with it and fail without.
 inherit-ab: user disk

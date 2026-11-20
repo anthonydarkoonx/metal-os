@@ -36,27 +36,48 @@ store keeps only the keys of unlocked domains. A locked home is unreadable *by o
 domain id in `LFS_PUT/GET` (the on-disk block format already carries room in the authenticated data, so a format bump is small); the directory structure of a home must live in
 that home's blocks; an admin who forgets a user's passphrase cannot recover the data (an optional escrow slot, off by default).
 
-## Sessions: one at a time or several
-* **Phase 1: one session at a time.** Login starts it, logout ends it and returns to the greeter. Simplest, and enough for a board with one screen and keyboard.
-* **Phase 2: fast user switching.** Several sessions stay alive; the screen task gives the display and input to the active one (the others keep running, or are suspended if
-  the kernel can freeze a session: a scheduler class change per session). Needs the screen task to multiplex and the input driver to route events by the active session.
+## Decisions (2026-11-20)
+1. **Several sessions at once, switched with Ctrl+Alt+F1..F12.** F1 is the default session's tty (the first login at boot lands there). F2..F12 each show a login prompt until
+   someone logs in on them; a logged-in tty keeps its session alive while another is in front. One live session per user: logging in as a user who already has a session
+   says so and offers to switch to its tty.
+2. **Encryption per user** (each home its own key, opened by that user's passphrase).
+3. **One admin, created at first boot** (the first-boot greeter is a setup screen: name, passphrase, recovery key). More users are created by the admin afterwards.
+4. **Program configuration is per user** (GlieseWM's config and every program's data live under the user's home; `GLIESE_CONF` becomes `~/.config/gliese/gliese.conf`).
 
-## Phases and tests
+## TTYs: what has to change
+Today the desktop is linked into the one screen task, so there can only be one. Several concurrent sessions need a **tty manager** (the screen task keeps this one job)
+and a **desktop per session as its own task**:
+* The tty manager owns the real framebuffer and the input driver. Each tty has a **virtual framebuffer** (a memory object) and speaks the *same protocols* the desktop
+  already uses: it serves `GPU_INFO` / `GPU_FLUSH2` for the tty's virtual display and `INPUT_POLL` / `INPUT_WAIT` for its virtual keyboard and pointer. Only the **active** tty's
+  flushes reach the scanout (inactive ones just update their buffer), and only the active tty receives input. A desktop therefore does not know it is not alone:
+  GlieseWM's `gpu` and `input` slots simply point at the tty manager's endpoints instead of the drivers'.
+* The tty manager reads input first and **intercepts Ctrl+Alt+F1..F12** (like the attention key is today), switches the active tty and flushes its buffer.
+* The **session service** starts, per login, a desktop task (the desktop seam grows a second form: a program entry point with the display/input/framebuffer capabilities,
+  instead of a function linked into the screen task) and the session's program manager. A tty with no session runs the **greeter**, one instance per tty.
+* Costs: memory (a back buffer per tty: 1920x1080 is 8 MiB; allocate lazily, only for ttys in use), and the display's vsync-paced copies are shared.
+* Risk: the desktop contract changes (`metallium_desktop_run` as a task entry point), so GlieseWM and any other desktop need a matching change.
+
+## Recovery
+A forgotten passphrase must not mean a brick, and must not mean the admin can read everyone's files. Options, and what I would do:
+* **No recovery**: strongest, and a forgotten passphrase loses that home for good. Right for a user who opts out.
+* **Admin escrow**: every home key also sealed for the admin. Easy support, but the admin can read all homes and the admin's passphrase becomes the one secret that matters.
+  Rejected as a default.
+* **Recovery key (recommended default)**: at account creation a random recovery key (say 24 words, shown once on screen, to be written down) is sealed into one more
+  slot of that home. It opens that home only. Nobody else holds it, nothing is escrowed, and the user (or the admin acting for them, with the key in hand) can reset the
+  passphrase. A user may decline it at creation (then: no recovery).
+* **Reset without the data**: the admin can always **wipe and recreate** a home (new key, empty files), so a locked-out user gets an account back, never the old data.
+* **The machine volume**: the device secret binds the system data to one chip (a replaced board, a copied card). At first boot the admin also gets a recovery key for the machine
+  volume. Without it a dead board means the system data is gone (the homes are separate, and open with their own passphrases/recovery keys on a rebuilt system).
+First boot therefore shows two things to write down: the admin's home recovery key and the machine recovery key.
+
+## Phases and tests (revised order)
 | Phase | What | Test |
 |---|---|---|
-| 0 | Decide the open questions below | |
-| 1 | Accounts, session service, per-session progmgr, VFS homes, greeter login, one session at a time | two users on QEMU: A cannot list, open or create in B's home (and the VFS refuses `..` and absolute paths); A's programs cannot reach B's tasks; logout leaves no task of the session |
-| 2 | Per-user encryption domains | the marker test of `make volume-test`, per user: B's marker is not readable without B's passphrase even with the machine unlocked; a wrong passphrase for B does not open A's |
-| 3 | Admin model: roles, who may install system-wide, create users, power | a standard user cannot install for others or create users; revoke authority is absent from a standard session |
-| 4 | Fast user switching | two live sessions, the display follows the active one, input only reaches it |
-| 5 | Board: the chip secret for the machine volume (OTP), then the same tests on the ROCK 3C | `fetch` and the volume tests on hardware |
-
-## Open questions (decide before phase 1)
-1. **One session at a time, or fast user switching** (phase 4 now or later)?
-2. **Per-user encryption domains** (recommended) **or one volume key** with the VFS alone enforcing separation (simpler; a user's data is protected from another user only by
-   the OS's own correctness, not by cryptography)?
-3. **Admin model**: one admin created at first boot, or any user can be promoted; is there a **recovery** path (escrow slot, or no recovery by design)?
-4. **Do the desktop (GlieseWM) and its config live per user** (yes in this plan: `~/.config`-style files under the home, `GLIESE_CONF` becomes per user)?
+| 1 | Accounts, session service, one desktop and program manager per session, VFS homes (session-scoped), first-boot setup greeter, one tty | two users (one at a time): A cannot list, open or create in B's home (no `..`, no absolute paths); A's programs cannot reach B's tasks; logout leaves no task of the session |
+| 2 | Per-user encryption domains and recovery keys | per user, the marker test of `make volume-test`: B's marker unreadable without B's key even with the machine unlocked; recovery key opens only its home; wrong key opens nothing |
+| 3 | Tty manager, virtual displays/inputs, Ctrl+Alt+F1..F12, a desktop as a task, concurrent sessions | two live sessions: the display and input follow the active tty; the other keeps running; switching back restores its screen; F-keys never reach the desktop |
+| 4 | Admin model: create/remove users, system-wide installs, power, wipe-and-recreate | a standard user cannot do any of those; revoke authority is absent from a standard session |
+| 5 | Board: the chip secret (OTP) for the machine volume, then the same tests on the ROCK 3C | volume and session tests on hardware |
 
 ## Known dependencies and risks
 * The data store is **small and its directory is one in-memory table** (`Datafs`, scoped programs get 12 entries): homes need a real directory structure, per-user quotas and a

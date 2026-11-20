@@ -335,7 +335,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
                 install(t, tid, 4, Kind::Memory, obj::OBJ_BLK_BUF_CLIENT, R_MAP | R_WRITE);
                 install(t, tid, 5, Kind::Endpoint, ipc::EP_ROFS, R_SEND);
                 install(t, tid, 6, Kind::Memory, obj::OBJ_SHM_ROFS, R_MAP | R_WRITE);
-                install(t, tid, 7, Kind::Endpoint, ipc::EP_LFS, R_SEND);
+                install(t, tid, 7, Kind::Endpoint, ipc::EP_LFS, R_SEND | R_GRANT); // (grant: the conductor hands the data store's endpoint to the session service in `make session-test`)
                 install(t, tid, 8, Kind::Memory, obj::OBJ_SHM_LFS, R_MAP | R_WRITE);
                 install(t, tid, 9, Kind::Endpoint, ipc::EP_VFS, R_SEND);
                 install(t, tid, 10, Kind::Memory, obj::OBJ_SHM_VFS_CLIENT, R_MAP | R_WRITE);

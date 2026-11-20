@@ -60,7 +60,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: session-test table-test greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: session-test-encrypted session-test table-test greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -498,7 +498,7 @@ stack-guard: kernel disk
 	 out31=$$(timeout 90 $(QEMU) -machine virt,gic-version=3,iommu=smmuv3 -smp 32 -fw_cfg name=opt/metallium/stack-overflow-core,string=31 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$out31" | grep -q "kernel stack overflow on core 31 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0, core 1 and core 31 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$out31 / $$outb =="; exit 1; }
 
-test: host-test erofs-check map-check qemu-test qemu-test-encrypted volume-test table-test session-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-many usb-test-noncoherent
+test: host-test erofs-check map-check qemu-test qemu-test-encrypted volume-test table-test session-test session-test-encrypted qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-many usb-test-noncoherent
 
 # Licensing hygiene: the ZSTD constants must equal RFC 8878's tables (needs network once).
 provenance-check:
@@ -578,6 +578,11 @@ table-test: kernel disk
 # Sessions: accounts, logins, homes confined per user (tools/session-test.py)
 session-test: kernel disk
 	@python3 tools/session-test.py '$(QEMU)'
+
+# The same with the machine volume encrypted too (the users' domains on top of the volume's own layer)
+session-test-encrypted: kernel disk
+	@head -c 32 /dev/urandom > build-device-secret.bin
+	@python3 tools/session-test.py '$(QEMU) -fw_cfg name=opt/metallium/device-secret,file=build-device-secret.bin' encrypted; rc=$$?; rm -f build-device-secret.bin; exit $$rc
 
 # The data volume's encryption end to end: one disk booted five times (see tools/volume-test.py)
 volume-test: kernel disk

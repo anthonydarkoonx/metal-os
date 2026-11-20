@@ -110,6 +110,8 @@ pub enum Kind {
     Passphrase = 1,
     /// A secret that belongs to the device (a chip's unique value, say).
     Device = 2,
+    /// A random recovery key written down once (high entropy, so no slow derivation).
+    Recovery = 3,
 }
 
 /// Does this block start a volume header?
@@ -137,6 +139,7 @@ pub fn slot_kind(h: &[u8; HEADER_LEN], i: usize) -> Option<Kind> {
     match h[O_SLOTS + i * SLOT_LEN + S_KIND] {
         1 => Some(Kind::Passphrase),
         2 => Some(Kind::Device),
+        3 => Some(Kind::Recovery),
         _ => None,
     }
 }
@@ -146,9 +149,9 @@ fn kek(kind: Kind, secret: &[u8], salt: &[u8], iterations: u32) -> [u8; KEY_LEN]
     let mut k = [0u8; KEY_LEN];
     match kind {
         Kind::Passphrase => pbkdf2_hmac_sha512(secret, salt, iterations, &mut k),
-        Kind::Device => {
+        Kind::Device | Kind::Recovery => {
             let mut h = Hmac::new(secret);
-            h.update(b"metallium-volume-kek");
+            h.update(if kind == Kind::Recovery { b"metallium-recovery-kek".as_slice() } else { b"metallium-volume-kek".as_slice() });
             h.update(salt);
             k.copy_from_slice(&h.finish()[..KEY_LEN]);
         }
@@ -170,7 +173,7 @@ fn slot_aad(h: &[u8; HEADER_LEN], i: usize, out: &mut [u8; 16 + 1 + 1 + 4 + 32])
 /// must be random. Replaces whatever the slot held.
 pub fn set_slot(h: &mut [u8; HEADER_LEN], i: usize, kind: Kind, secret: &[u8], iterations: u32, salt: [u8; 32], nonce: [u8; 12], volume_key: &[u8; KEY_LEN]) {
     assert!(i < SLOTS);
-    let iterations = if kind == Kind::Device { 1 } else { iterations.max(1) };
+    let iterations = if kind == Kind::Passphrase { iterations.max(1) } else { 1 };
     let base = O_SLOTS + i * SLOT_LEN;
     h[base..base + SLOT_LEN].fill(0);
     h[base + S_KIND] = kind as u8;

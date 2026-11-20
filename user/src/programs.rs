@@ -1401,7 +1401,7 @@ pub fn session_test() {
     let v = Vfs::new(9, 0x8034_0000);
     let img = (0..20).find_map(|_| v.read_file("/system/bin/sessiond").ok().filter(|b| b.len() > 32).or_else(|| { sleep(20); None })).unwrap_or_default();
     let ctl = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64;
-    let rq = Req::new().fs().heap(4096).budget(8000).give_masked(0, ctl as u8, 0b111).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF);
+    let rq = Req::new().fs().heap(4096).budget(8000).give_masked(0, ctl as u8, 0b111).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF).give_masked(4, 7, 0xFFFF); // (its slot 4: the data store, for the account domains; slot 7 is a program's standard output)
     let tid = if img.is_empty() || ctl < 0 { -1 } else { rq.go(&img) };
     println!("[session] sessiond started: task {tid}");
     if tid < 0 {
@@ -1437,8 +1437,12 @@ pub fn session_test() {
     };
     let status = call(ctl, [4, 0, 0]).1;
     println!("[session] TEST a new machine has no accounts: {}", verdict(status[0] == 0));
+    // a marker on the system's side of the disk: the host finds it in the clear (and the users' files not), see tools/session-test.py
+    let _ = v.write_file("/data/system-marker.txt", b"SYSTEM-MARKER-in-the-clear-0123456789");
     let r = act(1, false, 0, "admin", b"admin-passphrase-1");
-    println!("[session] TEST the first account is made (it becomes the administrator): {}", verdict(r[0] == 0 && r[1] == 1));
+    let admin_recovery = [r[1], r[2]];
+    println!("[session] TEST the first account is made (it becomes the administrator, uid 1) and its recovery key is returned: {}", verdict(r[0] & 0xFF == 0 && r[0] >> 8 == 1 && (r[1] != 0 || r[2] != 0)));
+    let _ = admin_recovery;
     let r = act(1, false, 0, "admin", b"another");
     println!("[session] TEST a name that exists cannot be made again: {}", verdict(r[0] == 2));
     let r = act(1, false, 0, "bob", b"bobs-passphrase");
@@ -1452,7 +1456,8 @@ pub fn session_test() {
     println!("[session] TEST the administrator logs in (session {admin_session}): {}", verdict(r[0] == 0 && admin_session != 0));
     let r = act(1, false, admin_session, "alice", b"alices-passphrase");
     let r2 = act(1, false, admin_session, "bob", b"bobs-passphrase");
-    println!("[session] TEST the administrator's session makes two more accounts: {}", verdict(r[0] == 0 && r2[0] == 0));
+    let alice_recovery = [r[1], r[2]];
+    println!("[session] TEST the administrator's session makes two more accounts: {}", verdict(r[0] & 0xFF == 0 && r2[0] & 0xFF == 0 && r[0] >> 8 == 2 && r2[0] >> 8 == 3));
     let r = act(1, false, admin_session, "Bad Name!", b"x");
     println!("[session] TEST a name with capitals or spaces is refused: {}", verdict(r[0] == 1));
     let a = act(2, false, 0, "alice", b"alices-passphrase");
@@ -1463,9 +1468,41 @@ pub fn session_test() {
     sleep(900); // (the sessions run their probes: their lines are in the log)
     let st = call(ctl, [4, 0, 0]).1;
     println!("[session] TEST three accounts, three sessions: {}", verdict(st[0] == 3 && st[1] == 3));
+    // alice's files while she is logged in and while she is not (her encryption domain is open only while she is)
+    let open_read = v.read_file("/data/home/alice/note.txt");
+    println!("[session] TEST while alice is logged in her files can be read (through the file system): {}", verdict(open_read.as_ref().map_or(false, |b| b == b"note of alice")));
     let r = call(ctl, [3, a[1], 0]).1;
     sleep(50);
+    let locked_read = v.read_file("/data/home/alice/note.txt");
+    println!("[session] TEST after her logout her files cannot be read by anyone, this task included (the domain's key is gone from the store): {}", verdict(r[0] == 0 && locked_read.is_err()));
     let again = act(2, false, 0, "alice", b"alices-passphrase");
-    println!("[session] TEST after a logout the user can log in again: {}", verdict(r[0] == 0 && again[0] == 0));
+    let reread = v.read_file("/data/home/alice/note.txt");
+    println!("[session] TEST after a logout the user can log in again, and the files are there: {}", verdict(again[0] == 0 && reread.map_or(false, |b| b == b"note of alice")));
+    // a forgotten passphrase: the recovery key opens the domain, a new passphrase replaces the old one
+    let _ = call(ctl, [3, again[1], 0]);
+    sleep(50);
+    let mut wrong_key = [0u8; 16];
+    wrong_key[..8].copy_from_slice(&alice_recovery[0].to_le_bytes());
+    wrong_key[8..].copy_from_slice(&alice_recovery[1].to_le_bytes());
+    wrong_key[0] ^= 1;
+    let mut key = [0u8; 16];
+    key[..8].copy_from_slice(&alice_recovery[0].to_le_bytes());
+    key[8..].copy_from_slice(&alice_recovery[1].to_le_bytes());
+    let bad = act(3, false, 0, "alice", &wrong_key);
+    let good = act(3, false, 0, "alice", &key);
+    let set = act(4, false, 0, "alice", b"alices-new-passphrase");
+    println!("[session] TEST a wrong recovery key opens nothing, the right one lets the passphrase be replaced: {}", verdict(bad[0] == 7 && good[0] == 0 && set[0] == 0));
+    let old = act(2, false, 0, "alice", b"alices-passphrase");
+    let new = act(2, false, 0, "alice", b"alices-new-passphrase");
+    println!("[session] TEST the old passphrase no longer logs in, the new one does, and the files are the same: {}", verdict(old[0] == 7 && new[0] == 0 && v.read_file("/data/home/alice/note.txt").map_or(false, |b| b == b"note of alice")));
+    let nosession = act(4, false, 999, "alice", b"x");
+    println!("[session] TEST a new passphrase cannot be set without a reset or the user's own session: {}", verdict(nosession[0] == 5));
+    // the user changes the passphrase from the user's own session
+    let own = act(4, false, b[1], "bob", b"bobs-changed-passphrase");
+    let bob_out = call(ctl, [3, b[1], 0]).1;
+    sleep(50);
+    let bob_old = act(2, false, 0, "bob", b"bobs-passphrase");
+    let bob_new = act(2, false, 0, "bob", b"bobs-changed-passphrase");
+    println!("[session] TEST a user changes the passphrase from the user's own session: {}", verdict(own[0] == 0 && bob_out[0] == 0 && bob_old[0] == 7 && bob_new[0] == 0));
     println!("[session] done");
 }

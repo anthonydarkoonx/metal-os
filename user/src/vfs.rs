@@ -32,6 +32,7 @@ const V_SYNC: u64 = 59;
 const V_CRASH: u64 = 60; // fault injection for tests
 const V_FAIL_SYNC: u64 = 61; // fault injection: the next checkpoint request fails (conductor only)
 const V_RENAME: u64 = 63; // "from\0to\0" in page: move a file, or a directory with everything in it, inside /data (one commit)
+const V_MKDIR_DOMAIN: u64 = 64; // path in page, w1 = a domain 1..=63: make a directory whose files are sealed under that encryption domain (unconfined callers only)
 const V_SCOPE: u64 = 62; // path in page, w1 = a program's task id: confine that program (started by the caller, not yet running) to the directory
 
 // status codes (reply[0])
@@ -281,6 +282,12 @@ const MAGIC: u32 = 0x3353_4656;
 const MAGIC_V2: u32 = 0x3253_4656;
 const OLD_NENT: usize = 51;
 const OLD_ENT_SZ: usize = 80;
+/// An inode number: bit 31 marks an undo block's key, bit 30 is the store's (twin blocks), bits 24..29 are the file's encryption domain (0: the system's), bits 0..23 count.
+const DOMAIN_SHIFT: u32 = 24;
+const INO_COUNTER_MAX: u32 = (1 << 24) - 16;
+fn domain_of_ino(ino: u32) -> u32 {
+    (ino >> DOMAIN_SHIFT) & 0x3F
+}
 const NENT: usize = 1024;
 const PATH_MAX: usize = 128;
 const ENT_SZ: usize = 144;
@@ -693,7 +700,21 @@ impl Datafs {
         }
     }
 
+    /// The encryption domain of the directory `p` is in (0 for the top level).
+    fn parent_domain(&self, p: &str) -> u32 {
+        match p.rfind('/') {
+            Some(i) if i > 0 => self.find(&p[..i]).map_or(0, |x| domain_of_ino(self.ents[x].ino)),
+            _ => 0,
+        }
+    }
+
     fn create(&mut self, p: &str, kind: u8) -> Result<usize, u64> {
+        let dom = self.parent_domain(p);
+        self.create_in(p, kind, dom)
+    }
+
+    /// Make an entry whose inode carries encryption domain `dom` (a file takes its directory's; `V_MKDIR_DOMAIN` starts a new one).
+    fn create_in(&mut self, p: &str, kind: u8, dom: u32) -> Result<usize, u64> {
         if self.find(p).is_some() {
             return Err(EEXIST);
         }
@@ -701,12 +722,12 @@ impl Datafs {
             return Err(ENOENT);
         }
         let slot = self.ents.iter().position(|e| e.ino == 0).ok_or(ENOSPC)?;
-        if self.next_ino >= 0x7FFF_FFF0 {
-            return Err(ENOSPC); // inode numbers must stay below the undo key space (see `undo_key`)
+        if self.next_ino >= INO_COUNTER_MAX || dom > 0x3F {
+            return Err(ENOSPC); // inode numbers must stay below the undo and twin key space (see `undo_key`)
         }
         let mut e = Ent::FREE;
         e.path[..p.len()].copy_from_slice(p.as_bytes());
-        e.ino = self.next_ino;
+        e.ino = dom << DOMAIN_SHIFT | self.next_ino;
         e.kind = kind;
         self.next_ino += 2; // a pair: the file's current and its shadow inode
         self.ents[slot] = e;
@@ -979,6 +1000,9 @@ impl Datafs {
         }
         if !self.parent_is_dir(to) {
             return Err(ENOENT);
+        }
+        if domain_of_ino(self.ents[i].ino) != self.parent_domain(to) {
+            return Err(EINVAL); // (a file or directory stays in its encryption domain: moving it into another would leave its blocks under the wrong key)
         }
         let moves: Vec<(usize, String)> = self
             .ents
@@ -1347,6 +1371,24 @@ fn handle(ds: &mut Datafs, table: &mut [Fd], pg: Pg, w: [u64; 3], scope: Option<
                 }
                 (_, Route::Rofs(_)) => err(EROFS),
                 _ => err(EINVAL),
+            }
+        }
+        V_MKDIR_DOMAIN => {
+            let Some(p) = get_path(pg) else { return err(EINVAL) };
+            if scope.is_some() {
+                return err(EPERM); // only an unconfined caller (the session service) starts a domain
+            }
+            let dom = w[1] as u32;
+            if dom == 0 || dom > 0x3F {
+                return err(EINVAL);
+            }
+            let Some(Route::Data(rest)) = route_scoped(&p, scope) else { return err(EINVAL) };
+            if rest == "/" || ds.parent_domain(&rest) != 0 {
+                return err(EINVAL); // (a domain's directory is made in the top-level domain)
+            }
+            match ds.create_in(&rest, KIND_DIR, dom).and_then(|_| ds.flush()) {
+                Ok(()) => [0, 0, 0],
+                Err(e) => err(e),
             }
         }
         V_RENAME => {

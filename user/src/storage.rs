@@ -34,7 +34,7 @@ const LFS_FAIL_GET: u64 = 46; // test hook: the next LFS_GET reports an I/O erro
 /// nothing synced) if this is not that instance: a client that staged blocks with a predecessor must not be told
 /// they are durable because the successor had nothing to sync.
 const LFS_EPOCH: u64 = 47;
-use metallium_driver_rt::proto::volume::{state, LFS_SET_PASSPHRASE, LFS_STATUS, LFS_UNLOCK, LOCKED, MORE};
+use metallium_driver_rt::proto::volume::{state, LFS_DOMAIN_CREATE, LFS_DOMAIN_LOCK, LFS_DOMAIN_SET_PASSPHRASE, LFS_DOMAIN_STATUS, LFS_DOMAIN_UNLOCK, LFS_SET_PASSPHRASE, LFS_STATUS, LFS_UNLOCK, LOCKED, MORE};
 const DATA_OFF: usize = 256;
 
 const SERVER_BUF_VA: usize = 0x8022_0000;
@@ -291,7 +291,7 @@ fn flags_of(header: &[u8; metallium_crypt::HEADER_LEN]) -> u64 {
         match metallium_crypt::slot_kind(header, i) {
             Some(metallium_crypt::Kind::Passphrase) => f |= 1,
             Some(metallium_crypt::Kind::Device) => f |= 2,
-            None => {}
+            Some(metallium_crypt::Kind::Recovery) | None => {}
         }
     }
     f
@@ -468,6 +468,7 @@ pub fn lfs_server() -> ! {
     }
     let mut pass = [0u8; 128];
     let mut pass_len = 0usize;
+    let mut domains = Domains { keys: [None; MAX_DOMAINS] };
     let mut tmp = Box::new([0u8; 4096]);
     let mut fail_get = false;
     let epoch = ticks() + 1;
@@ -477,6 +478,10 @@ pub fn lfs_server() -> ! {
         let op = m.w[0] & 0xFF;
         if matches!(op, LFS_STATUS | LFS_UNLOCK | LFS_SET_PASSPHRASE) {
             reply(volume_call(&mut vol, raw, op, &m, &mut pass, &mut pass_len));
+            continue;
+        }
+        if (LFS_DOMAIN_CREATE..=LFS_DOMAIN_SET_PASSPHRASE).contains(&op) {
+            reply(domain_call(&mut vol, &mut domains, op, &m, &mut pass, &mut pass_len));
             continue;
         }
         let Some(fs) = vol.store() else {
@@ -489,15 +494,41 @@ pub fn lfs_server() -> ! {
             continue;
         };
         match m.w[0] {
+            LFS_PUT | LFS_GET | LFS_DEL if reserved_key(key) => {
+                reply([9, 0, 0]); // (twins and domain headers are the store's own)
+            }
             LFS_PUT => {
                 tmp.copy_from_slice(&sh[..]);
-                fs.write_block(key, &tmp);
-                reply([0, epoch, 0]);
+                let d = domain_of(key);
+                if d == 0 {
+                    fs.write_block(key, &tmp);
+                    reply([0, epoch, 0]);
+                } else if let Some(dk) = domains.keys[d] {
+                    // a block of a user's domain: sealed under the domain's key before it reaches the log
+                    reply([if put_sealed(fs, &dk, d, key, &mut tmp) { 0 } else { 2 }, epoch, 0]);
+                } else {
+                    reply([LOCKED, epoch, 0]);
+                }
             }
             // status 0 = found, 1 = there is no such block (a hole), 2 = the store could not tell (I/O error):
             // a client must never take an error for a hole, or a failed read turns into zeros
             LFS_GET => match if core::mem::take(&mut fail_get) { Err(metallium_lfs::Error::Io) } else { fs.read_block(key, &mut tmp) } {
                 Ok(()) => {
+                    let d = domain_of(key);
+                    if d != 0 {
+                        match domains.keys[d] {
+                            None => {
+                                reply([LOCKED, epoch, 0]);
+                                continue;
+                            }
+                            Some(dk) => {
+                                if !open_sealed(fs, &dk, d, key, &mut tmp) {
+                                    reply([2, epoch, 0]); // (changed on the disk, or not this block: an error, never a hole)
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     sh.copy_from_slice(&tmp[..]);
                     reply([0, epoch, 0]);
                 }
@@ -539,6 +570,180 @@ pub fn lfs_server() -> ! {
                 reply([9, 0, 0]);
             }
         }
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// per-user encryption domains
+// ---------------------------------------------------------------------------
+// An inode number carries a domain in bits 24..29 (0: the system's, which has no layer of its own beyond the volume's). Blocks of a domain d > 0 are sealed under that
+// domain's key before they reach the store's log: the store reads the domain out of the block's key (`domain_of`). A block is exactly 4096 bytes, so its nonce and tag
+// (28 bytes) are kept in a *twin* block that holds those of 16 consecutive blocks of one inode (`twin_key`; bit 62 of the key marks a twin). The domain's own key is in a header
+// block (key `DOMAIN_HDR + d`, the volume header's format) sealed by the user's passphrase and by a recovery key; it is held in memory only while the domain is unlocked.
+const DOMAIN_HDR: u64 = 0x4000;
+const TWIN_BIT: u64 = 1 << 62;
+const MAX_DOMAINS: usize = 64;
+
+fn domain_of(key: u64) -> usize {
+    ((key >> 56) & 0x3F) as usize
+}
+fn twin_key(key: u64) -> u64 {
+    (key & 0xFFFF_FFFF_0000_0000) | TWIN_BIT | ((key & 0xFFFF_FFFF) >> 4)
+}
+/// Keys that belong to the store itself: twins and domain headers. A client may not read, write or delete them.
+fn reserved_key(key: u64) -> bool {
+    key & TWIN_BIT != 0 || (DOMAIN_HDR..DOMAIN_HDR + MAX_DOMAINS as u64).contains(&key)
+}
+fn domain_id(d: usize) -> [u8; 16] {
+    let mut id = [0xD0u8; 16];
+    id[15] = d as u8;
+    id
+}
+
+struct Domains {
+    keys: [Option<[u8; 32]>; MAX_DOMAINS],
+}
+
+/// Seal `data` (in place) as the block `key` of domain `d` and write it and its tag to the store.
+fn put_sealed(fs: &mut Store, dk: &[u8; 32], d: usize, key: u64, data: &mut [u8; 4096]) -> bool {
+    let mut nonce = [0u8; 12];
+    if !random_bytes(&mut nonce) {
+        return false; // (no secure random numbers: nothing is written under a nonce that might repeat)
+    }
+    let meta = metallium_crypt::seal_block(dk, &domain_id(d), key, nonce, &mut data[..]);
+    let tk = twin_key(key);
+    let mut tb = [0u8; 4096];
+    match fs.read_block(tk, &mut tb) {
+        Ok(()) | Err(metallium_lfs::Error::NotFound) => {}
+        Err(_) => return false,
+    }
+    let at = (key & 0xF) as usize * 32;
+    tb[at..at + metallium_crypt::META_LEN].copy_from_slice(&meta);
+    fs.write_block(key, data);
+    fs.write_block(tk, &tb);
+    true
+}
+
+/// Open a block of domain `d` that was just read (still sealed) into `data`: false if it does not authenticate.
+fn open_sealed(fs: &Store, dk: &[u8; 32], d: usize, key: u64, data: &mut [u8; 4096]) -> bool {
+    let mut tb = [0u8; 4096];
+    if fs.read_block(twin_key(key), &mut tb).is_err() {
+        return false;
+    }
+    let at = (key & 0xF) as usize * 32;
+    let mut meta = [0u8; metallium_crypt::META_LEN];
+    meta.copy_from_slice(&tb[at..at + metallium_crypt::META_LEN]);
+    metallium_crypt::open_block(dk, &domain_id(d), key, &meta, &mut data[..])
+}
+
+/// The domain calls (`proto::volume`): create, unlock, lock, status, set the passphrase.
+fn domain_call(vol: &mut Vol, domains: &mut Domains, op: u64, m: &Msg, pass: &mut [u8; 128], pass_len: &mut usize) -> [u64; 3] {
+    use metallium_crypt::{unlock, Kind};
+    let d = ((m.w[0] >> 8) & 0xFF) as usize;
+    let Some(fs) = vol.store() else { return [LOCKED, 0, 0] };
+    if d == 0 || d >= MAX_DOMAINS {
+        return [5, 0, 0];
+    }
+    let hdr_key = DOMAIN_HDR + d as u64;
+    let mut hdr = Box::new([0u8; 4096]);
+    let have = match fs.read_block(hdr_key, &mut hdr) {
+        Ok(()) => metallium_crypt::is_header(&hdr[..]),
+        Err(metallium_lfs::Error::NotFound) => false,
+        Err(_) => return [2 + 3, 0, 0],
+    };
+    if op == LFS_DOMAIN_STATUS {
+        if !have {
+            return [0, 0, 0];
+        }
+        let mut flags = 0;
+        for i in 0..metallium_crypt::SLOTS {
+            match metallium_crypt::slot_kind(&hdr, i) {
+                Some(Kind::Passphrase) => flags |= 1,
+                Some(Kind::Recovery) => flags |= 2,
+                _ => {}
+            }
+        }
+        return [if domains.keys[d].is_some() { 2 } else { 1 }, flags, 0];
+    }
+    if op == LFS_DOMAIN_LOCK {
+        if let Some(k) = domains.keys[d].as_mut() {
+            k.fill(0);
+        }
+        domains.keys[d] = None;
+        return [0, 0, 0];
+    }
+    // the secret, in chunks
+    let (total, offset, kind) = (((m.w[0] >> 16) & 0xFFFF) as usize, ((m.w[0] >> 32) & 0xFFFF) as usize, ((m.w[0] >> 48) & 0xF) as u8);
+    if offset == 0 {
+        *pass_len = 0;
+    }
+    if total == 0 || total > pass.len() || offset % 16 != 0 || offset >= total || offset != *pass_len {
+        *pass_len = 0;
+        pass.fill(0);
+        return [5, 0, 0];
+    }
+    let mut chunk = [0u8; 16];
+    chunk[..8].copy_from_slice(&m.w[1].to_le_bytes());
+    chunk[8..].copy_from_slice(&m.w[2].to_le_bytes());
+    let n = (total - offset).min(16);
+    pass[offset..offset + n].copy_from_slice(&chunk[..n]);
+    *pass_len = offset + n;
+    if *pass_len < total {
+        return [MORE, 0, 0];
+    }
+    let word: alloc::vec::Vec<u8> = pass[..total].to_vec();
+    pass.fill(0);
+    *pass_len = 0;
+    match op {
+        LFS_DOMAIN_CREATE => {
+            if have {
+                return [2, 0, 0];
+            }
+            let (mut id, mut key, mut rec) = ([0u8; 16], [0u8; 32], [0u8; 16]);
+            let (mut s1, mut s2, mut n1, mut n2) = ([0u8; 32], [0u8; 32], [0u8; 12], [0u8; 12]);
+            if !(random_bytes(&mut id) && random_bytes(&mut key) && random_bytes(&mut rec) && random_bytes(&mut s1) && random_bytes(&mut s2) && random_bytes(&mut n1) && random_bytes(&mut n2)) {
+                return [5, 0, 0];
+            }
+            let mut h = metallium_crypt::new_header(id);
+            metallium_crypt::set_slot(&mut h, 0, Kind::Passphrase, &word, PBKDF2_ITERATIONS, s1, n1, &key);
+            metallium_crypt::set_slot(&mut h, 1, Kind::Recovery, &rec, 1, s2, n2, &key);
+            fs.write_block(hdr_key, &h);
+            if fs.sync().is_err() {
+                return [5, 0, 0];
+            }
+            domains.keys[d] = Some(key);
+            [0, u64::from_le_bytes(rec[..8].try_into().unwrap()), u64::from_le_bytes(rec[8..].try_into().unwrap())]
+        }
+        LFS_DOMAIN_UNLOCK => {
+            if !have {
+                return [3, 0, 0];
+            }
+            let k = if kind == 3 { unlock(&hdr, Kind::Recovery, &word) } else { unlock(&hdr, Kind::Passphrase, &word) };
+            match k {
+                Some(key) => {
+                    domains.keys[d] = Some(key);
+                    [0, 0, 0]
+                }
+                None => [1, 0, 0],
+            }
+        }
+        LFS_DOMAIN_SET_PASSPHRASE => {
+            let Some(key) = domains.keys[d] else { return [LOCKED, 0, 0] };
+            if !have {
+                return [3, 0, 0];
+            }
+            let (mut s, mut n) = ([0u8; 32], [0u8; 12]);
+            if !(random_bytes(&mut s) && random_bytes(&mut n)) {
+                return [5, 0, 0];
+            }
+            let slot = (0..metallium_crypt::SLOTS).find(|&i| metallium_crypt::slot_kind(&hdr, i) == Some(Kind::Passphrase)).or_else(|| (0..metallium_crypt::SLOTS).find(|&i| metallium_crypt::slot_kind(&hdr, i).is_none()));
+            let Some(slot) = slot else { return [5, 0, 0] };
+            metallium_crypt::set_slot(&mut hdr, slot, Kind::Passphrase, &word, PBKDF2_ITERATIONS, s, n, &key);
+            fs.write_block(hdr_key, &hdr);
+            if fs.sync().is_ok() { [0, 0, 0] } else { [5, 0, 0] }
+        }
+        _ => [5, 0, 0],
     }
 }
 

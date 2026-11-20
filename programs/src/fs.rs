@@ -23,6 +23,7 @@ const V_UNLINK: u64 = 57;
 const V_MKDIR: u64 = 58;
 const V_SYNC: u64 = 59;
 const V_SCOPE: u64 = 62;
+const V_MKDIR_DOMAIN: u64 = 64;
 const V_RENAME: u64 = 63;
 
 pub const O_READ: u64 = 1;
@@ -461,6 +462,11 @@ pub fn rename(from: &str, to: &str) -> io::Result<()> {
 /// Have every file written so far reach the disk (before the machine is switched off or restarted).
 pub fn sync() -> io::Result<()> {
     session(|fs| fs.sync())
+}
+
+/// Make a directory whose files are sealed under the encryption domain `domain` (1..=63): only an unconfined program may (the session service, for a new account's home).
+pub fn create_dir_in_domain(path: &str, domain: u64) -> io::Result<()> {
+    session(|fs| fs.with_path(path, V_MKDIR_DOMAIN, domain).map(|_| ()))
 }
 
 /// Confine a program this one has just started (and that has not run yet) to `dir`: for it, `/data` is `dir`. See `Command::scope`.

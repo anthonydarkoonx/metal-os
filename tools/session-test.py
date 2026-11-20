@@ -4,6 +4,7 @@ Checks the conductor's lines, what each session reported about itself, and (from
 Usage: session-test.py '<qemu command line of the usual tests>'."""
 import re, shlex, subprocess, sys, time
 
+encrypted = len(sys.argv) > 2 and sys.argv[2] == "encrypted"  # (the machine volume is encrypted too: no marker is readable from the disk at all)
 cmd = sys.argv[1] + " -fw_cfg name=opt/metallium/only,string=13"
 log = open("build-session.log", "w")
 p = subprocess.Popen(shlex.split(cmd), stdout=log, stderr=subprocess.STDOUT)
@@ -43,7 +44,14 @@ for user in ("alice", "bob"):
           f"[homeprobe {user}/child] sees the account store: no" in text and f"[homeprobe {user}/child] sees the parent's note: yes" in text and f"[homeprobe {user}] child ended (yes), its file is in my home: yes" in text)
 check("the administrator is made by the first CREATE", "account admin created (uid 1, the administrator)" in text)
 disk = open("disk.img", "rb").read()
-check("no passphrase is on the disk in the clear", all(w not in disk for w in (b"admin-passphrase-1", b"alices-passphrase", b"bobs-passphrase")))
+check("no passphrase is on the disk in the clear", all(w not in disk for w in (b"admin-passphrase-1", b"alices-passphrase", b"alices-new-passphrase", b"bobs-passphrase", b"bobs-changed-passphrase")))
+# the volume here is plain (no machine secret), so what is encrypted on this disk is encrypted by the *users' domains*: the system's marker is readable, the users' files are not
+if encrypted:
+    check("the machine volume is encrypted: not even the system's marker is readable from the disk", b"SYSTEM-MARKER" not in disk and b"MTLMVOL1" in disk[13312 * 512:13312 * 512 + 8])
+else:
+    check("control: the system's own file is in the clear on the plain volume", b"SYSTEM-MARKER-in-the-clear-0123456789" in disk)
+check("the users' files (alice's, bob's, and their children's) are NOT in the clear: they are sealed under their domains' keys",
+      all(w not in disk for w in (b"note of alice", b"note of bob", b"child of alice", b"child of bob")))
 ok = results and all(results) and "[session] done" in text
 print("== SESSIONS: ALL PASS ==" if ok else "== SESSIONS: FAILED ==")
 if not ok:

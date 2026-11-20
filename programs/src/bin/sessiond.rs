@@ -9,24 +9,30 @@ use metallium_programs::ipc::{self, Endpoint};
 use metallium_programs::process::{Child, Command};
 use metallium_programs::*;
 
-// The session service (docs/MULTIUSER-PLAN.md, phase 1). It keeps the accounts and starts a user's session confined to the user's home.
+// The session service (docs/MULTIUSER-PLAN.md). It keeps the accounts and starts a user's session confined to the user's home.
 //
-// Slot 0: its control endpoint (receive; whoever holds the send right is the greeter), slot 5: the endpoint factory, slot 6: the spawn capability (with
-// file access). Accounts are lines `uid:name:role:iterations:salt:hash` in `/data/accounts`, which only this program (unconfined) can see: a session's
-// `/data` is `/data/home/<name>`. The credential here is a PBKDF2-HMAC-SHA512 hash: phase 2 replaces it with a key slot of the user's own encryption domain.
+// Slot 0: its control endpoint (receive; whoever holds the send right is the greeter), slot 5: the endpoint factory, slot 6: the spawn capability (with file access),
+// slot 4: the data store's endpoint (the right to create, unlock and lock encryption domains). Accounts are lines `uid:name:role` in `/data/accounts`, which only this program
+// (unconfined) can see; there is no credential in them. A user's credential is the key slot of the user's encryption *domain* in the data store (domain = uid): logging in means
+// unlocking the domain with the passphrase, and everything the user's session writes under `/data/home/<name>` is sealed under that domain's key; logging out locks it
+// again, so the files of a user who is not logged in cannot be read by anyone, this program and the administrator included. A recovery key (shown once, when the account is
+// made) opens the domain too and is how a forgotten passphrase is replaced.
 //
 // Protocol (three words a message): `BEGIN` names the action and the user, then the secret follows in chunks of 16 bytes (as for the data volume's lock):
 //   BEGIN  w0 = 1 | action << 8 | role << 16 | acting session << 32, w1 w2 = the user name (up to 16 bytes, NUL padded)
-//   SECRET w0 = 2 | total length << 8 | offset << 24, w1 w2 = 16 bytes of the passphrase at `offset`; the last chunk runs the action
+//   SECRET w0 = 2 | total length << 8 | offset << 24, w1 w2 = 16 bytes of the secret at `offset`; the last chunk runs the action
 //   LOGOUT w0 = 3, w1 = session id
 //   STATUS w0 = 4 -> [number of users, number of sessions, 0]
-// Replies: w0 = status (0 ok, 4 = more chunks wanted, see below), w1 = the user id (CREATE) or the session id (LOGIN).
+// Actions: CREATE (secret: the passphrase; reply w0 = status | uid << 8, w1 w2 = the recovery key: show it once), LOGIN (the passphrase; reply w1 = the session id),
+// RESET (the 16 recovery-key bytes: opens the account's domain for a following SETPASS), SETPASS (the new passphrase: after a RESET, or by the user's own session `acting`).
 const OP_BEGIN: u64 = 1;
 const OP_SECRET: u64 = 2;
 const OP_LOGOUT: u64 = 3;
 const OP_STATUS: u64 = 4;
 const ACT_CREATE: u64 = 1;
 const ACT_LOGIN: u64 = 2;
+const ACT_RESET: u64 = 3;
+const ACT_SETPASS: u64 = 4;
 
 const OK: u64 = 0;
 const E_BAD: u64 = 1; // malformed request, or a name that is not allowed
@@ -37,7 +43,6 @@ const E_FAILED: u64 = 6; // storage or start failure
 const E_LOGIN: u64 = 7; // LOGIN: no such user or wrong passphrase (one answer for both: no way to find out which names exist)
 const E_BUSY: u64 = 8; // LOGIN: that user already has a session
 
-const ITERATIONS: u32 = 20_000;
 /// Files and directories a home may hold (the account holder's own quota; programs under it have theirs, never more).
 const HOME_QUOTA: u64 = 64;
 
@@ -46,14 +51,20 @@ const R_SPAWN_FS: u16 = 1 << 13;
 const R_EP_CREATE: u16 = 1 << 14;
 const FACTORY: u8 = 5;
 const SPAWN: u8 = 6;
+const STORE: Endpoint = Endpoint(4);
+
+// the data store's domain calls (`proto::volume`)
+const LFS_DOMAIN_CREATE: u64 = 123;
+const LFS_DOMAIN_UNLOCK: u64 = 124;
+const LFS_DOMAIN_LOCK: u64 = 125;
+const LFS_DOMAIN_SET_PASSPHRASE: u64 = 127;
+/// Accounts are numbered 1..=63: the number is the encryption domain.
+const MAX_UID: u32 = 63;
 
 struct Account {
     uid: u32,
     name: String,
     admin: bool,
-    iterations: u32,
-    salt: [u8; 16],
-    hash: [u8; 32],
 }
 
 struct Session {
@@ -62,39 +73,34 @@ struct Session {
     child: Child,
 }
 
-fn hex(b: &[u8]) -> String {
-    let mut s = String::new();
-    for x in b {
-        s.push_str(&format!("{x:02x}"));
-    }
-    s
-}
-
-fn unhex(s: &str, out: &mut [u8]) -> bool {
-    if s.len() != out.len() * 2 {
-        return false;
-    }
-    for (i, o) in out.iter_mut().enumerate() {
-        match u8::from_str_radix(&s[2 * i..2 * i + 2], 16) {
-            Ok(b) => *o = b,
-            Err(_) => return false,
-        }
-    }
-    true
-}
-
 fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 16 && n.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_') && n.as_bytes()[0].is_ascii_lowercase()
 }
 
-fn derive(pass: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+/// What a login for a name that does not exist costs the same as one that does (the answer is not faster): the store's key derivation, done here for nothing.
+fn dummy_work(pass: &[u8]) {
     let mut h = [0u8; 32];
-    metallium_crypt::pbkdf2_hmac_sha512(pass, salt, iterations, &mut h);
-    h
+    metallium_crypt::pbkdf2_hmac_sha512(pass, &[0u8; 16], 100_000, &mut h);
 }
 
-fn same(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).fold(0u8, |d, (x, y)| d | (x ^ y)) == 0
+/// A call to the store's domain calls with a secret in chunks; the store's last reply.
+fn store_call(op: u64, domain: u32, kind: u64, secret: &[u8]) -> [u64; 3] {
+    let mut last = [E_FAILED, 0, 0];
+    // (a call without a secret, LOCK, is one message)
+    for off in (0..secret.len().max(1)).step_by(16) {
+        let mut chunk = [0u8; 16];
+        let n = (secret.len() - off).min(16);
+        chunk[..n].copy_from_slice(&secret[off..off + n]);
+        let w0 = op | (domain as u64) << 8 | (secret.len() as u64) << 16 | (off as u64) << 32 | kind << 48;
+        match STORE.call([w0, u64::from_le_bytes(chunk[..8].try_into().unwrap()), u64::from_le_bytes(chunk[8..].try_into().unwrap())]) {
+            Ok(r) => last = r,
+            Err(_) => return [E_FAILED, 0, 0],
+        }
+        if last[0] != 4 {
+            break;
+        }
+    }
+    last
 }
 
 struct Svc {
@@ -103,6 +109,8 @@ struct Svc {
     next_session: u64,
     /// The request being assembled: (action, role, acting session, name, secret so far).
     pending: Option<(u64, bool, u64, String, Vec<u8>)>,
+    /// The account whose domain a recovery key has just opened (a SETPASS must follow).
+    resetting: Option<u32>,
 }
 
 impl Svc {
@@ -111,12 +119,11 @@ impl Svc {
         let Ok(t) = fs::read_to_string("/data/accounts") else { return v };
         for line in t.lines() {
             let f: Vec<&str> = line.split(':').collect();
-            if f.len() != 6 {
+            if f.len() != 3 {
                 continue;
             }
-            let (mut salt, mut hash) = ([0u8; 16], [0u8; 32]);
-            if let (Ok(uid), Ok(role), Ok(iterations), true, true) = (f[0].parse(), f[2].parse::<u8>(), f[3].parse(), unhex(f[4], &mut salt), unhex(f[5], &mut hash)) {
-                v.push(Account { uid, name: String::from(f[1]), admin: role == 1, iterations, salt, hash });
+            if let (Ok(uid), Ok(role)) = (f[0].parse::<u32>(), f[2].parse::<u8>()) {
+                v.push(Account { uid, name: String::from(f[1]), admin: role == 1 });
             }
         }
         v
@@ -125,7 +132,7 @@ impl Svc {
     fn save(&self) -> bool {
         let mut t = String::new();
         for a in &self.accounts {
-            t.push_str(&format!("{}:{}:{}:{}:{}:{}\n", a.uid, a.name, a.admin as u8, a.iterations, hex(&a.salt), hex(&a.hash)));
+            t.push_str(&format!("{}:{}:{}\n", a.uid, a.name, a.admin as u8));
         }
         fs::write("/data/accounts", t.as_bytes()).is_ok() && fs::sync().is_ok()
     }
@@ -145,41 +152,53 @@ impl Svc {
                 return [E_DENIED, 0, 0];
             }
         }
-        let mut salt = [0u8; 16];
-        if random::fill(&mut salt).is_err() {
+        let uid = self.accounts.iter().map(|a| a.uid + 1).max().unwrap_or(1);
+        if uid > MAX_UID {
             return [E_FAILED, 0, 0];
         }
-        let uid = self.accounts.iter().map(|a| a.uid + 1).max().unwrap_or(1);
-        self.accounts.push(Account { uid, name: String::from(name), admin: first || want_admin, iterations: ITERATIONS, salt, hash: derive(pass, &salt, ITERATIONS) });
+        // the account's encryption domain, with its passphrase and a recovery key
+        let r = store_call(LFS_DOMAIN_CREATE, uid, 1, pass);
+        if r[0] != 0 {
+            return [E_FAILED, 0, 0];
+        }
+        let recovery = [r[1], r[2]];
+        let _ = fs::create_dir("/data/home");
+        if fs::create_dir_in_domain(&format!("/data/home/{name}"), uid as u64).is_err() {
+            let _ = store_call(LFS_DOMAIN_LOCK, uid, 0, &[]);
+            return [E_FAILED, 0, 0];
+        }
+        self.accounts.push(Account { uid, name: String::from(name), admin: first || want_admin });
         if !self.save() {
             self.accounts.pop();
             return [E_FAILED, 0, 0];
         }
+        let _ = store_call(LFS_DOMAIN_LOCK, uid, 0, &[]); // (made unlocked; it opens at the first login)
         println!("[sessiond] account {name} created (uid {uid}{})", if first { ", the administrator" } else { "" });
-        [OK, uid as u64, 0]
+        [OK | (uid as u64) << 8, recovery[0], recovery[1]]
     }
 
     fn login(&mut self, name: &str, pass: &[u8]) -> [u64; 3] {
         let Some(a) = self.accounts.iter().find(|a| a.name == name) else {
-            // (the same work is done for a name that does not exist: the answer is not faster)
-            let _ = derive(pass, &[0u8; 16], ITERATIONS);
+            dummy_work(pass);
             return [E_LOGIN, 0, 0];
         };
-        if !same(&derive(pass, &a.salt, a.iterations), &a.hash) {
-            return [E_LOGIN, 0, 0];
-        }
         let (uid, name) = (a.uid, a.name.clone());
         if self.sessions.iter().any(|s| s.uid == uid) {
             return [E_BUSY, 0, 0];
         }
+        // the credential is the domain's key slot: right means the domain is open
+        if store_call(LFS_DOMAIN_UNLOCK, uid, 1, pass)[0] != 0 {
+            return [E_LOGIN, 0, 0];
+        }
         // the session: a program confined to the user's home (`/data` is `/data/home/<name>`), with a quota; the programs it starts are confined to the same directory
-        let _ = fs::create_dir("/data/home");
         let home = format!("/data/home/{name}");
-        let _ = fs::create_dir(&home);
         let mut cmd = Command::new("homeprobe");
         cmd.arg(&name).arg("probe").files(true).scope(&home).quota(HOME_QUOTA);
         cmd.give(FACTORY, 5, R_EP_CREATE).give(SPAWN, 6, R_SPAWN | R_SPAWN_FS).budget_pages(1000);
-        let Ok(child) = cmd.spawn() else { return [E_FAILED, 0, 0] };
+        let Ok(child) = cmd.spawn() else {
+            let _ = store_call(LFS_DOMAIN_LOCK, uid, 0, &[]);
+            return [E_FAILED, 0, 0];
+        };
         self.next_session += 1;
         let id = self.next_session;
         println!("[sessiond] {name} logged in: session {id} (task {})", child.id());
@@ -187,10 +206,47 @@ impl Svc {
         [OK, id, 0]
     }
 
+    /// RESET: the recovery key opens the account's domain, for a SETPASS that follows.
+    fn reset(&mut self, name: &str, key: &[u8]) -> [u64; 3] {
+        let Some(a) = self.accounts.iter().find(|a| a.name == name) else {
+            dummy_work(key);
+            return [E_LOGIN, 0, 0];
+        };
+        let uid = a.uid;
+        if key.len() != 16 || self.sessions.iter().any(|s| s.uid == uid) {
+            return [E_BAD, 0, 0];
+        }
+        if store_call(LFS_DOMAIN_UNLOCK, uid, 3, key)[0] != 0 {
+            return [E_LOGIN, 0, 0];
+        }
+        self.resetting = Some(uid);
+        [OK, 0, 0]
+    }
+
+    /// SETPASS: a new passphrase for the account being reset, or for the account of the acting session.
+    fn setpass(&mut self, acting: u64, pass: &[u8]) -> [u64; 3] {
+        if pass.is_empty() {
+            return [E_BAD, 0, 0];
+        }
+        let (uid, via_reset) = match (self.resetting, self.sessions.iter().find(|s| s.id == acting)) {
+            (Some(u), _) => (u, true),
+            (None, Some(s)) => (s.uid, false),
+            _ => return [E_DENIED, 0, 0],
+        };
+        let r = store_call(LFS_DOMAIN_SET_PASSPHRASE, uid, 1, pass);
+        if via_reset {
+            self.resetting = None;
+            let _ = store_call(LFS_DOMAIN_LOCK, uid, 0, &[]); // (the next thing is a login with the new passphrase)
+        }
+        [if r[0] == 0 { OK } else { E_FAILED }, 0, 0]
+    }
+
     fn logout(&mut self, id: u64) -> [u64; 3] {
         let Some(i) = self.sessions.iter().position(|s| s.id == id) else { return [E_BAD, 0, 0] };
         let s = self.sessions.remove(i);
         let _ = s.child.kill();
+        let _ = fs::sync();
+        let _ = store_call(LFS_DOMAIN_LOCK, s.uid, 0, &[]); // the user's files are sealed again
         println!("[sessiond] session {id} ended");
         [OK, 0, 0]
     }
@@ -204,7 +260,7 @@ impl Svc {
                 let n = raw.iter().position(|&c| c == 0).unwrap_or(16);
                 let Ok(name) = core::str::from_utf8(&raw[..n]) else { return [E_BAD, 0, 0] };
                 let action = (w[0] >> 8) & 0xFF;
-                if action != ACT_CREATE && action != ACT_LOGIN {
+                if !matches!(action, ACT_CREATE | ACT_LOGIN | ACT_RESET | ACT_SETPASS) {
                     return [E_BAD, 0, 0];
                 }
                 self.pending = Some((action, (w[0] >> 16) & 0xFF == 1, (w[0] >> 32) & 0xFFFF_FFFF, String::from(name), Vec::new()));
@@ -214,6 +270,7 @@ impl Svc {
                 let (total, offset) = (((w[0] >> 8) & 0xFFFF) as usize, ((w[0] >> 24) & 0xFFFF) as usize);
                 let Some((action, admin, acting, name, mut secret)) = self.pending.take() else { return [E_BAD, 0, 0] };
                 if total == 0 || total > 128 || offset != secret.len() || offset % 16 != 0 || offset >= total {
+                    self.pending = None;
                     return [E_BAD, 0, 0];
                 }
                 let mut chunk = [0u8; 16];
@@ -224,7 +281,12 @@ impl Svc {
                     self.pending = Some((action, admin, acting, name, secret));
                     return [E_MORE, 0, 0];
                 }
-                let r = if action == ACT_CREATE { self.create(&name, admin, acting, &secret) } else { self.login(&name, &secret) };
+                let r = match action {
+                    ACT_CREATE => self.create(&name, admin, acting, &secret),
+                    ACT_LOGIN => self.login(&name, &secret),
+                    ACT_RESET => self.reset(&name, &secret),
+                    _ => self.setpass(acting, &secret),
+                };
                 secret.iter_mut().for_each(|b| *b = 0);
                 r
             }
@@ -237,7 +299,7 @@ impl Svc {
 
 program!("sessiond", |_c| {
     process::set_capabilities(SPAWN as u64, FACTORY as u64);
-    let mut svc = Svc { accounts: Svc::load(), sessions: Vec::new(), next_session: 0, pending: None };
+    let mut svc = Svc { accounts: Svc::load(), sessions: Vec::new(), next_session: 0, pending: None, resetting: None };
     println!("[sessiond] up: {} account(s)", svc.accounts.len());
     let ctl = Endpoint(0);
     loop {

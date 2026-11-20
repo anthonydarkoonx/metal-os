@@ -42,6 +42,18 @@ pub mod volume {
     pub const LFS_UNLOCK: u64 = 121;
     /// Set (or change) the passphrase of an unlocked encrypted volume, in the same chunks. Reply 0 done, `MORE`, 2 the volume is not encrypted and unlocked, 5 malformed.
     pub const LFS_SET_PASSPHRASE: u64 = 122;
+    /// Per-user encryption domains (`docs/ENCRYPTION.md`): domain `d` (1..=63) holds the blocks of the files whose inode numbers carry `d` in bits 24..29. Every call is
+    /// `w[0] = op | d << 8 | total length << 16 | offset << 32 | kind << 48`, with a secret in chunks of 16 bytes in `w[1]`, `w[2]` as for `LFS_UNLOCK`.
+    /// CREATE a domain (secret: its passphrase): the reply of the last chunk is `[0, recovery key (16 bytes in w1 and w2)]`: shown to the user once, never stored.
+    pub const LFS_DOMAIN_CREATE: u64 = 123;
+    /// UNLOCK with `kind` 1 (the passphrase) or 3 (the 16 recovery-key bytes): `[0]` open, `[1]` wrong, `[3]` there is no such domain.
+    pub const LFS_DOMAIN_UNLOCK: u64 = 124;
+    /// LOCK: the store forgets the domain's key at once (its blocks cannot be read or written until it is unlocked again). Reply `[0]`.
+    pub const LFS_DOMAIN_LOCK: u64 = 125;
+    /// STATUS -> `[state, flags, 0]`: 0 no such domain, 1 locked, 2 open; flags: bit 0 a passphrase slot, bit 1 a recovery slot.
+    pub const LFS_DOMAIN_STATUS: u64 = 126;
+    /// SET the passphrase of an open domain (the secret: the new passphrase): replaces the passphrase slot, keeps the recovery slot.
+    pub const LFS_DOMAIN_SET_PASSPHRASE: u64 = 127;
     /// Reply of a file call while the volume is locked or damaged.
     pub const LOCKED: u64 = 10;
     pub const MORE: u64 = 4;

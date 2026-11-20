@@ -121,3 +121,21 @@ fn a_block_opens_only_where_and_as_it_was_sealed() {
     assert!(open_block(&key, &id, 77, &meta, &mut t));
     assert_eq!(t, plain);
 }
+
+#[test]
+fn a_recovery_slot_opens_only_with_its_own_key_and_kind() {
+    let vk = [8u8; 32];
+    let mut h = new_header([2; 16]);
+    set_slot(&mut h, 0, Kind::Passphrase, b"pw", 20, salt(1), nonce(1), &vk);
+    set_slot(&mut h, 1, Kind::Recovery, &[0x77; 16], 0, salt(2), nonce(2), &vk);
+    assert_eq!(unlock(&h, Kind::Recovery, &[0x77; 16]), Some(vk));
+    assert_eq!(unlock(&h, Kind::Recovery, &[0x78; 16]), None);
+    assert_eq!(unlock(&h, Kind::Passphrase, &[0x77; 16]), None, "a recovery key is not a passphrase");
+    assert_eq!(unlock(&h, Kind::Device, &[0x77; 16]), None, "and not a device secret (the derivations are separated)");
+    assert_eq!(slot_kind(&h, 1), Some(Kind::Recovery));
+    // the passphrase can be replaced while the recovery slot stays
+    set_slot(&mut h, 0, Kind::Passphrase, b"new", 20, salt(3), nonce(3), &vk);
+    assert_eq!(unlock(&h, Kind::Passphrase, b"pw"), None);
+    assert_eq!(unlock(&h, Kind::Passphrase, b"new"), Some(vk));
+    assert_eq!(unlock(&h, Kind::Recovery, &[0x77; 16]), Some(vk));
+}

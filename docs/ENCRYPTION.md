@@ -40,3 +40,23 @@ control that it *is* on a plain volume) and `make qemu-test-encrypted` (the whol
 ## Not done
 The RK3566 chip secret (OTP) for the board's device slot; converting an existing plain volume; rollback protection; a recovery slot UI; changing the number of PBKDF2
 rounds from outside; serving `/system` while `/data` is locked (the VFS server waits for the unlock before it serves anything, so programs wait too).
+
+## Per-user encryption domains (2026-11-21)
+On top of the volume's layer, a **user's files have a layer of their own**, sealed under a key only that user's login opens.
+* **Domains.** An inode number carries a domain in bits 24..29 (0: the system's, 1..63: an account). A new file takes its directory's domain; the session service starts a domain with
+  `V_MKDIR_DOMAIN` (unconfined callers only) when it makes `/data/home/<name>`; a rename cannot cross a domain boundary. The data store reads the domain out of a block's key, so the
+  VFS-to-store protocol did not change.
+* **Blocks.** A block is exactly 4096 bytes, so there is no room for a nonce and a tag beside it: a domain block is sealed (ChaCha20-Poly1305, random nonce, authenticated with its own key and
+  the domain) and the 28 bytes go into a **twin** block (bit 62 of the key) that holds those of 16 consecutive blocks of one inode. Both go in one checkpoint; twins and headers are the store's own
+  (a client cannot name them).
+* **Keys.** Domain `d`'s random key is sealed in a header block (key `0x4000 + d`, the volume header's format) by the user's **passphrase** (PBKDF2, 100 000 rounds) and by a **recovery key**
+  (16 random bytes, shown once, never stored). The store keeps the key in memory only while the domain is unlocked; `LFS_DOMAIN_CREATE / UNLOCK / LOCK / STATUS / SET_PASSPHRASE`
+  (`proto::volume`) are for the session service (the holder of the store's endpoint). A locked domain's blocks cannot be read or written: file calls get `LOCKED` (an I/O error to the VFS).
+* **Login is unlocking.** `sessiond` has no password hash: a login is `LFS_DOMAIN_UNLOCK`, a logout kills the session and sends `LFS_DOMAIN_LOCK`. A forgotten passphrase: the recovery key
+  unlocks the domain, and a new passphrase replaces the old one (`RESET`, then `SETPASS`).
+* **What this protects.** The files of a user who is not logged in are unreadable to everyone, the administrator, the session service and the VFS included, and on a copied disk even with the
+  machine's secret. While a user is logged in, her files are protected from other sessions by the VFS's confinement, as before.
+* **What it does not.** The directory table is the system's (names, sizes and kinds of everyone's files are visible to the system and the administrator; contents are not); an unlocked
+  domain is as open as the VFS lets it be; no rollback protection; the twin of a deleted file's blocks stays until reused.
+* **Tests.** `make session-test` (plain machine volume: the system's marker is in the clear on the disk, no user's file is; logout locks; recovery; passphrase change) and
+  `make session-test-encrypted` (the same on an encrypted machine volume).

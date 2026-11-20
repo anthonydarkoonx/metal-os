@@ -100,5 +100,7 @@ Built and tested (phase 1, without the desktop and the encryption domains):
   program confined to `/data/home/<name>` with a quota. One answer for an unknown name and a wrong passphrase.
 * **`make session-test`**: the conductor plays the greeter; three accounts, two users logged in at once, each session cannot see the account store, the other home, `..` or `/home`, has its own
   files and its quota, its child programs are confined to the same home; no passphrase is on the disk in the clear. (A control without confinement fails eight of those checks.)
+**Phase 2 (2026-11-21):** per-user encryption domains and recovery keys are built (`docs/ENCRYPTION.md`, *Per-user encryption domains*): login unlocks the account's domain, logout locks it, the
+recovery key replaces a forgotten passphrase, and `make session-test` checks from the host that no user's file is on the disk in the clear.
 Not built yet: the real session payload (a desktop and a program manager per session: phase 3), the greeter's login screen and the first-boot setup (recovery keys), per-user encryption
 (phase 2), the tty switch, roles beyond the administrator, per-user byte quotas, removing an account.

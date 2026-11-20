@@ -206,7 +206,7 @@ of the scheduler are 64 bits wide now (it was 32 tasks).
 Programs can also **serve**: `EP_CREATE` (with a `Factory` capability) makes an endpoint at run time, owned by the
 capability it returns; the creator delegates a receive copy to a server program and send-only copies to clients, and
 revoking or destroying it wakes whoever waits on it (sixteen exist at most, four per task). With `file access` in the
-spawn request a program gets a VFS session (eight pages exist; the VFS server asks the kernel which page belongs to a
+spawn request a program gets a VFS session (one page per program slot, a quarter as many as task slots, 8 to 255; the VFS server asks the kernel which page belongs to a
 sender, and starts a new program in a reused slot with no open files). The request block (`SPAWN` takes the address of a
 96-byte structure) also carries the argument block (NUL-separated strings copied onto the child's stack) and
 per-capability rights masks. The shell runs `/system/bin/<name>` (or `/data/bin`, or a path) with a command line and environment (the argument block), and is
@@ -449,7 +449,14 @@ The test conductor holds neither the framebuffer nor the device.
 
 *Keyboard.* `user/src/kbd.rs` keeps 16 receive buffers on the device's event queue. It is a *polled*
 driver: no interrupt, the shell asks for keys (`KBD_POLL`) and the driver drains the queue, decodes key
-presses with a US layout (Shift, Caps Lock, Ctrl, arrows) and returns up to 16 characters.
+presses with a US layout (Shift, Caps Lock, Ctrl, arrows) and returns up to 16 characters. A desktop asks for raw
+events instead (`INPUT_POLL`: keys, pointer position, buttons, wheel), or sleeps until there is one (`INPUT_WAIT`, up to a second at a time).
+
+*USB input.* The same task also drives a USB controller (`user/src/xhci.rs`, xHCI; the parsing is in `libs/metal-usb`): keyboards
+and pointers on root ports or behind hubs (up to three tiers, 16 devices at once), plugged and unplugged while the system runs,
+with key repeat (the device does not do it). The controller's interrupt wakes a waiting client when the machine has no virtio
+input device; `make usb-test`, `usb-test-hub`, `usb-test-many` and `usb-test-noncoherent` drive it through QEMU's monitor. Not done: SuperSpeed hubs and hubs
+with one transaction translator per port.
 
 *Console and shell.* The screen task draws a scrolling text console (`user/src/console.rs`: 52x20
 cells of a hand-drawn 5x9 font, a banner, a status bar with live uptime and RAM) and runs a shell on it

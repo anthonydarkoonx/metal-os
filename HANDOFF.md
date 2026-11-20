@@ -67,6 +67,7 @@ The kernel has a *frame* (`kernel/src/frame.rs`: `phys` = bounds-checked physica
 
 ## Gotchas
 - **No atomic read-modify-write before the MMU is on.** With the MMU off every access is Device memory; on the RK3566 an atomic there is a data abort (ESR DFSC 0x35), but QEMU allows it, so the QEMU suite cannot catch this. `mmu::init` therefore uses `Global::boot_get` (plain access), not the checked `get`. Run the board self-test after any change to early boot.
+- The project was renamed Metallium-OS on 2026-11-20 (folder `metallium-os`, GitHub repository `anthonydarkoonx/metallium-os`; the old URL redirects). The crates (`metal-*`), the `opt/metal/...` fw_cfg names and the separate board and desktop repositories (`metal-os-rock3c`, `metal-os-desktop`) keep their names. After a folder rename `touch user/link.ld programs/link.ld programs/link-pie.ld kernel/linker.ld`.
 - The folder used to be called `Metal OS`. If `make` fails with `cannot find linker script /home/computer/Desktop/Metal OS/user/link.ld`, cargo has cached the old path. `touch user/link.ld programs/link.ld programs/link-pie.ld kernel/linker.ld` and rebuild. Checked 2026-11-12: after that, `make run` boots (KASLR moves the kernel, virtio-rng is folded in, the boot tasks start).
 - Never run two `make` jobs at once (they share `disk.img` and ports). A killed make can leave QEMU or `tools/netpeer.py` holding ports 18077/7002, so check for leftovers first.
 - When waiting, loop on `pgrep -x make`. `pgrep -f "make qemu-test"` matches its own shell wrapper and never ends.

@@ -13,6 +13,15 @@ for n, s in (("1", S1), ("2", S2)):
     open(f"build-volume-secret{n}.bin", "wb").write(s)
 
 
+def blank_disk():
+    """A copy of the disk with a blank data partition (another suite of the same `make test` may have left a volume on disk.img)."""
+    shutil.copy("disk.img", DISK)
+    size = os.path.getsize(DISK)
+    with open(DISK, "r+b") as f:
+        f.truncate(LFS_BASE)
+        f.truncate(size)
+
+
 def boot(secret, name):
     c = re.sub(r"file=\S+?,format=raw", f"file={DISK},format=raw", cmd)
     c = re.sub(r"-nographic", "-display none -serial stdio -monitor none", c) if "-nographic" in c else c
@@ -42,7 +51,7 @@ def check(what, ok):
     print(f"[volume-test] TEST {what}: {'PASS' if ok else 'FAIL'}")
 
 
-shutil.copy("disk.img", DISK)
+blank_disk()
 
 a = boot("1", "a")
 check("a blank disk on a machine with a secret gets an encrypted volume", "made an encrypted volume" in a and "[vol] state 2 flags 2" in a)
@@ -55,7 +64,7 @@ check("the file's name is not on the disk in the clear", b"secret.txt" not in di
 
 # control: the same marker on a plain volume (no machine secret, blank disk) IS on the disk, so the check above means something
 keep = open(DISK, "rb").read()
-shutil.copy("disk.img", DISK)
+blank_disk()
 ctl = boot(None, "ctl")
 plain = open(DISK, "rb").read()
 check("control: on a machine without a secret the volume is plain and the marker is readable from the disk", "mounted existing store" in ctl or "formatted fresh store" in ctl)

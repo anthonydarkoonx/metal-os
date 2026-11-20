@@ -44,18 +44,21 @@ that home's blocks; an admin who forgets a user's passphrase cannot recover the 
 3. **One admin, created at first boot** (the first-boot greeter is a setup screen: name, passphrase, recovery key). More users are created by the admin afterwards.
 4. **Program configuration is per user** (GlieseWM's config and every program's data live under the user's home; `GLIESE_CONF` becomes `~/.config/gliese/gliese.conf`).
 
-## TTYs: what has to change
-Today the desktop is linked into the one screen task, so there can only be one. Several concurrent sessions need a **tty manager** (the screen task keeps this one job)
-and a **desktop per session as its own task**:
-* The tty manager owns the real framebuffer and the input driver. Each tty has a **virtual framebuffer** (a memory object) and speaks the *same protocols* the desktop
-  already uses: it serves `GPU_INFO` / `GPU_FLUSH2` for the tty's virtual display and `INPUT_POLL` / `INPUT_WAIT` for its virtual keyboard and pointer. Only the **active** tty's
-  flushes reach the scanout (inactive ones just update their buffer), and only the active tty receives input. A desktop therefore does not know it is not alone:
-  GlieseWM's `gpu` and `input` slots simply point at the tty manager's endpoints instead of the drivers'.
-* The tty manager reads input first and **intercepts Ctrl+Alt+F1..F12** (like the attention key is today), switches the active tty and flushes its buffer.
-* The **session service** starts, per login, a desktop task (the desktop seam grows a second form: a program entry point with the display/input/framebuffer capabilities,
-  instead of a function linked into the screen task) and the session's program manager. A tty with no session runs the **greeter**, one instance per tty.
-* Costs: memory (a back buffer per tty: 1920x1080 is 8 MiB; allocate lazily, only for ttys in use), and the display's vsync-paced copies are shared.
-* Risk: the desktop contract changes (`metallium_desktop_run` as a task entry point), so GlieseWM and any other desktop need a matching change.
+## TTYs: switching is switching userspaces
+Each session is a **complete userspace**: its own desktop task, program manager and programs, drawing into **its own scanout buffer**. Ctrl+Alt+F1..F12 only changes which
+session is *in front*; nothing is emulated and nothing is copied:
+* **Display**: the display driver gets one new operation, "scan out buffer N" (virtio-gpu: set the scanout resource; the board's VOP2: write another buffer address to the
+  window and flip). The session in front is simply the one whose buffer is scanned out. A session behind keeps running and drawing into its own buffer, which is not shown.
+* **Input**: the input driver learns which session is active and delivers events only to that session's input endpoint. It sees the keys first, so it **intercepts
+  Ctrl+Alt+F1..F12 itself** (it already does this for the attention key), switches the active session and tells the display driver, and the key never reaches any desktop.
+  A desktop that wants to repaint on being brought to the front gets one event ("you are in front") and presents again.
+* **Who may switch**: the right to register a session (its buffer and input endpoint) and to switch is a capability only the session service holds; sessions cannot take
+  the screen or the keyboard from each other.
+* **F1** is the default session's tty. **F2..F12** with no session run the greeter (one per tty, drawing into that tty's buffer); logging in turns the tty into that user's session.
+What remains non-trivial, honestly: (1) the **desktop must be its own task per session**, so the desktop seam grows a second form (a program entry point given its display
+and input capabilities, instead of a function linked into the one screen task), and GlieseWM needs the matching change; (2) a **buffer per tty** in use (1920x1080 is 8 MiB;
+allocate it lazily when a session starts); (3) a per-session `GPU_FLUSH2` must go to that session's buffer, so the display driver needs a buffer id per client
+(a capability per session, not a protocol rewrite).
 
 ## Recovery
 A forgotten passphrase must not mean a brick, and must not mean the admin can read everyone's files. Options, and what I would do:
@@ -75,7 +78,7 @@ First boot therefore shows two things to write down: the admin's home recovery k
 |---|---|---|
 | 1 | Accounts, session service, one desktop and program manager per session, VFS homes (session-scoped), first-boot setup greeter, one tty | two users (one at a time): A cannot list, open or create in B's home (no `..`, no absolute paths); A's programs cannot reach B's tasks; logout leaves no task of the session |
 | 2 | Per-user encryption domains and recovery keys | per user, the marker test of `make volume-test`: B's marker unreadable without B's key even with the machine unlocked; recovery key opens only its home; wrong key opens nothing |
-| 3 | Tty manager, virtual displays/inputs, Ctrl+Alt+F1..F12, a desktop as a task, concurrent sessions | two live sessions: the display and input follow the active tty; the other keeps running; switching back restores its screen; F-keys never reach the desktop |
+| 3 | Per-session buffers, \"scan out buffer N\" and \"active session\" in the display and input drivers, Ctrl+Alt+F1..F12, the desktop as a task, concurrent sessions | two live sessions: the display and input follow the active tty; the other keeps running; switching back restores its screen; F-keys never reach a desktop |
 | 4 | Admin model: create/remove users, system-wide installs, power, wipe-and-recreate | a standard user cannot do any of those; revoke authority is absent from a standard session |
 | 5 | Board: the chip secret (OTP) for the machine volume, then the same tests on the ROCK 3C | volume and session tests on hardware |
 

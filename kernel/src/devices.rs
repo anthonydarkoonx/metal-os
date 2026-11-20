@@ -368,9 +368,10 @@ fn setup_blk(_f: &pci::Func, d: &Exposed) {
     for o in [OBJ_BLK_BUF_ROFS, OBJ_BLK_BUF_LFS, OBJ_BLK_BUF_CLIENT] {
         set(o, ObjKind::Dma, mem::alloc(mem::OWNER_KERNEL).expect("dma buf"), 1, 0);
     }
-    for o in [OBJ_SHM_ROFS, OBJ_SHM_LFS, OBJ_SHM_ROFS_VFS, OBJ_SHM_LFS_VFS, OBJ_SHM_VFS_CLIENT, OBJ_SHM_VFS_PROGRAM, OBJ_SHM_BENCH, OBJ_SHM_VFS_SHELL, OBJ_SHM_SPIN].into_iter().chain(OBJ_SHM_VFS_PROG0..OBJ_SHM_VFS_PROG0 + 8) {
+    for o in [OBJ_SHM_ROFS, OBJ_SHM_LFS, OBJ_SHM_ROFS_VFS, OBJ_SHM_LFS_VFS, OBJ_SHM_VFS_CLIENT, OBJ_SHM_VFS_PROGRAM, OBJ_SHM_BENCH, OBJ_SHM_VFS_SHELL, OBJ_SHM_SPIN]{
         set(o, ObjKind::Ram, mem::alloc(mem::OWNER_KERNEL).expect("shm page"), 1, 0);
     }
+    crate::obj::make_sessions(OBJ_SHM_VFS_REGION, OBJ_SHM_VFS_PROG0);
     irq::register(IRQ_BLK as usize, d.irq_id);
 }
 
@@ -405,8 +406,6 @@ fn setup_net(_f: &pci::Func, d: &Exposed) {
     set(OBJ_NET_QUEUES, ObjKind::Dma, mem::alloc_contig(2, mem::OWNER_KERNEL).expect("net queues"), 2, 0);
     set(OBJ_NET_BUFS, ObjKind::Dma, mem::alloc_contig(NET_BUF_PAGES, mem::OWNER_KERNEL).expect("net buffers"), NET_BUF_PAGES, 0);
     set(OBJ_NET_RING, ObjKind::Ram, mem::alloc(mem::OWNER_KERNEL).expect("net ring"), 1, 0);
-    for k in 0..8 {
-        set(OBJ_SHM_NET_PROG0 + k, ObjKind::Ram, mem::alloc(mem::OWNER_KERNEL).expect("net session page"), 1, 0);
-    }
+    crate::obj::make_sessions(OBJ_SHM_NET_REGION, OBJ_SHM_NET_PROG0);
     irq::register(IRQ_NET as usize, d.irq_id);
 }

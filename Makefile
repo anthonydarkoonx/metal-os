@@ -245,7 +245,7 @@ qemu-test: kernel disk
 	 grep -q "TEST a program started with file access reads a file through the VFS.*PASS" build.log && \
 	 grep -q "TEST a program writes a file that the conductor then reads.*PASS" build.log && \
 	 grep -q "TEST a program's file descriptors do not outlive it.*PASS" build.log && \
-	 grep -q "TEST eight file sessions exist.*PASS" build.log && \
+	 grep -q "TEST every file session the kernel made.*PASS" build.log && \
 	 grep -q "TEST two clients use a server built on an endpoint.*PASS" build.log && \
 	 grep -q "TEST revoking the server's capability wakes it.*PASS" build.log && \
 	 grep -q "TEST a caller waiting on an endpoint that ends is told so.*PASS" build.log && \

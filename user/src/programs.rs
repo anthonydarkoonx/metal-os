@@ -966,7 +966,8 @@ pub fn tests() {
     println!("[client] TEST a program's file descriptors do not outlive it (same slot {}, next program's read of fd 0 gives {code}, EBADF is 3): {}", t == t2, verdict(t == t2 && code == 3));
     let mut sess: Vec<i64> = Vec::new();
     let mut last = 0;
-    for _ in 0..9 {
+    let total = sysinfo_at(18, 0)[1] as usize; // (a quarter of the task slots, 8 at least)
+    for _ in 0..=total {
         let t = Req::new().fs().go(&sleeper);
         if t < 0 {
             last = t;
@@ -981,7 +982,7 @@ pub fn tests() {
     let again = Req::new().fs().go(&sleeper);
     kill(again);
     wait(again, false);
-    println!("[client] TEST eight file sessions exist, the ninth request is refused ({} then {last}), and finished programs give theirs back ({again}): {}", sess.len(), verdict(sess.len() == 8 && last == E_FULL as i64 && again > 0));
+    println!("[client] TEST every file session the kernel made ({total}) can be taken, the next request is refused ({} then {last}), and finished programs give theirs back ({again}): {}", sess.len(), verdict(sess.len() == total && last == E_FULL as i64 && again > 0));
     let t = Req::new().arg(1).budget(600).give_masked(0, SPAWN_SLOT as u8, 0xFFFF & !(4 | (1 << 13))).go(&spawner);
     let code = if t > 0 { wait(t, false) } else { t };
     println!("[client] TEST file access is a right of the spawn capability and is not handed on unless the parent passes it (child's request gave {code:#x}, -1 = {:#x}): {}", 0xFFFF_FFFFu64 - 1, verdict(code == 0xFFFF_FFFE));

@@ -21,10 +21,14 @@ use metal_net::{DnsResult, Io, NetError, Stack};
 
 const BUFS_VA: usize = 0x8030_0000;
 const RING_VA: usize = 0x8024_0000;
-const SESS_VA: usize = 0x8026_0000;
+const SESS_VA: usize = 0xA000_0000; // (in the big window: up to 256 pages)
 const DATA: usize = 256;
 const MAXIO: usize = 4096 - DATA;
-const NSESS: usize = 8;
+/// File... network sessions: as many as the kernel made (`sysinfo_at(18)`), read once at start.
+static NSESS_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+fn nsess() -> usize {
+    NSESS_N.load(core::sync::atomic::Ordering::Relaxed)
+}
 const CLOCK: u64 = 34;
 const IRQ_RAISE: u64 = 35;
 const WAKE_WORD: u64 = 33;
@@ -113,13 +117,13 @@ struct Netd {
     tx_free: Vec<usize>,
     tx_pending: VecDeque<Vec<u8>>,
     epoch: u32,
-    sessions: [Option<Session>; NSESS],
+    sessions: Vec<Option<Session>>,
     tcp: Vec<Owner>,
     udp: Vec<Owner>,
     listeners: Vec<Owner>,
     dns: Vec<Owner>,
-    echoes: [VecDeque<metal_net::EchoReply>; NSESS],
-    watches: [Vec<Want>; NSESS],
+    echoes: Vec<VecDeque<metal_net::EchoReply>>,
+    watches: Vec<Vec<Want>>,
     last_reap: u64,
     driver_tid: Option<u64>,
     rx_frames: u64,
@@ -142,7 +146,7 @@ impl Netd {
     }
 
     fn page(&self, k: usize) -> &'static mut [u8; 4096] {
-        // SAFETY: `k < NSESS`; SESS_VA + k*0x1000 is session page k, mapped read-write in `netd()` before any request is handled. Only one such reference is live at a time (see its single use); the client program may write the page too, so the contents are treated as untrusted bytes.
+        // SAFETY: `k < nsess()`; SESS_VA + k*0x1000 is session page k, mapped read-write in `netd()` before any request is handled. Only one such reference is live at a time (see its single use); the client program may write the page too, so the contents are treated as untrusted bytes.
         unsafe { &mut *((va(SESS_VA + k * 0x1000)) as *mut [u8; 4096]) }
     }
 
@@ -213,7 +217,7 @@ impl Netd {
         // pings that came back go to the session that sent them
         while let Some(r) = self.stack.ping_reply() {
             let k = (r.ident >> 8) as usize;
-            if k < NSESS && self.echoes[k].len() < 8 {
+            if k < nsess() && self.echoes[k].len() < 8 {
                 self.echoes[k].push_back(r);
             }
         }
@@ -223,7 +227,7 @@ impl Netd {
     fn session_of(&mut self, tid: u64) -> Option<(usize, u64)> {
         let r = sysinfo_at(6, tid);
         let (page, gen, owner) = (r[1] as usize, r[2], r[3]);
-        if page >= NSESS {
+        if page >= nsess() {
             return None;
         }
         let stale = self.sessions[page].as_ref().is_some_and(|s| s.gen != gen || s.tid != owner);
@@ -276,7 +280,7 @@ impl Netd {
             return;
         }
         self.last_reap = now;
-        for k in 0..NSESS {
+        for k in 0..nsess() {
             if let Some(s) = &self.sessions[k] {
                 let r = sysinfo_at(6, s.tid);
                 if r[1] as usize != k || r[2] != s.gen {
@@ -289,7 +293,7 @@ impl Netd {
     /// Add one to session `k`'s event word and wake the program(s) sleeping on it.
     fn bump(&self, k: usize) {
         let w = (va(SESS_VA + k * 0x1000)) as *mut u32;
-        // SAFETY: `k < NSESS`; word 0 of session page k, mapped read-write in `netd()`; volatile because the client program shares the page (a racing client write can only lose one count).
+        // SAFETY: `k < nsess()`; word 0 of session page k, mapped read-write in `netd()`; volatile because the client program shares the page (a racing client write can only lose one count).
         unsafe { core::ptr::write_volatile(w, core::ptr::read_volatile(w).wrapping_add(1)) };
         svc(WAKE_WORD, w as u64, usize::MAX as u64, 0, 0, 0);
     }
@@ -329,7 +333,7 @@ impl Netd {
 
     /// Wake the programs whose watches are satisfied.
     fn notify(&mut self) {
-        for k in 0..NSESS {
+        for k in 0..nsess() {
             if self.watches[k].is_empty() {
                 continue;
             }
@@ -598,11 +602,11 @@ pub fn netd() -> ! {
         println!("[netd] mapping failed");
         exit(1);
     }
-    for k in 0..NSESS {
-        if mem_map(16 + k as u64, SESS_VA + k * 0x1000, true) != 0 {
-            println!("[netd] mapping a session page failed");
-            exit(1);
-        }
+    NSESS_N.store(sysinfo_at(18, 0)[1] as usize, core::sync::atomic::Ordering::Relaxed);
+    // (all the session pages are one object, in slot 16)
+    if mem_map(16, SESS_VA, true) != 0 {
+        println!("[netd] mapping the session pages failed");
+        exit(1);
     }
     // the driver publishes the device's MAC when it is up
     // SAFETY: RING_VA mapped (checked) at the top of `netd()`; READY is inside the ring page; volatile because the driver writes it.
@@ -622,13 +626,13 @@ pub fn netd() -> ! {
         tx_pending: VecDeque::new(),
         // SAFETY: same mapped ring page; EPOCH is inside it.
         epoch: unsafe { core::ptr::read_volatile((va(RING_VA) + EPOCH) as *const u32) },
-        sessions: core::array::from_fn(|_| None),
+        sessions: (0..nsess()).map(|_| None).collect(),
         tcp: Vec::new(),
         udp: Vec::new(),
         listeners: Vec::new(),
         dns: Vec::new(),
-        echoes: core::array::from_fn(|_| VecDeque::new()),
-        watches: core::array::from_fn(|_| Vec::new()),
+        echoes: (0..nsess()).map(|_| VecDeque::new()).collect(),
+        watches: (0..nsess()).map(|_| Vec::new()).collect(),
         last_reap: now,
         driver_tid: None,
         rx_frames: 0,
@@ -637,7 +641,7 @@ pub fn netd() -> ! {
     };
     n.stack.start_dhcp(now);
     // (a restart of this service: programs sleeping on the old instance's watches find out now, and see their handles are gone)
-    for k in 0..NSESS {
+    for k in 0..nsess() {
         n.bump(k);
     }
     println!("[netd] up, MAC {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, asking for an address", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

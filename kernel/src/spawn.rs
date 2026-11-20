@@ -332,7 +332,6 @@ pub fn fixed_maps_allowed(program: usize) -> bool {
 }
 pub const NET_EP_SLOT: usize = 10;
 pub const NET_PAGE_SLOT: usize = 11;
-pub const NET_PAGES: usize = 8;
 /// Flags bits 8..11: how many threads (besides itself) the program may have at once.
 const THREADS_SHIFT: u32 = 8;
 pub const MAX_THREADS: usize = 8;
@@ -340,18 +339,32 @@ pub const MAX_ARGS: usize = 1024;
 /// Child slots of the file-system capabilities.
 pub const FS_EP_SLOT: usize = 8;
 pub const FS_PAGE_SLOT: usize = 9;
-/// Sessions with the VFS: pages the VFS server has mapped for programs (object ids `OBJ_SHM_VFS_PROG0 + k`).
-pub const FS_PAGES: usize = 8;
 /// File and network sessions one program may hold for the programs it starts, and the ones programs may never take.
 const SESSION_SHARE: usize = 5;
 const SESSION_RESERVE: usize = 2;
 const NO_FS: u8 = u8::MAX;
 static FS_PAGE: crate::table::Table<AtomicU8> = crate::table::Table::new();
 static FS_GEN: crate::table::Table<AtomicU64> = crate::table::Table::new();
-static FS_POOL: AtomicU64 = AtomicU64::new(0);
+/// Which session pages are taken: one bit per page (`obj::MAX_SESSIONS` of them, `obj::sessions()` in use).
+struct Pool([AtomicU64; crate::obj::MAX_SESSIONS / 64]);
+impl Pool {
+    const fn new() -> Pool {
+        Pool([const { AtomicU64::new(0) }; crate::obj::MAX_SESSIONS / 64])
+    }
+    fn take(&self) -> Option<u8> {
+        (0..crate::obj::sessions()).find(|&k| self.0[k / 64].fetch_or(1 << (k % 64), Ordering::SeqCst) & (1 << (k % 64)) == 0).map(|k| k as u8)
+    }
+    fn give(&self, k: u8) {
+        self.0[k as usize / 64].fetch_and(!(1u64 << (k % 64)), Ordering::SeqCst);
+    }
+    fn used(&self) -> usize {
+        self.0.iter().map(|w| w.load(Ordering::SeqCst).count_ones() as usize).sum()
+    }
+}
+static FS_POOL: Pool = Pool::new();
 static NET_PAGE: crate::table::Table<AtomicU8> = crate::table::Table::new();
 static NET_GEN: crate::table::Table<AtomicU64> = crate::table::Table::new();
-static NET_POOL: AtomicU64 = AtomicU64::new(0);
+static NET_POOL: Pool = Pool::new();
 
 /// (session page, generation) of a program's file-system session; page `NO_FS` if it has none. The generation changes
 /// every time a slot gets a new program, so the VFS can tell a new program from its predecessor in the same slot.
@@ -408,36 +421,28 @@ fn clear_session_page(obj: u16) {
 }
 
 fn claim_net_page() -> Option<u8> {
-    for k in 0..NET_PAGES {
-        if NET_POOL.fetch_or(1 << k, Ordering::SeqCst) & (1 << k) == 0 {
-            clear_session_page(crate::obj::OBJ_SHM_NET_PROG0 + k as u16);
-            return Some(k as u8);
-        }
-    }
-    None
+    let k = NET_POOL.take()?;
+    clear_session_page(crate::obj::OBJ_SHM_NET_PROG0 + k as u16);
+    Some(k)
 }
 
 fn drop_net_page(tid: usize) {
     let k = NET_PAGE[tid].swap(NO_FS, Ordering::SeqCst);
     if k != NO_FS {
-        NET_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+        NET_POOL.give(k);
     }
 }
 
 fn claim_fs_page() -> Option<u8> {
-    for k in 0..FS_PAGES {
-        if FS_POOL.fetch_or(1 << k, Ordering::SeqCst) & (1 << k) == 0 {
-            clear_session_page(crate::obj::OBJ_SHM_VFS_PROG0 + k as u16);
-            return Some(k as u8);
-        }
-    }
-    None
+    let k = FS_POOL.take()?;
+    clear_session_page(crate::obj::OBJ_SHM_VFS_PROG0 + k as u16);
+    Some(k)
 }
 
 fn drop_fs_page(tid: usize) {
     let k = FS_PAGE[tid].swap(NO_FS, Ordering::SeqCst);
     if k != NO_FS {
-        FS_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+        FS_POOL.give(k);
     }
 }
 
@@ -511,9 +516,9 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     if is_program(task::aspace(parent)) {
         let pa = task::aspace(parent);
         let mine = |per: &crate::table::Table<AtomicU8>| (FIRST_DYNAMIC_TASK..task::limit()).filter(|&c| PARENT[c].load(Ordering::SeqCst) == pa as u16 && per[c].load(Ordering::SeqCst) != NO_FS).count();
-        let full = |pool: &AtomicU64, pages: usize| pool.load(Ordering::SeqCst).count_ones() as usize + SESSION_RESERVE >= pages;
-        if (flags & FLAG_FS != 0 && (mine(&FS_PAGE) >= SESSION_SHARE || full(&FS_POOL, FS_PAGES)))
-            || (flags & FLAG_NET != 0 && (mine(&NET_PAGE) >= SESSION_SHARE || full(&NET_POOL, NET_PAGES)))
+        let full = |pool: &Pool| pool.used() + SESSION_RESERVE >= crate::obj::sessions();
+        if (flags & FLAG_FS != 0 && (mine(&FS_PAGE) >= SESSION_SHARE || full(&FS_POOL)))
+            || (flags & FLAG_NET != 0 && (mine(&NET_PAGE) >= SESSION_SHARE || full(&NET_POOL)))
         {
             return Err(E_FULL);
         }
@@ -524,7 +529,7 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
             Some(k) => Some(k),
             None => {
                 if let Some(k) = fs_page {
-                    FS_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+                    FS_POOL.give(k);
                 }
                 return Err(E_FULL);
             }
@@ -534,10 +539,10 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     };
     let Some(tid) = (FIRST_DYNAMIC_TASK..task::limit()).find(|&i| sched::state(i) == State::Free) else {
         if let Some(k) = fs_page {
-            FS_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+            FS_POOL.give(k);
         }
         if let Some(k) = net_page {
-            NET_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+            NET_POOL.give(k);
         }
         return Err(E_FULL);
     };
@@ -553,10 +558,10 @@ pub fn spawn(parent: usize, spawn_rights: Rights, req_va: usize) -> Result<usize
     };
     if let Some(e) = refused {
         if let Some(k) = fs_page {
-            FS_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+            FS_POOL.give(k);
         }
         if let Some(k) = net_page {
-            NET_POOL.fetch_and(!(1u64 << k), Ordering::SeqCst);
+            NET_POOL.give(k);
         }
         return Err(e);
     }

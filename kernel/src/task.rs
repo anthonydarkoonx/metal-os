@@ -437,9 +437,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
             install(t, tid, 1, Kind::Memory, obj::OBJ_NET_BUFS, R_MAP | R_WRITE);
             install(t, tid, 2, Kind::Memory, obj::OBJ_NET_RING, R_MAP | R_WRITE);
             install(t, tid, 3, Kind::Irq, obj::IRQ_NET, R_SEND);
-            for k in 0..8 {
-                install(t, tid, 16 + k as usize, Kind::Memory, obj::OBJ_SHM_NET_PROG0 + k as u16, R_MAP | R_WRITE);
-            }
+            install(t, tid, 16, Kind::Memory, obj::OBJ_SHM_NET_REGION, R_MAP | R_WRITE);
         }
         5 => {
             // read-only system filesystem server (EROFS)
@@ -468,9 +466,7 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
             install(t, tid, 6, Kind::Memory, obj::OBJ_SHM_VFS_PROGRAM, R_MAP | R_WRITE);
             install(t, tid, 7, Kind::Memory, obj::OBJ_SHM_VFS_SHELL, R_MAP | R_WRITE);
             // the session pages of programs with file-system access (see spawn.rs)
-            for k in 0..8 {
-                install(t, tid, 16 + k, Kind::Memory, obj::OBJ_SHM_VFS_PROG0 + k as u16, R_MAP | R_WRITE);
-            }
+            install(t, tid, 16, Kind::Memory, obj::OBJ_SHM_VFS_REGION, R_MAP | R_WRITE);
         }
         8 => {
             // an ordinary application: a VFS endpoint and its own page, nothing else

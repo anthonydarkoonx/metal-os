@@ -196,7 +196,8 @@ extern "C" fn kmain() -> ! {
     let tasks = task::tasks_for(ram, platform::number(b"opt/metal/max-tasks"));
     task::init_tables(tasks);
     obj::init_table(obj::objs_for(tasks));
-    kprintln!("[kernel] {tasks} task slots, {} endpoints, {} memory objects", ipc::nep(), obj::objs_for(tasks));
+    obj::init_sessions(tasks);
+    kprintln!("[kernel] {tasks} task slots, {} endpoints, {} memory objects, {} file and {} network sessions", ipc::nep(), obj::objs_for(tasks), obj::sessions(), obj::sessions());
     timer::init();
     sched::init();
     platform::init_devices();

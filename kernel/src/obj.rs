@@ -64,8 +64,9 @@ pub const OBJ_KBD_QUEUE: u16 = 21;
 pub const OBJ_SHM_VFS_SHELL: u16 = 22;
 /// Flag page the test conductor shares with the CPU-burner tasks (scheduler tests).
 pub const OBJ_SHM_SPIN: u16 = 23;
-/// Sessions of programs with file-system access: eight pages the VFS server has mapped (24..32).
-pub const OBJ_SHM_VFS_PROG0: u16 = 24;
+/// The VFS server's view of the session pages of programs with file-system access: all of them as one object (`sessions()` pages),
+/// which it maps once. Programs get one page each as objects of their own (`OBJ_SHM_VFS_PROG0 + k`) over the same frames.
+pub const OBJ_SHM_VFS_REGION: u16 = 24;
 /// The network device: registers, config copy, the two virtqueue pages, the packet buffers (shared with `netd`), the
 /// ring the driver and `netd` talk through, and the session pages of programs with network access (40..48).
 pub const OBJ_NET_MMIO: u16 = 32;
@@ -73,7 +74,7 @@ pub const OBJ_NET_PCICFG: u16 = 33;
 pub const OBJ_NET_QUEUES: u16 = 34;
 pub const OBJ_NET_BUFS: u16 = 35;
 pub const OBJ_NET_RING: u16 = 36;
-pub const OBJ_SHM_NET_PROG0: u16 = 40;
+pub const OBJ_SHM_NET_REGION: u16 = 40;
 /// The pointer (a second virtio-input device, a tablet): registers, config copy, queue page.
 pub const OBJ_PTR_MMIO: u16 = 48;
 pub const OBJ_PTR_PCICFG: u16 = 49;
@@ -132,7 +133,40 @@ pub fn init() {
 /// First object id handed out dynamically (below it: the fixed boot objects).
 /// Object numbers 52..=63 belong to the platform (its own devices: `platform.rs` names them); the objects programs make start here.
 pub const FIRST_PLATFORM_OBJ: u16 = 52;
-const FIRST_DYNAMIC: usize = 64;
+/// The most session pages of either kind; the objects of the single pages follow the platform's (64.., then 64 + MAX_SESSIONS..).
+pub const MAX_SESSIONS: usize = 256;
+pub const OBJ_SHM_VFS_PROG0: u16 = 64;
+pub const OBJ_SHM_NET_PROG0: u16 = OBJ_SHM_VFS_PROG0 + MAX_SESSIONS as u16;
+const FIRST_DYNAMIC: usize = 64 + 2 * MAX_SESSIONS;
+
+static SESSIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// How many file sessions (and, separately, network sessions) a machine with `tasks` task slots has: a quarter of the slots, 8..256.
+pub fn sessions_for(tasks: usize) -> usize {
+    (tasks / 4).clamp(8, MAX_SESSIONS)
+}
+
+pub fn init_sessions(tasks: usize) {
+    SESSIONS.store(sessions_for(tasks), core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Session pages of each kind on this boot.
+pub fn sessions() -> usize {
+    SESSIONS.load(core::sync::atomic::Ordering::SeqCst)
+}
+
+/// Allocate the session pages of one kind: the region (one object over `sessions()` contiguous frames) and one single-page object per session.
+pub fn make_sessions(region: u16, first: u16) {
+    let n = sessions();
+    let pa = mem::alloc_contig(n, mem::OWNER_KERNEL).expect("session pages");
+    for k in 0..n {
+        crate::frame::phys::zero_page(pa + k * mem::PAGE);
+    }
+    set(region, ObjKind::Ram, pa, n, 0);
+    for k in 0..n {
+        set(first + k as u16, ObjKind::Ram, pa + k * mem::PAGE, 1, 0);
+    }
+}
 
 const NO_OWNER: u16 = u16::MAX;
 /// Most run-time objects one program may have, and the object-table entries programs may never take (boot-time services make

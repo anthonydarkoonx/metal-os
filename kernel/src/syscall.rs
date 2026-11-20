@@ -521,13 +521,15 @@ fn obj_name(o: u16) -> &'static str {
         obj::OBJ_KBD_QUEUE => "input queue",
         obj::OBJ_SHM_VFS_SHELL => "vfs shell shm",
         obj::OBJ_SHM_SPIN => "spin flag",
-        obj::OBJ_SHM_VFS_PROG0 => "vfs program shm",
+        obj::OBJ_SHM_VFS_REGION => "vfs sessions",
         obj::OBJ_NET_MMIO => "net registers",
         obj::OBJ_NET_PCICFG => "net pci config",
         obj::OBJ_NET_QUEUES => "net queues",
         obj::OBJ_NET_BUFS => "net buffers",
         obj::OBJ_NET_RING => "net ring",
-        obj::OBJ_SHM_NET_PROG0 => "net program shm",
+        obj::OBJ_SHM_NET_REGION => "net sessions",
+        _ if (obj::OBJ_SHM_VFS_PROG0..obj::OBJ_SHM_VFS_PROG0 + obj::MAX_SESSIONS as u16).contains(&o) => "vfs program shm",
+        _ if (obj::OBJ_SHM_NET_PROG0..obj::OBJ_SHM_NET_PROG0 + obj::MAX_SESSIONS as u16).contains(&o) => "net program shm",
         obj::OBJ_PTR_MMIO => "pointer regs",
         obj::OBJ_PTR_PCICFG => "pointer pci cfg",
         obj::OBJ_PTR_QUEUE => "pointer queue",
@@ -648,6 +650,12 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             f.x[2] = t.stack_top as u64;
             f.x[3] = crate::rand::enabled() as u64;
             f.x[4] = crate::rand::has_hardware() as u64;
+            Out::Ret(0)
+        }
+        18 => {
+            // how many file sessions and network sessions there are (x1), and task slots (x2): the servers size their tables to them
+            f.x[1] = crate::obj::sessions() as u64;
+            f.x[2] = task::limit() as u64;
             Out::Ret(0)
         }
         15 => {

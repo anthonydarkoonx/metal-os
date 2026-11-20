@@ -84,7 +84,7 @@ const VA_CLIENT8: usize = 0x8027_0000; // sender 8: application
 const VA_SHELL: usize = 0x8028_0000; // sender SHELL_SENDER: the shell
 /// Pages for programs with file-system access: session k of the kernel's pool is VFS capability slot 16 + k.
 const VA_PROG0: usize = 0x8029_0000;
-const PROG_SESSIONS: usize = 8;
+static PROG_SESSIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 static SHELL_TASK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(20);
 
 /// The console's task id (the one task of role 13; 20 on the QEMU machine, earlier where there is no display or keyboard
@@ -892,7 +892,7 @@ fn client_page(sender: u64, gens: &mut [u64]) -> Option<(usize, bool, usize)> {
             let r = sysinfo_at(5, s);
             // (the threads of a program share its session, and so its descriptors: `r[3]` is the program)
             let (page, gen, owner) = (r[1] as usize, r[2], r[3] as usize);
-            if page >= PROG_SESSIONS || owner >= gens.len() {
+            if page >= PROG_SESSIONS.load(core::sync::atomic::Ordering::Relaxed) || owner >= gens.len() {
                 return None;
             }
             let fresh = gens[owner] != gen;
@@ -912,7 +912,11 @@ fn get_path(pg: Pg) -> Option<String> {
 pub fn vfs_server() -> ! {
     find_shell();
     let maps = [(SL_ROFS_SHM, VA_ROFS), (SL_LFS_SHM, VA_LFS), (5, VA_CLIENT0), (6, VA_CLIENT8), (7, VA_SHELL)];
-    for (slot, va) in maps.into_iter().chain((0..PROG_SESSIONS).map(|k| (16 + k as u64, VA_PROG0 + k * 0x1000))) {
+    let info = sysinfo_at(18, 0);
+    let (sessions, slots) = (info[1] as usize, info[2] as usize);
+    PROG_SESSIONS.store(sessions, core::sync::atomic::Ordering::Relaxed);
+    // (all the session pages are one object, in slot 16: page k is at VA_PROG0 + k * 4096)
+    for (slot, va) in maps.into_iter().chain([(16, VA_PROG0)]) {
         if mem_map(slot, va, true) != 0 {
             println!("[vfs] mapping failed");
             exit(1);
@@ -920,10 +924,10 @@ pub fn vfs_server() -> ! {
     }
     let mut ds = Datafs::load();
     println!("[vfs] up: /system (EROFS, read-only), /data (log-structured, {} entries)", ds.ents.iter().filter(|e| e.ino != 0).count());
-    let mut fds: Vec<Vec<Fd>> = (0..64).map(|_| vec![Fd::Free; FDS]).collect();
-    let mut gens = [0u64; 64];
+    let mut fds: Vec<Vec<Fd>> = (0..slots).map(|_| vec![Fd::Free; FDS]).collect();
+    let mut gens = vec![0u64; slots];
     // per program: (the generation of its session, the directory it is confined to); valid only while the generation matches
-    let mut scopes: Vec<Option<(u64, String)>> = (0..64).map(|_| None).collect();
+    let mut scopes: Vec<Option<(u64, String)>> = (0..slots).map(|_| None).collect();
     loop {
         let m = recv(0);
         let Some((va, fresh, who)) = client_page(m.sender, &mut gens) else {
@@ -961,7 +965,7 @@ fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64]
     }
     let r = sysinfo_at(5, child as u64);
     let (page, gen, owner, parent) = (r[1] as usize, r[2], r[3] as usize, r[4] as usize);
-    if page >= PROG_SESSIONS || owner != child {
+    if page >= PROG_SESSIONS.load(core::sync::atomic::Ordering::Relaxed) || owner != child {
         return err(EINVAL);
     }
     if parent != who {

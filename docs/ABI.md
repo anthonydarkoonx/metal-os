@@ -160,7 +160,7 @@ copies derived from it).
 
 **Per-program limits on shared tables.** A program (its threads together) may hold at most 32 run-time memory objects
 (`SHM_CREATE`, `MC_ALLOC`), at most 192 capability nodes it made for itself (its own memory and endpoints, its threads' copies, what it
-gives the programs it starts), and at most 4 run-time endpoints; with all its threads it may have at most 4 of the 8 messages queued at one endpoint (`IPC_SEND` answers `-3` beyond that) and may hold 5 of the 8 file-system and 5 of the 8 network sessions for the programs it starts (`SPAWN` answers `E_FULL`). Programs also never take the last 16 object-table entries, the last 48
+gives the programs it starts), and at most 4 run-time endpoints; with all its threads it may have at most 4 of the 8 messages queued at one endpoint (`IPC_SEND` answers `-3` beyond that) and may hold 5 of the file-system and 5 of the network sessions (a quarter of the task slots each, 8 to 256; SYSINFO 18 gives the number) for the programs it starts (`SPAWN` answers `E_FULL`). Programs also never take the last 16 object-table entries, the last 48
 capability nodes or the last 4 endpoints: those stay for boot-time services. Over a limit the call fails as if the table were full
 (`-3`, `E_FULL` or `E_NOMEM` as before). What a thread creates is its own: it goes when the thread ends, so a program that wants memory or
 endpoints to outlive its threads makes them in the first thread.

@@ -152,8 +152,10 @@ pub fn init_machine() {
     CONDUIT_SMC.store((m.conduit == Some(Conduit::Smc)) as u8, Ordering::Relaxed);
     // the cores: this one first (it is core 0 whatever its place in the tree), then the rest in tree order
     let mut n = 1;
+    let mut found_boot = false;
     for (i, &c) in m.cpus[..m.ncpus].iter().enumerate() {
         if c == boot {
+            found_boot = true;
             CAPACITY[0].store(m.capacity[i], Ordering::Relaxed);
         } else if n < crate::smp::MAX_CPUS {
             MPIDRS[n].store(c, Ordering::Relaxed);
@@ -161,7 +163,18 @@ pub fn init_machine() {
             n += 1;
         }
     }
-    NCPUS.store(if m.ncpus == 0 { 0 } else { n }, Ordering::Relaxed);
+    // (a tree that does not list the core we are running on cannot be trusted for the rest: probe the firmware instead)
+    NCPUS.store(if m.ncpus == 0 || !found_boot { 0 } else { n }, Ordering::Relaxed);
+}
+
+/// Without a tree: the cores the firmware started are the machine's cores (called once, after `start_secondaries`).
+pub fn set_cpu_count_if_unknown(n: usize) {
+    if NCPUS.load(Ordering::Relaxed) == 0 {
+        for i in 1..n.min(crate::smp::MAX_CPUS) {
+            MPIDRS[i].store(i as u64, Ordering::Relaxed); // (what `cpu_mpidr` answered for them while the count was unknown)
+        }
+        NCPUS.store(n.min(crate::smp::MAX_CPUS), Ordering::Relaxed);
+    }
 }
 
 /// How many cores the machine has, as far as the tree says (at most `MAX_CPUS`); `None` if it did not say.

@@ -95,6 +95,98 @@ pub fn hid_interfaces(config: &[u8], out: &mut [HidIface]) -> usize {
     n
 }
 
+/// A hub interface with its status-change endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct HubIface {
+    pub config_value: u8,
+    pub number: u8,
+    /// bInterfaceProtocol: 2 = a hub with one transaction translator per port.
+    pub protocol: u8,
+    pub ep_addr: u8,
+    pub ep_max_packet: u16,
+    pub ep_interval: u8,
+}
+
+/// The first hub interface (class 9) with an interrupt IN endpoint in a configuration descriptor.
+pub fn hub_interface(config: &[u8]) -> Option<HubIface> {
+    if config.len() < 9 || config[1] != DT_CONFIG {
+        return None;
+    }
+    let total = (u16::from_le_bytes([config[2], config[3]]) as usize).min(config.len());
+    let mut at = config[0] as usize;
+    let mut cur: Option<HubIface> = None;
+    while at + 2 <= total {
+        let (len, ty) = (config[at] as usize, config[at + 1]);
+        if len < 2 || at + len > total {
+            break;
+        }
+        let d = &config[at..at + len];
+        match ty {
+            DT_INTERFACE if len >= 9 => {
+                if cur.is_some_and(|c| c.ep_addr != 0) {
+                    return cur;
+                }
+                cur = (d[5] == 9 && d[3] == 0).then_some(HubIface { config_value: config[5], number: d[2], protocol: d[7], ..HubIface::default() });
+            }
+            DT_ENDPOINT if len >= 7 => {
+                if let Some(h) = cur.as_mut() {
+                    if d[3] & 3 == 3 && d[2] & 0x80 != 0 && h.ep_addr == 0 {
+                        (h.ep_addr, h.ep_max_packet, h.ep_interval) = (d[2], u16::from_le_bytes([d[4], d[5]]) & 0x7FF, d[6]);
+                    }
+                }
+            }
+            _ => {}
+        }
+        at += len;
+    }
+    cur.filter(|c| c.ep_addr != 0)
+}
+
+/// What a hub descriptor says: the number of downstream ports, how long power takes to settle (milliseconds), and the transaction translator think time (0..=3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HubInfo {
+    pub ports: u8,
+    pub power_good_ms: u16,
+    pub think_time: u8,
+}
+
+/// Read a hub descriptor (USB 2 type 0x29). A hub with no ports, or more than 15 (the route string has four bits per tier), is refused.
+pub fn hub_descriptor(d: &[u8]) -> Option<HubInfo> {
+    if d.len() < 7 || d[1] != 0x29 {
+        return None;
+    }
+    let ports = d[2];
+    (1..=15).contains(&ports).then(|| HubInfo { ports, power_good_ms: (d[5] as u16 * 2).min(500), think_time: (d[3] >> 5) & 3 })
+}
+
+/// What a hub port's status words say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortStatus {
+    pub connected: bool,
+    pub enabled: bool,
+    pub reset: bool,
+    pub connect_changed: bool,
+    pub reset_changed: bool,
+    /// The speed of what is connected, once the port was reset: the xHCI speed id (1 full, 2 low, 3 high).
+    pub speed: u8,
+}
+
+/// `GET_STATUS` for a hub port answers 4 bytes: `wPortStatus`, `wPortChange`.
+pub fn port_status(d: &[u8]) -> Option<PortStatus> {
+    if d.len() < 4 {
+        return None;
+    }
+    let (st, ch) = (u16::from_le_bytes([d[0], d[1]]), u16::from_le_bytes([d[2], d[3]]));
+    Some(PortStatus {
+        connected: st & 1 != 0,
+        enabled: st & 2 != 0,
+        reset: st & 1 << 4 != 0,
+        connect_changed: ch & 1 != 0,
+        reset_changed: ch & 1 << 4 != 0,
+        speed: if st & 1 << 10 != 0 { 3 } else if st & 1 << 9 != 0 { 2 } else { 1 },
+    })
+}
+
 /// The xHCI endpoint context `Interval` for an interrupt endpoint: an exponent of 125 microsecond frames. Full and low speed devices give `bInterval` in
 /// milliseconds (1..=255), high and super speed give an exponent plus one (1..=16).
 pub fn xhci_interval(speed: u8, b_interval: u8) -> u8 {

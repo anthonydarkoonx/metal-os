@@ -107,6 +107,7 @@ pub fn start_secondaries() -> usize {
             }
         }
     }
+    crate::platform::set_cpu_count_if_unknown(started + 1); // (placement and the timer phase use the same count as the cores that came up)
     started
 }
 

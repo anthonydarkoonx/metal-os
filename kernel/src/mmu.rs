@@ -53,7 +53,7 @@ static KERNEL_L2: Global<Table> = Global::new(Table([0; 512]));
 /// 2 MiB blocks of `KERNEL_L2_HI`. The same for every task; the user windows live in TTBR0.
 static KERNEL_L1_HI: Global<Table> = Global::new(Table([0; 512]));
 static KERNEL_L2_HI: Global<Table> = Global::new(Table([0; 512]));
-/// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 5 MiB with its stacks, at any page: at most four blocks).
+/// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 5.5 MiB with its 16 stacks, at any page: at most four blocks, 6 here for headroom; `init` checks).
 const KERNEL_L3_N: usize = 6;
 static KERNEL_L3: Global<[Table; KERNEL_L3_N]> = Global::new([const { Table([0; 512]) }; KERNEL_L3_N]);
 
@@ -106,6 +106,7 @@ pub fn init(ram: usize) {
         (&__kernel_start as *const u8 as usize, &__text_end as *const u8 as usize, &__ro_end as *const u8 as usize, &__stack_top as *const u8 as usize)
     };
     let mut used = 0;
+    assert!(((top - 1 - gib) >> 21) - ((start - gib) >> 21) < KERNEL_L3_N, "the kernel image (with its stacks) spans more 2 MiB blocks than KERNEL_L3_N");
     for block in (start - gib) >> 21..=(top - 1 - gib) >> 21 {
         let l3 = &mut l3s[used].0;
         used += 1;

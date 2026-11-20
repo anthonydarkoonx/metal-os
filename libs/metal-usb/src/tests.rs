@@ -156,3 +156,39 @@ fn intervals() {
     assert_eq!(xhci_interval(3, 4), 3); // high speed: bInterval is exponent + 1
     assert_eq!(xhci_interval(4, 0), 0);
 }
+
+#[test]
+fn hub_descriptors_and_ports() {
+    // 9 bytes: length, type 0x29, 4 ports, characteristics 0x0089 (think time 0), 50 * 2 ms, current, removable, power mask
+    let h = hub_descriptor(&[9, 0x29, 4, 0x89, 0, 50, 1, 0, 0xff]).unwrap();
+    assert_eq!((h.ports, h.power_good_ms, h.think_time), (4, 100, 0));
+    assert_eq!(hub_descriptor(&[9, 0x29, 0, 0, 0, 0, 0, 0, 0]), None);
+    assert_eq!(hub_descriptor(&[9, 0x29, 16, 0, 0, 0, 0, 0, 0]), None);
+    assert_eq!(hub_descriptor(&[9, 0x29, 4]), None);
+    assert_eq!(hub_descriptor(&[9, 0x2a, 4, 0, 0, 0, 0, 0, 0]), None);
+    let p = port_status(&[0x03, 0x01, 0x01, 0x00]).unwrap();
+    assert!(p.connected && p.enabled && p.connect_changed && !p.reset_changed);
+    assert_eq!(p.speed, 1);
+    assert_eq!(port_status(&[0x03, 0x06, 0x10, 0x00]).unwrap().speed, 3); // high speed bit, reset change
+    assert_eq!(port_status(&[0x01, 0x03, 0, 0]).unwrap().speed, 2);
+    assert!(port_status(&[1, 2, 3]).is_none());
+}
+
+#[test]
+fn hub_interface_walk() {
+    let mut c: std::vec::Vec<u8> = std::vec![9, 2, 0, 0, 1, 1, 0, 0xe0, 50];
+    c.extend_from_slice(&[9, 4, 0, 0, 1, 9, 0, 1, 0]); // class 9, protocol 1
+    c.extend_from_slice(&[7, 5, 0x81, 3, 1, 0, 12]);
+    let total = c.len() as u16;
+    c[2..4].copy_from_slice(&total.to_le_bytes());
+    let h = hub_interface(&c).unwrap();
+    assert_eq!((h.config_value, h.number, h.protocol, h.ep_addr, h.ep_max_packet, h.ep_interval), (1, 0, 1, 0x81, 1, 12));
+    // a HID interface is not a hub
+    let mut k: std::vec::Vec<u8> = std::vec![9, 2, 0, 0, 1, 1, 0, 0xe0, 50, 9, 4, 0, 0, 1, 3, 1, 1, 0, 7, 5, 0x81, 3, 8, 0, 10];
+    let t = k.len() as u16;
+    k[2..4].copy_from_slice(&t.to_le_bytes());
+    assert!(hub_interface(&k).is_none());
+    for cut in 0..c.len() {
+        let _ = hub_interface(&c[..cut]);
+    }
+}

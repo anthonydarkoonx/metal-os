@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """USB input test: boot the kernel under QEMU with an xHCI controller, a USB keyboard and a USB tablet, press keys and move the pointer through QMP, and check the
-driver reported each one. Usage: usb-test.py '<qemu command line>' (the command line must not already have a -qmp option)."""
+driver reported each one. Usage: usb-test.py '<qemu command line>' flat|hub (the command line must not already have a -qmp option; `hub`: the devices sit behind a hub,
+so the hub path is the only way to them; `flat`: they are on root ports, and the test also plugs a second keyboard in and out and holds a key down)."""
 import json, os, shlex, socket, subprocess, sys, time
 
 SOCK = "build-usb.sock"
@@ -43,6 +44,7 @@ def qmp(sock, f, obj):
 
 
 def run(qemu):
+    mode = sys.argv[2] if len(sys.argv) > 2 else "flat"
     if wait_for("[kbd] usb ready", 90) is None:
         print("== USB: FAILED (the input driver never reported a USB controller) ==")
         print(open(LOG, errors="replace").read()[-1500:])
@@ -80,6 +82,26 @@ def run(qemu):
     send("tab0", [{"type": "btn", "data": {"down": True, "button": "left"}}])
     send("tab0", [{"type": "btn", "data": {"down": False, "button": "left"}}])
     time.sleep(1.0)
+    extra = []
+    if mode == "flat":
+        # a held key repeats
+        send("kbd0", [key("x", True)])
+        time.sleep(1.5)
+        send("kbd0", [key("x", False)])
+        # a keyboard plugged in while the system runs is found, and gone when unplugged
+        r = qmp(s, f, {"execute": "device_add", "arguments": {"driver": "usb-kbd", "id": "kbd9", "bus": "xhci.0"}})
+        time.sleep(2.0)
+        mid = open(LOG, errors="replace").read()
+        r2 = qmp(s, f, {"execute": "device_del", "arguments": {"id": "kbd9"}})
+        time.sleep(2.0)
+        end = open(LOG, errors="replace").read()
+        extra = [
+            ("a held key repeats", end.count("[usb] key 45 repeat") >= 2),
+            ("a keyboard plugged in later is found", mid.count("[usb] device attached") >= 3 and "error" not in r),
+            ("a keyboard unplugged is forgotten", "device removed" in end[len(mid):] and "error" not in r2),
+        ]
+    else:
+        extra = [("the hub is found", "[usb] hub attached" in open(LOG, errors="replace").read()), ("the devices behind it are found", open(LOG, errors="replace").read().count("[usb] device attached") >= 2)]
     out = open(LOG, errors="replace").read()
     ok = True
     expect = [
@@ -91,6 +113,9 @@ def run(qemu):
     for what, text in expect:
         found = text in out or (what == "pointer position" and "[usb] pointer at 16383 8191" in out)
         print(f"[usb-test] TEST {what} reaches the driver: {'PASS' if found else 'FAIL'}")
+        ok &= found
+    for what, found in extra:
+        print(f"[usb-test] TEST {what}: {'PASS' if found else 'FAIL'}")
         ok &= found
     if "PANIC" in out:
         print("[usb-test] the kernel panicked")

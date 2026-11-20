@@ -26,6 +26,8 @@ NET_FWD_PORT ?= 18077
 # the input devices: virtio keyboard and tablet (the USB test swaps them for an xHCI controller with a USB keyboard and tablet)
 QEMU_INPUT := -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on
 QEMU_USB_INPUT := -device qemu-xhci,id=xhci -device usb-kbd,id=kbd0,bus=xhci.0 -device usb-tablet,id=tab0,bus=xhci.0
+# ... or with a hub on the first port and both devices behind it
+QEMU_USB_HUB_INPUT := -device qemu-xhci,id=xhci -device usb-hub,id=hub1,bus=xhci.0,port=1 -device usb-kbd,id=kbd0,bus=xhci.0,port=1.1 -device usb-tablet,id=tab0,bus=xhci.0,port=1.2
 QEMU_DEV := -drive if=none,id=d0,file=$(DISK),format=raw -device virtio-blk-pci,drive=d0,disable-legacy=on,iommu_platform=on \
             -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1024,yres=768 \
             $(QEMU_INPUT) \
@@ -54,7 +56,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: usb-test usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: usb-test usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -471,7 +473,7 @@ stack-guard: kernel disk
 	 outb=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow-bigframe,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0 and core 1 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$outb =="; exit 1; }
 
-test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard fuzz usb-test usb-test-noncoherent
+test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard fuzz usb-test usb-test-hub usb-test-noncoherent
 
 # Licensing hygiene: the ZSTD constants must equal RFC 8878's tables (needs network once).
 provenance-check:
@@ -524,8 +526,13 @@ clippy:
 # USB input: an xHCI controller with a USB keyboard and tablet instead of the virtio ones; the script types and clicks through QEMU's QMP socket and
 # checks that the driver saw each key and button (the driver logs them only in this mode, `opt/metal/only=10`).
 usb-test: kernel disk
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10'
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' flat
 
 # ... and again with the machine's DMA treated as not cache-coherent (the driver must clean and flush its rings and buffers itself)
 usb-test-noncoherent: kernel disk
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1'
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1' flat
+
+# ... with the keyboard and tablet behind a hub (and the noncoherent variant)
+usb-test-hub: kernel disk
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' hub
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1' hub

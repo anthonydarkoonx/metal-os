@@ -296,6 +296,16 @@ fn publish(tid: usize) {
             _ => (false, false),
         };
         let live = ready || timed || matches!(s, State::RingWait(_));
+        // (one word each now: add before removing, so that a task changing from one kind of wait to the other is
+        // never in neither mask, which a core deciding how long to sleep could take for "nothing to wake for")
+        for add in [true, false] {
+            for (mask, want) in [(&READY, ready), (&TIMED, timed), (&LIVE, live)] {
+                if want == add && mask.has(tid) != want {
+                    mask.set(tid, want);
+                }
+            }
+        }
+        // (the time goes in after the task's bit: a scan that has just reset the hint and read the mask either sees the bit, or the hint is lowered after it)
         match s {
             State::Sleep(d) => {
                 NEXT_TIMED.fetch_min(d, Ordering::SeqCst);
@@ -310,15 +320,6 @@ fn publish(tid: usize) {
                 }
             }
             _ => {}
-        }
-        // (one word each now: add before removing, so that a task changing from one kind of wait to the other is
-        // never in neither mask, which a core deciding how long to sleep could take for "nothing to wake for")
-        for add in [true, false] {
-            for (mask, want) in [(&READY, ready), (&TIMED, timed), (&LIVE, live)] {
-                if want == add && mask.has(tid) != want {
-                    mask.set(tid, want);
-                }
-            }
         }
         if state(tid) == s {
             return;

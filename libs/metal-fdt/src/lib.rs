@@ -97,7 +97,7 @@ impl<'a> Fdt<'a> {
         let (off_struct, off_strings) = (be32(blob, 8)? as usize, be32(blob, 12)? as usize);
         let (last_compat, version) = (be32(blob, 24)?, be32(blob, 20)?);
         let (size_strings, size_struct) = (be32(blob, 32)? as usize, be32(blob, 36)? as usize);
-        if total > blob.len() || version < last_compat.min(17) || version < 16 {
+        if total > blob.len() || version < 16 || last_compat > 17 {
             return None;
         }
         let blob = &blob[..total];

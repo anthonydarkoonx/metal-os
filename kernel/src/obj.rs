@@ -109,7 +109,7 @@ pub fn init_table(n: usize) {
     *t = crate::table::carve_slice(n, |_| MemObj { kind: ObjKind::Unused, pa: 0, pages: 0, aux: 0, root: 0, list: 0, owner: NO_OWNER });
 }
 
-/// All streams a driver role's devices sit behind (the input driver has two: keyboard and pointer).
+/// All streams a driver role's devices sit behind (the input driver has three: keyboard, pointer and USB controller).
 pub fn sids_of_role(role: u8) -> [Option<u16>; 3] {
     crate::devices::sids_of_role(role)
 }
@@ -140,16 +140,17 @@ pub fn init() {
 /// Object numbers 52..=63 belong to the platform (its own devices: `platform.rs` names them); the objects programs make start here.
 pub const FIRST_PLATFORM_OBJ: u16 = 52;
 /// The most session pages of either kind; the objects of the single pages follow the platform's (64.., then 64 + MAX_SESSIONS..).
-pub const MAX_SESSIONS: usize = 256;
+pub const MAX_SESSIONS: usize = 256; // (one more than can be used: the pool bits are whole words)
 pub const OBJ_SHM_VFS_PROG0: u16 = 64;
 pub const OBJ_SHM_NET_PROG0: u16 = OBJ_SHM_VFS_PROG0 + MAX_SESSIONS as u16;
 const FIRST_DYNAMIC: usize = 64 + 2 * MAX_SESSIONS;
 
 static SESSIONS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
 
-/// How many file sessions (and, separately, network sessions) a machine with `tasks` task slots has: a quarter of the slots, 8..256.
+/// How many file sessions (and, separately, network sessions) a machine with `tasks` task slots has: a quarter of the slots, 8..255 (session numbers are
+/// bytes, and 255 means "none" in `spawn.rs`).
 pub fn sessions_for(tasks: usize) -> usize {
-    (tasks / 4).clamp(8, MAX_SESSIONS)
+    (tasks / 4).clamp(8, MAX_SESSIONS - 1)
 }
 
 pub fn init_sessions(tasks: usize) {

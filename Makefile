@@ -71,7 +71,7 @@ DESKTOP_DIR := $(abspath $(DESKTOP))
 DESKTOP_OUT := $(DESKTOP_DIR)/target-metallium-os/$(TARGET)/release
 DESKTOP_REPO := "https://github.com/anthonydarkoonx/metallium-os"
 # (the desktop's dependencies sit in `deps/` or, with newer cargo, in `build/<crate>/<hash>/out/`: every such directory is searched)
-USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metallium_desktop_boot=$(DESKTOP_OUT)/libmetal_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
+USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metallium_desktop_boot=$(DESKTOP_OUT)/libmetallium_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
 # The desktop's programs: its `os/` workspace builds them as position-independent programs; they are signed and put in the system image by
 # tools/mkmap.py (METALLIUM_EXTRA_PACKAGES) and installed by default through `/etc/program-defaults`.
 DESKTOP_PKG := $(DESKTOP_DIR)/target-metallium-os/pkg

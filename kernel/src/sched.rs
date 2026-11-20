@@ -34,10 +34,10 @@ use crate::task::{self, frame, info, State, NOT_PINNED};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mem, mmu, timer};
 use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use metal_sched::energy::{self, CoreState, Spill};
-use metal_sched::rt::{Admission, Job, Params};
-use metal_sched::util::Util;
-use metal_sched::{place, quantum_us, Class, Core, CoreKind, Rank};
+use metallium_sched::energy::{self, CoreState, Spill};
+use metallium_sched::rt::{Admission, Job, Params};
+use metallium_sched::util::Util;
+use metallium_sched::{place, quantum_us, Class, Core, CoreKind, Rank};
 
 // ---- run state ------------------------------------------------------------------------------
 //

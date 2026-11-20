@@ -9,9 +9,9 @@
 //! SuperSpeed hubs, hubs with a transaction translator per port, more than 16 devices at once.
 use alloc::vec::Vec;
 use core::ptr::{read_volatile, write_volatile};
-use metal_driver_rt::dma;
-use metal_driver_rt::*;
-use metal_usb::{hid_interfaces, hub_descriptor, hub_interface, port_status, xhci_interval, HidIface, HubInfo, Keyboard, Pointer};
+use metallium_driver_rt::dma;
+use metallium_driver_rt::*;
+use metallium_usb::{hid_interfaces, hub_descriptor, hub_interface, port_status, xhci_interval, HidIface, HubInfo, Keyboard, Pointer};
 
 /// Where this task maps the controller's registers and shared memory (a handle in the big window for the memory: it is more than 64 KiB's worth of handle).
 const MMIO_H: usize = 0x8027_0000;
@@ -646,11 +646,11 @@ impl Usb {
             let kind = if i.subclass == 1 && i.protocol == 1 {
                 Kind::Keyboard(Keyboard::new())
             } else if i.subclass == 1 && i.protocol == 2 {
-                Kind::Pointer { layout: metal_usb::boot_mouse(), buttons: 0 }
+                Kind::Pointer { layout: metallium_usb::boot_mouse(), buttons: 0 }
             } else {
                 // a descriptor tells where a pointer's fields are
                 let desc = self.read_ctrl(slot, 0x81, 6, 0x22 << 8, i.number as u16, i.report_len as usize)?;
-                match metal_usb::parse_pointer(&desc) {
+                match metallium_usb::parse_pointer(&desc) {
                     Some(layout) => Kind::Pointer { layout, buttons: 0 },
                     None => continue,
                 }
@@ -689,7 +689,7 @@ impl Usb {
 
     // ---- hubs ----------------------------------------------------------------------------------------------------------------------------
 
-    fn start_hub(&mut self, slot: u8, speed: u32, h: metal_usb::HubIface) -> Result<(), &'static str> {
+    fn start_hub(&mut self, slot: u8, speed: u32, h: metallium_usb::HubIface) -> Result<(), &'static str> {
         let di = self.idx(slot)?;
         if self.devs[di].tier >= 3 || speed >= 4 {
             return Err("hub too deep, or a SuperSpeed hub");
@@ -717,7 +717,7 @@ impl Usb {
         Ok(())
     }
 
-    fn hub_port_status(&mut self, slot: u8, port: u32) -> Result<metal_usb::PortStatus, &'static str> {
+    fn hub_port_status(&mut self, slot: u8, port: u32) -> Result<metallium_usb::PortStatus, &'static str> {
         let d = self.read_ctrl(slot, 0xA3, 0, 0, port as u16, 4)?;
         port_status(&d).ok_or("short port status")
     }

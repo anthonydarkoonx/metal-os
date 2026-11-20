@@ -3,7 +3,7 @@
 extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
-use metal_programs::*;
+use metallium_programs::*;
 
 // Test driver and command-line client for the program manager. Slot 0 is a send capability to the control endpoint.
 // Runs the program-manager scenario and prints one TEST line per check; the exit code is the number of failures.
@@ -52,12 +52,12 @@ fn saved(id: &str, ab: u64) -> (u64, u64) {
 
 /// Poll `f` for up to `ticks` ticks.
 fn until(ticks: u64, mut f: impl FnMut() -> bool) -> bool {
-    let t0 = metal_programs::ticks();
+    let t0 = metallium_programs::ticks();
     loop {
         if f() {
             return true;
         }
-        if metal_programs::ticks() - t0 > ticks {
+        if metallium_programs::ticks() - t0 > ticks {
             return false;
         }
         sleep(2);

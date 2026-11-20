@@ -1,11 +1,11 @@
 //! Random numbers for address-space layout randomisation (`random_stack_top` etc. in task.rs). Not for cryptography.
 //!
-//! The generator is `metal-rand`'s ChaCha20 with fast key erasure: each draw is unrelated to the others, and nothing a
+//! The generator is `metallium-rand`'s ChaCha20 with fast key erasure: each draw is unrelated to the others, and nothing a
 //! program can see (its own stack top, say) says anything about the next program's layout.
 //!
 //! Seeding, in order of preference (all of it is folded into one key, so any one good source is enough):
 //!  * the CPU's RNDR register, where FEAT_RNG exists (QEMU's `-cpu max` has it);
-//!  * `-fw_cfg name=opt/metal/seed,file=/dev/urandom` (the first 32 bytes; the test harness can pass this);
+//!  * `-fw_cfg name=opt/metallium/seed,file=/dev/urandom` (the first 32 bytes; the test harness can pass this);
 //!  * the system counter and the machine ID (weak: that is all there is without the other two).
 //! After boot, the time of every interrupt is folded in as well.
 //!
@@ -13,14 +13,14 @@
 //! and folds them in (not in the debugging modes below, which promise a layout that depends on nothing else).
 //!
 //! For debugging there are three modes that give up unpredictability on purpose:
-//!  * `opt/metal/noaslr=1`: every layout is the lowest value of its range;
-//!  * `opt/metal/aslr-log=1`: draws a boot seed, prints it, and runs from it with no later input;
-//!  * `opt/metal/aslr-seed=<n>`: runs from the seed `n` (a number an `aslr-log` run printed). Layouts of the programs started
+//!  * `opt/metallium/noaslr=1`: every layout is the lowest value of its range;
+//!  * `opt/metallium/aslr-log=1`: draws a boot seed, prints it, and runs from it with no later input;
+//!  * `opt/metallium/aslr-seed=<n>`: runs from the seed `n` (a number an `aslr-log` run printed). Layouts of the programs started
 //!    at boot are then the same as in that run; programs started later depend on the order in which they are started.
 #![forbid(unsafe_code)]
 use crate::sync::{SpinLock, R_RAND};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use metal_rand::Rng;
+use metallium_rand::Rng;
 
 static RNG: SpinLock<Option<Rng>> = SpinLock::new(None);
 static HAS_RNDR: AtomicBool = AtomicBool::new(false);
@@ -64,7 +64,7 @@ fn from_seed(n: u64) -> Rng {
         c.copy_from_slice(&(n ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)).to_le_bytes());
     }
     let mut r = Rng::from_seed(seed);
-    r.mix(b"metal-os aslr seed");
+    r.mix(b"metallium-os aslr seed");
     r
 }
 
@@ -72,19 +72,19 @@ fn from_seed(n: u64) -> Rng {
 pub fn init(disable: bool) {
     HAS_RNDR.store(crate::frame::cpu::has_rndr(), Ordering::Relaxed);
     DISABLED.store(disable, Ordering::Relaxed);
-    let replay = crate::platform::number(b"opt/metal/aslr-seed");
-    let log = crate::platform::flag(b"opt/metal/aslr-log");
+    let replay = crate::platform::number(b"opt/metallium/aslr-seed");
+    let log = crate::platform::flag(b"opt/metallium/aslr-log");
     let mut rng;
     if disable {
-        crate::kprintln!("[rand] WARNING: layout randomisation is off (opt/metal/noaslr): every layout is the lowest value of its range");
+        crate::kprintln!("[rand] WARNING: layout randomisation is off (opt/metallium/noaslr): every layout is the lowest value of its range");
     }
     if let Some(n) = replay {
         rng = from_seed(n);
         crate::kprintln!("[rand] layouts replay seed {n}");
-        crate::kprintln!("[rand] WARNING: layouts follow from a seed that was given (opt/metal/aslr-seed): anyone who knows it can predict them");
+        crate::kprintln!("[rand] WARNING: layouts follow from a seed that was given (opt/metallium/aslr-seed): anyone who knows it can predict them");
     } else {
         let mut seed = [0u8; 32];
-        let from_file = crate::platform::bytes(b"opt/metal/seed", &mut seed);
+        let from_file = crate::platform::bytes(b"opt/metallium/seed", &mut seed);
         let mut hw = [0u8; 32];
         let mut from_rndr = 0;
         for c in hw.chunks_mut(8) {
@@ -102,15 +102,15 @@ pub fn init(disable: bool) {
         if log {
             let n = rng.next_u64();
             rng = from_seed(n);
-            crate::kprintln!("[rand] layouts from seed {n} (replay with -fw_cfg name=opt/metal/aslr-seed,string={n})");
-            crate::kprintln!("[rand] WARNING: the seed is printed (opt/metal/aslr-log): layouts are predictable from this log");
+            crate::kprintln!("[rand] layouts from seed {n} (replay with -fw_cfg name=opt/metallium/aslr-seed,string={n})");
+            crate::kprintln!("[rand] WARNING: the seed is printed (opt/metallium/aslr-log): layouts are predictable from this log");
         } else {
             JITTER_ON.store(true, Ordering::Relaxed);
             let strong = from_file == 32 || from_rndr == 4;
             STRONG.store(strong && !disable, Ordering::Relaxed);
             crate::kprintln!("[rand] layouts seeded from: {}{}counter", if from_rndr == 4 { "RNDR " } else { "" }, if from_file > 0 { crate::platform::SEED_SOURCE } else { "" });
             if !strong {
-                crate::kprintln!("[rand] WARNING: neither RNDR nor a full opt/metal/seed: layouts are seeded from the counter alone and can be guessed");
+                crate::kprintln!("[rand] WARNING: neither RNDR nor a full opt/metallium/seed: layouts are seeded from the counter alone and can be guessed");
             }
         }
     }

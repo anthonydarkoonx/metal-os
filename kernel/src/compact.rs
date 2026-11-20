@@ -1,5 +1,5 @@
 //! Compaction *mechanism*: relocating movable pages and keeping statistics.
-//! The planner is `metal-compact`; the *policy* (when and how much to compact)
+//! The planner is `metallium-compact`; the *policy* (when and how much to compact)
 //! lives in the userspace `compactd` task, which reaches this module through a
 //! memory-control capability. The allocator can also call it synchronously
 //! when a contiguous allocation would otherwise fail ("direct compaction").
@@ -15,7 +15,7 @@ use crate::sync::{SpinLock, R_COMPACT};
 use crate::task::{self, State};
 use crate::mmu;
 use core::sync::atomic::{AtomicU64, Ordering};
-use metal_compact::Compactor;
+use metallium_compact::Compactor;
 
 struct Pass {
     comp: Compactor,

@@ -322,7 +322,7 @@ impl Shell {
 
     fn edit_key(&mut self, b: u8) {
         let Some(mut t) = self.edit.take() else { return };
-        if t.key(&self.vfs, b) == metal_edit::Outcome::Exit {
+        if t.key(&self.vfs, b) == metallium_edit::Outcome::Exit {
             // the screen as it was before the editor, as nano leaves it, then a new prompt
             match self.saved_screen.take() {
                 Some(s) => self.con.restore(&s),
@@ -905,7 +905,7 @@ impl Shell {
             argblock.push(0);
         }
         argblock.push(0);
-        for e in [format!("PWD={}", self.cwd), String::from("PATH=/system/bin:/data/bin"), String::from("TERM=metal"), String::from("HOME=/data")] {
+        for e in [format!("PWD={}", self.cwd), String::from("PATH=/system/bin:/data/bin"), String::from("TERM=metallium"), String::from("HOME=/data")] {
             argblock.extend_from_slice(e.as_bytes());
             argblock.push(0);
         }
@@ -925,11 +925,11 @@ impl Shell {
         }
         rq[64 + 4 * 7] = out_slot as u8; // the console: a send-only copy as the program's slot 7
         rq[66 + 4 * 7..68 + 4 * 7].copy_from_slice(&0b101u16.to_le_bytes()); // send, and hand it on to the programs it starts
-        let mut tid = metal_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], 8, &mut rq, &image);
+        let mut tid = metallium_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], 8, &mut rq, &image);
         if tid == -1 {
             // (no network on this machine: the program gets files only)
             rq[4..8].copy_from_slice(&1u32.to_le_bytes());
-            tid = metal_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], 8, &mut rq, &image);
+            tid = metallium_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], 8, &mut rq, &image);
         }
         if tid < 0 {
             return Err(format!("{name}: cannot start ({tid})"));

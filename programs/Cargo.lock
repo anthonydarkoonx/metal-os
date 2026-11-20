@@ -3,24 +3,24 @@
 version = 4
 
 [[package]]
-name = "metal-ed25519"
+name = "metallium-ed25519"
 version = "0.1.0"
 
 [[package]]
-name = "metal-loader"
+name = "metallium-loader"
 version = "0.1.0"
 
 [[package]]
-name = "metal-map"
+name = "metallium-map"
 version = "0.1.0"
 dependencies = [
- "metal-ed25519",
+ "metallium-ed25519",
 ]
 
 [[package]]
-name = "metal-programs"
+name = "metallium-programs"
 version = "0.1.0"
 dependencies = [
- "metal-loader",
- "metal-map",
+ "metallium-loader",
+ "metallium-map",
 ]

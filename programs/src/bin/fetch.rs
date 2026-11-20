@@ -3,10 +3,10 @@
 extern crate alloc;
 use alloc::format;
 use alloc::vec::Vec;
-use metal_programs::io::{Read, Write};
-use metal_programs::net::*;
-use metal_programs::time::Duration;
-use metal_programs::*;
+use metallium_programs::io::{Read, Write};
+use metallium_programs::net::*;
+use metallium_programs::time::Duration;
+use metallium_programs::*;
 
 // fetch <host> [port] [path]: a plain HTTP/1.0 GET; the response (headers and body) goes to standard output.
 program!("fetch", |c| -> u64 {

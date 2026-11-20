@@ -1,7 +1,7 @@
 OBJCOPY ?= aarch64-linux-gnu-objcopy
 TARGET  := aarch64-unknown-none-softfloat
-USER_ELF := user/target/$(TARGET)/release/metal-user
-KERNEL   := kernel/target/$(TARGET)/release/metal-kernel
+USER_ELF := user/target/$(TARGET)/release/metallium-user
+KERNEL   := kernel/target/$(TARGET)/release/metallium-kernel
 # QEMU loads the kernel as an ELF file (entry point and load address come from the ELF headers).
 KERNEL_BIN := $(KERNEL).img
 DISK     ?= disk.img
@@ -37,7 +37,7 @@ QEMU_DEV := -drive if=none,id=d0,file=$(DISK),format=raw -device virtio-blk-pci,
             -device virtio-rng-pci,disable-legacy=on,iommu_platform=on
 # (a fresh 32 random bytes for every make run: the kernel mixes them into its layout generator, see kernel/src/rand.rs)
 SEED_FILE := $(shell head -c 32 /dev/urandom > build-seed.bin && echo build-seed.bin)
-QEMU     := qemu-system-aarch64 -fw_cfg name=opt/metal/seed,file=$(SEED_FILE) -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) \
+QEMU     := qemu-system-aarch64 -fw_cfg name=opt/metallium/seed,file=$(SEED_FILE) -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(RAM_MIB)M -fw_cfg name=opt/metallium/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) \
             -nographic -semihosting $(QEMU_DEV) -kernel $(KERNEL_BIN)
 
 # The command line the tests use (for the scripts in tools/ that start the guest themselves)
@@ -50,7 +50,7 @@ WITH_PEER := tools/with-peer.sh $(NET_FWD_PORT)
 # Chaos test: a monkey kills services at random while a workload uses them; see user/src/chaos.rs.
 CHAOS_SEED ?= 1
 chaos: kernel disk
-	@$(WITH_PEER) sh -c 'timeout 200 $(QEMU) -fw_cfg name=opt/metal/chaos,string=$(CHAOS_SEED) > build-chaos.log 2>&1'; rc=$$?; \
+	@$(WITH_PEER) sh -c 'timeout 200 $(QEMU) -fw_cfg name=opt/metallium/chaos,string=$(CHAOS_SEED) > build-chaos.log 2>&1'; rc=$$?; \
 	 grep -E "^\[(chaos|monkey)\].*(TEST|done|CORRUPT|LOST|workload|free frames)" build-chaos.log; \
 	 [ $$(grep -c "^\[chaos\] TEST.*PASS" build-chaos.log) -ge 7 ] && \
 	 ! grep -qE "^\[chaos\].*(FAIL|CORRUPT|LOST)" build-chaos.log && \
@@ -62,40 +62,40 @@ chaos: kernel disk
 
 all: kernel
 
-# A desktop environment can take over the screen task: `make run-window DESKTOP=../metal-os-desktop` builds that repository's
-# `metal-desktop-boot` crate (the contract is docs/DESKTOP-INTERFACE.md) and links it into the user image. Without DESKTOP
+# A desktop environment can take over the screen task: `make run-window DESKTOP=../metallium-os-desktop` builds that repository's
+# `metallium-desktop-boot` crate (the contract is docs/DESKTOP-INTERFACE.md) and links it into the user image. Without DESKTOP
 # the image has the built-in terminal console and nothing of any desktop.
 DESKTOP ?=
 ifneq ($(DESKTOP),)
 DESKTOP_DIR := $(abspath $(DESKTOP))
-DESKTOP_OUT := $(DESKTOP_DIR)/target-metal-os/$(TARGET)/release
+DESKTOP_OUT := $(DESKTOP_DIR)/target-metallium-os/$(TARGET)/release
 DESKTOP_REPO := "https://github.com/anthonydarkoonx/metallium-os"
 # (the desktop's dependencies sit in `deps/` or, with newer cargo, in `build/<crate>/<hash>/out/`: every such directory is searched)
-USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metal_desktop_boot=$(DESKTOP_OUT)/libmetal_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
+USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metallium_desktop_boot=$(DESKTOP_OUT)/libmetal_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
 # The desktop's programs: its `os/` workspace builds them as position-independent programs; they are signed and put in the system image by
-# tools/mkmap.py (METAL_EXTRA_PACKAGES) and installed by default through `/etc/program-defaults`.
-DESKTOP_PKG := $(DESKTOP_DIR)/target-metal-os/pkg
-export METAL_EXTRA_PACKAGES := $(DESKTOP_PKG)
+# tools/mkmap.py (METALLIUM_EXTRA_PACKAGES) and installed by default through `/etc/program-defaults`.
+DESKTOP_PKG := $(DESKTOP_DIR)/target-metallium-os/pkg
+export METALLIUM_EXTRA_PACKAGES := $(DESKTOP_PKG)
 DESKTOP_PIE := -C relocation-model=pic -C link-arg=-pie -C link-arg=--no-dynamic-linker -C link-arg=-znorelro
 desktop-programs:
-	cp $(DESKTOP_DIR)/os/Cargo.lock $(DESKTOP_DIR)/os/Cargo.lock.metal-os-bak 2>/dev/null || true
-	cd $(DESKTOP_DIR)/os && METAL_OS_DIR=$(CURDIR) RUSTFLAGS='$(DESKTOP_PIE) -Zembed-metadata=yes' cargo build --release --target $(TARGET) --target-dir ../target-metal-os-programs \
-	  --config 'patch.$(DESKTOP_REPO).metal-driver-rt.path="$(CURDIR)/libs/metal-driver-rt"' \
-	  --config 'patch.$(DESKTOP_REPO).metal-gfx.path="$(CURDIR)/libs/metal-gfx"' \
-	  --config 'patch.$(DESKTOP_REPO).metal-programs.path="$(CURDIR)/programs"'; rc=$$?; \
-	  if [ -f $(DESKTOP_DIR)/os/Cargo.lock.metal-os-bak ]; then mv $(DESKTOP_DIR)/os/Cargo.lock.metal-os-bak $(DESKTOP_DIR)/os/Cargo.lock; fi; test $$rc = 0
+	cp $(DESKTOP_DIR)/os/Cargo.lock $(DESKTOP_DIR)/os/Cargo.lock.metallium-os-bak 2>/dev/null || true
+	cd $(DESKTOP_DIR)/os && METALLIUM_OS_DIR=$(CURDIR) RUSTFLAGS='$(DESKTOP_PIE) -Zembed-metadata=yes' cargo build --release --target $(TARGET) --target-dir ../target-metallium-os-programs \
+	  --config 'patch.$(DESKTOP_REPO).metallium-driver-rt.path="$(CURDIR)/libs/metallium-driver-rt"' \
+	  --config 'patch.$(DESKTOP_REPO).metallium-gfx.path="$(CURDIR)/libs/metallium-gfx"' \
+	  --config 'patch.$(DESKTOP_REPO).metallium-programs.path="$(CURDIR)/programs"'; rc=$$?; \
+	  if [ -f $(DESKTOP_DIR)/os/Cargo.lock.metallium-os-bak ]; then mv $(DESKTOP_DIR)/os/Cargo.lock.metallium-os-bak $(DESKTOP_DIR)/os/Cargo.lock; fi; test $$rc = 0
 	rm -rf $(DESKTOP_PKG); mkdir -p $(DESKTOP_PKG)/bin $(DESKTOP_PKG)/packages
-	for f in $(DESKTOP_DIR)/os/src/bin/*.rs; do n=$$(basename $$f .rs); cp $(DESKTOP_DIR)/target-metal-os-programs/$(TARGET)/release/$$n $(DESKTOP_PKG)/bin/$$n.pie; done
+	for f in $(DESKTOP_DIR)/os/src/bin/*.rs; do n=$$(basename $$f .rs); cp $(DESKTOP_DIR)/target-metallium-os-programs/$(TARGET)/release/$$n $(DESKTOP_PKG)/bin/$$n.pie; done
 	cp $(DESKTOP_DIR)/os/packages/*.manifest $(DESKTOP_PKG)/packages/
 	cp $(DESKTOP_DIR)/os/defaults $(DESKTOP_PKG)/defaults
 disk: desktop-programs
 
 desktop-lib:
-	cp $(DESKTOP_DIR)/Cargo.lock $(DESKTOP_DIR)/Cargo.lock.metal-os-bak
-	cd $(DESKTOP_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metal-desktop-boot --target-dir target-metal-os --config 'profile.release.lto="fat"' \
-	  --config 'patch.$(DESKTOP_REPO).metal-driver-rt.path="$(CURDIR)/libs/metal-driver-rt"' \
-	  --config 'patch.$(DESKTOP_REPO).metal-gfx.path="$(CURDIR)/libs/metal-gfx"'; rc=$$?; \
-	  mv $(DESKTOP_DIR)/Cargo.lock.metal-os-bak $(DESKTOP_DIR)/Cargo.lock; exit $$rc
+	cp $(DESKTOP_DIR)/Cargo.lock $(DESKTOP_DIR)/Cargo.lock.metallium-os-bak
+	cd $(DESKTOP_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metallium-desktop-boot --target-dir target-metallium-os --config 'profile.release.lto="fat"' \
+	  --config 'patch.$(DESKTOP_REPO).metallium-driver-rt.path="$(CURDIR)/libs/metallium-driver-rt"' \
+	  --config 'patch.$(DESKTOP_REPO).metallium-gfx.path="$(CURDIR)/libs/metallium-gfx"'; rc=$$?; \
+	  mv $(DESKTOP_DIR)/Cargo.lock.metallium-os-bak $(DESKTOP_DIR)/Cargo.lock; exit $$rc
 user: desktop-lib
 endif
 
@@ -123,7 +123,7 @@ programs:
 	$(OBJCOPY) -O binary programs/target/$(TARGET)/release/sleeper programs/build/sleeper.bin
 	cd programs && cargo build --release
 	for a in argdump hello; do cp programs/target/$(TARGET)/release/$$a programs/build/$$a.elf; done
-	cd programs && METAL_PIE=1 RUSTFLAGS="$(PIE_FLAGS)" cargo build --release --target-dir target-pie
+	cd programs && METALLIUM_PIE=1 RUSTFLAGS="$(PIE_FLAGS)" cargo build --release --target-dir target-pie
 	for a in $(PROGRAM_BINS); do cp programs/target-pie/$(TARGET)/release/$$a programs/build/$$a.pie; done
 
 disk: programs
@@ -138,14 +138,14 @@ host-test:
 # Independent check: the Rust EROFS reader must parse the Python-built image.
 erofs-check:
 	python3 tools/mkdisk.py $(DISK) build-sys.erofs
-	cargo run -q --release -p metal-erofs --example erofscat -- build-sys.erofs /hello.txt
+	cargo run -q --release -p metallium-erofs --example erofscat -- build-sys.erofs /hello.txt
 	@rm -f build-sys.erofs
 
 # Independent check: the Rust package parser must accept what tools/mkmap.py builds (and refuse the flawed fixtures).
 map-check: programs
 	python3 tools/mkmap.py
-	@for f in counter crasher hog probefs probenofs probespawn probespawnall fsa fsb nosign mismatch rogue tampered; do cargo run -q --release -p metal-map --example mapinfo -- programs/build/maps/$$f.map | grep -q '^ok ' || { echo "map-check: $$f.map not accepted"; exit 1; }; done
-	@cargo run -q --release -p metal-map --example mapinfo -- programs/build/maps/corrupt.map | grep -q 'refused BadChecksum' || { echo "map-check: corrupt.map not refused"; exit 1; }
+	@for f in counter crasher hog probefs probenofs probespawn probespawnall fsa fsb nosign mismatch rogue tampered; do cargo run -q --release -p metallium-map --example mapinfo -- programs/build/maps/$$f.map | grep -q '^ok ' || { echo "map-check: $$f.map not accepted"; exit 1; }; done
+	@cargo run -q --release -p metallium-map --example mapinfo -- programs/build/maps/corrupt.map | grep -q 'refused BadChecksum' || { echo "map-check: corrupt.map not refused"; exit 1; }
 	@echo "== MAP CHECK: ALL PASS =="
 
 # Boot in QEMU and assert on the console transcript.
@@ -381,33 +381,33 @@ qemu-test: kernel disk
 
 # Development shortcuts: boot, run one group of the conductor's tests and stop (see platform.rs `only`).
 quick-bench: kernel disk
-	@timeout 60 $(QEMU) -fw_cfg name=opt/metal/only,string=1 2>&1 | grep -E "BENCH|PANIC|panic|^\[sched\] [0-9]"
+	@timeout 60 $(QEMU) -fw_cfg name=opt/metallium/only,string=1 2>&1 | grep -E "BENCH|PANIC|panic|^\[sched\] [0-9]"
 
 # Syscall fuzzer (user/src/fuzz.rs): hostile calls from a task with a mixed set of capabilities, then a leak audit.
 fuzz: kernel disk
-	@timeout 120 $(QEMU) -fw_cfg name=opt/metal/fuzz,string=$(or $(SEED),1) > build-fuzz.log 2>&1; rc=$$?; \
+	@timeout 120 $(QEMU) -fw_cfg name=opt/metallium/fuzz,string=$(or $(SEED),1) > build-fuzz.log 2>&1; rc=$$?; \
 	 grep -aE "fuzz|\[client\] TEST|PANIC|panic" build-fuzz.log; \
 	 [ $$(grep -ac "^\[client\] TEST.*PASS" build-fuzz.log) -ge 5 ] && \
 	 ! grep -aqE "TEST.*FAIL|PANIC|panic" build-fuzz.log && \
 	 echo "== FUZZ (seed $(or $(SEED),1)): ALL PASS ==" || { echo "== FUZZ (seed $(or $(SEED),1)): FAILED (qemu rc=$$rc), see build-fuzz.log =="; exit 1; }
 
 quick-programs: kernel disk
-	@timeout 90 $(QEMU) -fw_cfg name=opt/metal/only,string=7 2>&1 | grep -aE "TEST|\[client\]|PANIC|panic|\[hello|\[crash"
+	@timeout 90 $(QEMU) -fw_cfg name=opt/metallium/only,string=7 2>&1 | grep -aE "TEST|\[client\]|PANIC|panic|\[hello|\[crash"
 
 quick-net: kernel disk
-	@$(WITH_PEER) sh -c 'timeout 200 $(QEMU) -fw_cfg name=opt/metal/only,string=8 2>&1 | grep -aE "TEST|\[client\]|\[nettest|\[netd|PANIC|panic"'
+	@$(WITH_PEER) sh -c 'timeout 200 $(QEMU) -fw_cfg name=opt/metallium/only,string=8 2>&1 | grep -aE "TEST|\[client\]|\[nettest|\[netd|PANIC|panic"'
 
 # Every task slot of a big table at once (1024 slots, 512 MiB): programs are started until SPAWN says the table is full, then all end together.
 scale:
 	@$(MAKE) -s scale-run RAM_MIB=512
 
 scale-run: kernel disk
-	@timeout 280 $(QEMU) -fw_cfg name=opt/metal/only,string=9 -fw_cfg name=opt/metal/max-tasks,string=1024 > build-scale.log 2>&1; \
+	@timeout 280 $(QEMU) -fw_cfg name=opt/metallium/only,string=9 -fw_cfg name=opt/metallium/max-tasks,string=1024 > build-scale.log 2>&1; \
 	 grep -a "task slots\|TEST\|PANIC\|panic" build-scale.log | cut -c1-300; \
 	 if grep -aq "TEST every one of 1024 task slots.*PASS" build-scale.log && grep -aq "TEST they are all killed.*PASS" build-scale.log && ! grep -aq "PANIC" build-scale.log; then echo "== SCALE: ALL PASS =="; else echo "== SCALE: FAILED =="; exit 1; fi
 
 quick-sched: kernel disk
-	@timeout 90 $(QEMU) -fw_cfg name=opt/metal/only,string=2 2>&1 | grep -E "SCHED|TEST|^\[sched\]|PANIC|panic|DEBUG"
+	@timeout 90 $(QEMU) -fw_cfg name=opt/metallium/only,string=2 2>&1 | grep -E "SCHED|TEST|^\[sched\]|PANIC|panic|DEBUG"
 
 # uniprocessor configuration too: no PSCI cores, no performance cores
 qemu-test-up:
@@ -417,7 +417,7 @@ qemu-test-up:
 # CPU write the SMMU must see is cleaned first (what a device that does not snoop the CPU caches needs). QEMU's
 # models ignore the attributes, so this checks that the maintenance path runs and breaks nothing.
 qemu-test-noncoherent: kernel disk
-	@$(WITH_PEER) sh -c 'timeout 260 $(QEMU) -fw_cfg name=opt/metal/dma-noncoherent,string=1 > build-noncoherent.log 2>&1'; rc=$$?; \
+	@$(WITH_PEER) sh -c 'timeout 260 $(QEMU) -fw_cfg name=opt/metallium/dma-noncoherent,string=1 > build-noncoherent.log 2>&1'; rc=$$?; \
 	 grep -E "SMMUv3 enabled|TEST virtio-blk write|TEST IOMMU stops|TEST the display driver|FAIL" build-noncoherent.log | cut -c1-200; \
 	 grep -q "not coherent" build-noncoherent.log && ! grep -q "FAIL" build-noncoherent.log && \
 	 grep -q "TEST virtio-blk write+readback.*PASS" build-noncoherent.log && \
@@ -428,27 +428,27 @@ qemu-test-noncoherent: kernel disk
 # Layout randomisation is reproducible: the same seed gives the boot tasks the same stacks and heaps, another seed does not,
 # and the seeds from the harness (no seed given) give different layouts every boot.
 aslr-replay: kernel disk
-	@run() { timeout 120 $(QEMU) -fw_cfg name=opt/metal/only,string=2 $$1 2>&1 | grep -a "layout of task" ; } ; \
-	 a=$$(run "-fw_cfg name=opt/metal/aslr-seed,string=12345"); b=$$(run "-fw_cfg name=opt/metal/aslr-seed,string=12345"); c=$$(run "-fw_cfg name=opt/metal/aslr-seed,string=12346"); \
+	@run() { timeout 120 $(QEMU) -fw_cfg name=opt/metallium/only,string=2 $$1 2>&1 | grep -a "layout of task" ; } ; \
+	 a=$$(run "-fw_cfg name=opt/metallium/aslr-seed,string=12345"); b=$$(run "-fw_cfg name=opt/metallium/aslr-seed,string=12345"); c=$$(run "-fw_cfg name=opt/metallium/aslr-seed,string=12346"); \
 	 n=$$(echo "$$a" | grep -c .); \
 	 [ "$$n" -ge 10 ] && [ "$$a" = "$$b" ] && [ "$$a" != "$$c" ] && echo "== ASLR REPLAY: ALL PASS ($$n boot tasks, same seed same layouts, other seed other layouts) ==" || { echo "== ASLR REPLAY: FAILED ($$n lines) =="; exit 1; }
 
 # Entropy: a normal boot folds in the virtio-rng device's bytes and warns about nothing; the modes that give up
 # unpredictability (noaslr, aslr-seed, aslr-log) say so in the boot log and leave the device alone.
 entropy: kernel disk
-	@run() { timeout 120 $(QEMU) -fw_cfg name=opt/metal/only,string=2 $$1 2>&1 | grep -a "\[rand\]" ; } ; \
-	 n=$$(run ""); a=$$(run "-fw_cfg name=opt/metal/noaslr,string=1"); b=$$(run "-fw_cfg name=opt/metal/aslr-seed,string=7"); c=$$(run "-fw_cfg name=opt/metal/aslr-log,string=1"); \
+	@run() { timeout 120 $(QEMU) -fw_cfg name=opt/metallium/only,string=2 $$1 2>&1 | grep -a "\[rand\]" ; } ; \
+	 n=$$(run ""); a=$$(run "-fw_cfg name=opt/metallium/noaslr,string=1"); b=$$(run "-fw_cfg name=opt/metallium/aslr-seed,string=7"); c=$$(run "-fw_cfg name=opt/metallium/aslr-log,string=1"); \
 	 echo "$$n" | grep -q "virtio-rng: 32 bytes folded" && ! echo "$$n" | grep -q WARNING \
 	 && echo "$$a" | grep -q "WARNING.*randomisation is off" && echo "$$b" | grep -q "WARNING.*seed that was given" && echo "$$c" | grep -q "WARNING.*seed is printed" \
 	 && ! echo "$$a$$b$$c" | grep -q "bytes folded" \
-	 && w=$$(timeout 120 $(subst -cpu max,-cpu cortex-a72,$(subst file=$(SEED_FILE),string=short,$(QEMU))) -fw_cfg name=opt/metal/only,string=2 2>&1 | grep -a "\[rand\]\|\[kaslr\]") \
-	 && echo "$$w" | grep -q "WARNING: neither RNDR nor a full opt/metal/seed" && echo "$$w" | grep -q "kaslr\] kernel image moved.*WARNING: neither RNDR" && ! echo "$$n" | grep -q "neither RNDR" \
+	 && w=$$(timeout 120 $(subst -cpu max,-cpu cortex-a72,$(subst file=$(SEED_FILE),string=short,$(QEMU))) -fw_cfg name=opt/metallium/only,string=2 2>&1 | grep -a "\[rand\]\|\[kaslr\]") \
+	 && echo "$$w" | grep -q "WARNING: neither RNDR nor a full opt/metallium/seed" && echo "$$w" | grep -q "kaslr\] kernel image moved.*WARNING: neither RNDR" && ! echo "$$n" | grep -q "neither RNDR" \
 	 && echo "== ENTROPY: ALL PASS (virtio-rng folded in on a normal boot; noaslr, aslr-seed and aslr-log warn and skip it; a boot with no RNDR and no seed file warns twice) ==" || { echo "== ENTROPY: FAILED: $$n / $$a / $$b / $$c / $$w =="; exit 1; }
 
 # The boot-time services map their devices and shared pages where the kernel chooses: three boots, the same mappings made
 # each time, at different addresses.
 service-maps: kernel disk
-	@for i in 1 2 3; do timeout 120 $(QEMU) -fw_cfg name=opt/metal/only,string=2 -fw_cfg name=opt/metal/map-log,string=1 > build-map$$i.log 2>&1; done; \
+	@for i in 1 2 3; do timeout 120 $(QEMU) -fw_cfg name=opt/metallium/only,string=2 -fw_cfg name=opt/metallium/map-log,string=1 > build-map$$i.log 2>&1; done; \
 	 r=$$(python3 tools/check_service_maps.py build-map1.log build-map2.log build-map3.log) && echo "== SERVICE MAPS: $$r ==" || { echo "== SERVICE MAPS: $$r =="; exit 1; }
 
 # Kernel address randomisation: the kernel image sits at a different place in RAM on every boot, inside RAM, clear of the
@@ -456,24 +456,24 @@ service-maps: kernel disk
 KASLR_BOOTS ?= 8
 kaslr: kernel disk
 	@addrs=""; for i in $$(seq $(KASLR_BOOTS)); do \
-	   out=$$(timeout 120 $(QEMU) -fw_cfg name=opt/metal/only,string=2 2>&1); \
+	   out=$$(timeout 120 $(QEMU) -fw_cfg name=opt/metallium/only,string=2 2>&1); \
 	   a=$$(echo "$$out" | grep -a "kernel image moved" | sed 's/.* to \(0x[0-9a-f]*\).*/\1/'); \
 	   echo "$$out" | grep -aq "PANIC" && { echo "== KASLR: FAILED: panic at $$a =="; exit 1; }; \
 	   echo "$$out" | grep -aq "\[client\] TEST" || { echo "== KASLR: FAILED: no tests ran at $$a =="; exit 1; }; \
 	   addrs="$$addrs $$a"; done; \
 	 n=$$(echo $$addrs | tr ' ' '\n' | sort -u | grep -c .); \
 	 bad=$$(echo $$addrs | tr ' ' '\n' | while read a; do [ -n "$$a" ] && [ $$((a)) -ge $$((0x40080000)) ] && [ $$((a)) -lt $$((0x40000000 + $(RAM_MIB) * 1048576)) ] || echo bad; done | grep -c bad); \
-	 small=$$(timeout 120 $(subst -m $(RAM_MIB)M,-m 16M,$(subst $(shell echo $$(( $(RAM_MIB) * 1048576 ))),16777216,$(QEMU))) -fw_cfg name=opt/metal/only,string=2 2>&1 | grep -a "kernel image moved\|no room" | head -1); \
+	 small=$$(timeout 120 $(subst -m $(RAM_MIB)M,-m 16M,$(subst $(shell echo $$(( $(RAM_MIB) * 1048576 ))),16777216,$(QEMU))) -fw_cfg name=opt/metallium/only,string=2 2>&1 | grep -a "kernel image moved\|no room" | head -1); \
 	 [ "$$n" -ge $$(( $(KASLR_BOOTS) - 1 )) ] && [ "$$bad" = 0 ] && echo "$$small" | grep -q . \
 	 && echo "== KASLR: ALL PASS ($(KASLR_BOOTS) boots, $$n different kernel addresses, all inside RAM; 16 MiB RAM: $$small) ==" || { echo "== KASLR: FAILED: $$n different addresses in $(KASLR_BOOTS) boots, $$bad out of range:$$addrs; 16 MiB: $$small =="; exit 1; }
 
 # The kernel's stacks have unmapped guard pages: running one out ends in a clear panic (not in silent corruption of
 # whatever lay below it), on the boot core and on another core.
 stack-guard: kernel disk
-	@out=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
-	 out1=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow-core1,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
-	 outb=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow-bigframe,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
-	 out31=$$(timeout 90 $(QEMU) -machine virt,gic-version=3,iommu=smmuv3 -smp 32 -fw_cfg name=opt/metal/stack-overflow-core,string=31 2>&1 | grep -a "stack overflow\|PANIC"); \
+	@out=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metallium/stack-overflow,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
+	 out1=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metallium/stack-overflow-core1,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
+	 outb=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metallium/stack-overflow-bigframe,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
+	 out31=$$(timeout 90 $(QEMU) -machine virt,gic-version=3,iommu=smmuv3 -smp 32 -fw_cfg name=opt/metallium/stack-overflow-core,string=31 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$out31" | grep -q "kernel stack overflow on core 31 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0, core 1 and core 31 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$out31 / $$outb =="; exit 1; }
 
 test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-many usb-test-noncoherent
@@ -502,21 +502,21 @@ run-window: export KEEP_DATA = 1
 run-window: export DATA_MIB ?= 1024
 run-window: user disk
 	cd kernel && cargo build --release --features park-on-exit --target-dir target-window
-	$(call KERNEL_IMG,kernel/target-window/$(TARGET)/release/metal-kernel)
-	qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(UI_RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(UI_RAM_MIB) * 1048576 ))) \
-	  -fw_cfg name=opt/metal/interactive,string=1 -display gtk,zoom-to-fit=on -serial vc:900x600 -monitor none -qmp unix:build-window.sock,server,nowait -semihosting $(QEMU_DEV) \
-	  -name "Metallium-OS" -kernel kernel/target-window/$(TARGET)/release/metal-kernel.img
+	$(call KERNEL_IMG,kernel/target-window/$(TARGET)/release/metallium-kernel)
+	qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(UI_RAM_MIB)M -fw_cfg name=opt/metallium/ram-bytes,string=$(shell echo $$(( $(UI_RAM_MIB) * 1048576 ))) \
+	  -fw_cfg name=opt/metallium/interactive,string=1 -display gtk,zoom-to-fit=on -serial vc:900x600 -monitor none -qmp unix:build-window.sock,server,nowait -semihosting $(QEMU_DEV) \
+	  -name "Metallium-OS" -kernel kernel/target-window/$(TARGET)/release/metallium-kernel.img
 
 # A/B evidence for priority inheritance: on one CPU the polling test must pass with it and fail without.
 inherit-ab: user disk
 	cd kernel && cargo build --release --features no-inherit --target-dir target-noinherit
-	$(call KERNEL_IMG,kernel/target-noinherit/$(TARGET)/release/metal-kernel)
+	$(call KERNEL_IMG,kernel/target-noinherit/$(TARGET)/release/metallium-kernel)
 	@echo "--- without inheritance (1 CPU):"
-	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
-	  -kernel kernel/target-noinherit/$(TARGET)/release/metal-kernel.img 2>&1 | grep "priority inheritance" || true
+	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metallium/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
+	  -kernel kernel/target-noinherit/$(TARGET)/release/metallium-kernel.img 2>&1 | grep "priority inheritance" || true
 	@$(MAKE) -s kernel
 	@echo "--- with inheritance (1 CPU):"
-	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metal/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
+	@timeout 60 qemu-system-aarch64 -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp 1 -m $(RAM_MIB)M -fw_cfg name=opt/metallium/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) -nographic -semihosting $(QEMU_DEV) \
 	  -kernel $(KERNEL_BIN) 2>&1 | grep "priority inheritance" || true
 
 # Hardening lints (fast, no QEMU): deny-level clippy plus the unsafe_op_in_unsafe_fn / undocumented_unsafe_blocks rules from each Cargo.toml.
@@ -527,22 +527,22 @@ clippy:
 	cd programs && cargo clippy --release
 
 # USB input: an xHCI controller with a USB keyboard and tablet instead of the virtio ones; the script types and clicks through QEMU's QMP socket and
-# checks that the driver saw each key and button (the driver logs them only in this mode, `opt/metal/only=10`).
+# checks that the driver saw each key and button (the driver logs them only in this mode, `opt/metallium/only=10`).
 usb-test: kernel disk
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' flat
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metallium/only,string=10' flat
 
 # ... and again with the machine's DMA treated as not cache-coherent (the driver must clean and flush its rings and buffers itself)
 usb-test-noncoherent: kernel disk
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1' flat
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metallium/only,string=10 -fw_cfg name=opt/metallium/dma-noncoherent,string=1' flat
 
 # ... with the keyboard and tablet behind a hub (and the noncoherent variant)
 usb-test-hub: kernel disk
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' hub
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1' hub
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metallium/only,string=10' hub
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metallium/only,string=10 -fw_cfg name=opt/metallium/dma-noncoherent,string=1' hub
 
 # ... and with ten devices (hub with seven keyboards)
 usb-test-many: kernel disk
-	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_MANY_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' many
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_MANY_INPUT),$(QEMU)) -fw_cfg name=opt/metallium/only,string=10' many
 
 # The ELF file instead of the flat Image: QEMU passes no device tree, so the kernel asks the firmware how many cores there are and the controller which GIC it is (GICv2 with 8 cores, GICv3 with 32).
 elf-boot-test: kernel disk

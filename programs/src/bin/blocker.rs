@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Calls the endpoint in slot 0 and exits with 1000 + the error (or 0 if it was answered). With nobody serving, this
 // blocks until the endpoint ends, which must return -4.

@@ -57,7 +57,7 @@ fn desktop(w2: u64) {
     let display = w2 & 0xFF;
     if display != 0 {
         println!("[console] handing the screen to the desktop");
-        metal_desktop_boot::metal_desktop_run(display, 1, 4, 2, FB_VA, ((w2 >> 8) & 0xFF) as u32, (w2 >> 16) & 0xFF)
+        metallium_desktop_boot::metallium_desktop_run(display, 1, 4, 2, FB_VA, ((w2 >> 8) & 0xFF) as u32, (w2 >> 16) & 0xFF)
     }
 }
 #[cfg(not(desktop))]

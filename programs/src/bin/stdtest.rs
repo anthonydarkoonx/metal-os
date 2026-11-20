@@ -8,13 +8,13 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::alloc::Layout;
-use metal_programs::io::{ErrorKind, Read, Write};
-use metal_programs::ipc::{self, Endpoint};
-use metal_programs::process::Command;
-use metal_programs::sync::mpsc::channel;
-use metal_programs::sync::{Arc, Condvar, Mutex, Once, OnceLock, RwLock};
-use metal_programs::time::{Duration, Instant, SystemTime};
-use metal_programs::*;
+use metallium_programs::io::{ErrorKind, Read, Write};
+use metallium_programs::ipc::{self, Endpoint};
+use metallium_programs::process::Command;
+use metallium_programs::sync::mpsc::channel;
+use metallium_programs::sync::{Arc, Condvar, Mutex, Once, OnceLock, RwLock};
+use metallium_programs::time::{Duration, Instant, SystemTime};
+use metallium_programs::*;
 
 // Exercises the std-like layer end to end. Exit code 0 = everything held; otherwise section * 100 + the number of the
 // check that did not. Progress goes to standard output, a marker to standard error. Needs: standard input "first\nsecond",
@@ -210,7 +210,7 @@ fn threads() -> u64 {
     check!(4, 10, timed_out && t0.elapsed() >= Duration::from_millis(50));
     let (tx, rx) = channel::<u8>();
     let r = rx.recv_timeout(Duration::from_millis(30));
-    check!(4, 11, r == Err(metal_programs::sync::mpsc::RecvTimeoutError::Timeout));
+    check!(4, 11, r == Err(metallium_programs::sync::mpsc::RecvTimeoutError::Timeout));
     drop(tx);
     // a scoped thread that starts another scoped thread: `scope` must wait for the grandchild too, or it ends while the grandchild still
     // uses what the scope lends it (a use after free)

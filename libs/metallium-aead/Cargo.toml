@@ -1,0 +1,12 @@
+[package]
+name = "metallium-aead"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ChaCha20-Poly1305 (RFC 8439) authenticated encryption, no_std, no heap"
+
+[dependencies]
+metallium-rand = { path = "../metallium-rand" }
+
+[lints]
+workspace = true

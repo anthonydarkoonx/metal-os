@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::ability::*;
-use metal_programs::*;
+use metallium_programs::ability::*;
+use metallium_programs::*;
 
 // Sample program "counter": counts ticks and records which lifecycle callbacks it has seen
 // (saved word 1: create 1, foreground 2, background 4, destroy 8; saved word 0: the count).

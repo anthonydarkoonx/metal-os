@@ -3,8 +3,8 @@
 extern crate alloc;
 use alloc::format;
 use alloc::string::String;
-use metal_programs::ability::*;
-use metal_programs::*;
+use metallium_programs::ability::*;
+use metallium_programs::*;
 
 // Sample program that checks what its storage really is. Started by the program manager with `permission = files`; argv[1] is its id
 // (`fsa` or `fsb`: two packages of this one program). For it `/data` is a private directory. It saves its answer (word 0) and

@@ -3,69 +3,69 @@
 version = 4
 
 [[package]]
-name = "metal-compact"
+name = "metallium-compact"
 version = "0.1.0"
 
 [[package]]
-name = "metal-driver-rt"
+name = "metallium-driver-rt"
 version = "0.1.0"
 
 [[package]]
-name = "metal-edit"
+name = "metallium-edit"
 version = "0.1.0"
 
 [[package]]
-name = "metal-erofs"
+name = "metallium-erofs"
 version = "0.1.0"
 dependencies = [
- "metal-lz4",
- "metal-zstd",
+ "metallium-lz4",
+ "metallium-zstd",
 ]
 
 [[package]]
-name = "metal-gfx"
+name = "metallium-gfx"
 version = "0.1.0"
 
 [[package]]
-name = "metal-input"
+name = "metallium-input"
 version = "0.1.0"
 
 [[package]]
-name = "metal-lfs"
+name = "metallium-lfs"
 version = "0.1.0"
 
 [[package]]
-name = "metal-loader"
+name = "metallium-loader"
 version = "0.1.0"
 
 [[package]]
-name = "metal-lz4"
+name = "metallium-lz4"
 version = "0.1.0"
 
 [[package]]
-name = "metal-net"
+name = "metallium-net"
 version = "0.1.0"
 
 [[package]]
-name = "metal-usb"
+name = "metallium-usb"
 version = "0.1.0"
 
 [[package]]
-name = "metal-user"
+name = "metallium-user"
 version = "0.1.0"
 dependencies = [
- "metal-compact",
- "metal-driver-rt",
- "metal-edit",
- "metal-erofs",
- "metal-gfx",
- "metal-input",
- "metal-lfs",
- "metal-loader",
- "metal-net",
- "metal-usb",
+ "metallium-compact",
+ "metallium-driver-rt",
+ "metallium-edit",
+ "metallium-erofs",
+ "metallium-gfx",
+ "metallium-input",
+ "metallium-lfs",
+ "metallium-loader",
+ "metallium-net",
+ "metallium-usb",
 ]
 
 [[package]]
-name = "metal-zstd"
+name = "metallium-zstd"
 version = "0.1.0"

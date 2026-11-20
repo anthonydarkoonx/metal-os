@@ -5,10 +5,10 @@
 //! One loop: wait for the device's interrupt, a kick from `netd` (`IRQ_RAISE`) or one tick; then hand received frames
 //! to `netd`, give finished receive slots back to the device, report sent frames, and queue the frames `netd` wants
 //! sent. `netd` is told (a message to its endpoint) whenever there is something for it, and once per tick.
-use metal_driver_rt::netring::*;
-use metal_driver_rt::proto::net::*;
-use metal_driver_rt::virtio;
-use metal_driver_rt::*;
+use metallium_driver_rt::netring::*;
+use metallium_driver_rt::proto::net::*;
+use metallium_driver_rt::virtio;
+use metallium_driver_rt::*;
 
 const MMIO_VA: usize = 0x8020_0000;
 const QUEUES_VA: usize = 0x8021_0000;

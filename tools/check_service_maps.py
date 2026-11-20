@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Boot-time services put their mappings where the kernel chooses: compare the "[map]" lines (opt/metal/map-log=1) of
+"""Boot-time services put their mappings where the kernel chooses: compare the "[map]" lines (opt/metallium/map-log=1) of
 several boots. The same (role, object) pairs must be mapped every time, and the addresses must differ between boots."""
 import re, sys
 

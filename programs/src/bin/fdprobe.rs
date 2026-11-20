@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::fs::*;
-use metal_programs::*;
+use metallium_programs::fs::*;
+use metallium_programs::*;
 
 // File descriptors belong to one program. `fdprobe open`: opens a file (fd 0) and waits to be killed.
 // `fdprobe read`: tries to read fd 0 without opening anything, which must fail with EBADF (3); exits with the status

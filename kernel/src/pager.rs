@@ -26,7 +26,7 @@
 //!  * A read whose program died, or whose page was released meanwhile, is dropped; a failed read turns the page into
 //!    an unmapped one, so the program faults instead of seeing wrong data.
 //!  * If the pager is gone for more than `PAGER_GRACE` ticks, programs waiting for the disk are killed.
-//!  * The pager never sees a program's bytes and cannot change them unnoticed: a page is sealed (ChaCha20-Poly1305, `metal-aead`)
+//!  * The pager never sees a program's bytes and cannot change them unnoticed: a page is sealed (ChaCha20-Poly1305, `metallium-aead`)
 //!    with a key drawn at boot that only the kernel knows, a nonce that is a counter (never repeated), and the disk slot, the
 //!    program and the address as associated data, before the pager is handed it. What comes back is checked before a frame is
 //!    given the bytes; a page that fails the check is lost like one the pager failed to read (the program faults), and
@@ -74,7 +74,7 @@ struct Pager {
     /// The tick at which the pager was first found missing (0: it is there).
     missing_since: u64,
     /// The key pages are sealed with (drawn when the first is), the next nonce, and for each disk slot what is needed to open its page.
-    key: Option<metal_aead::Key>,
+    key: Option<metallium_aead::Key>,
     ctr: u64,
     meta: [SlotMeta; MAX_SLOTS],
 }
@@ -83,10 +83,10 @@ struct Pager {
 struct SlotMeta {
     sealed: bool,
     ctr: u64,
-    tag: metal_aead::Tag,
+    tag: metallium_aead::Tag,
 }
 
-const NO_META: SlotMeta = SlotMeta { sealed: false, ctr: 0, tag: [0; metal_aead::TAG_LEN] };
+const NO_META: SlotMeta = SlotMeta { sealed: false, ctr: 0, tag: [0; metallium_aead::TAG_LEN] };
 
 /// The nonce and the associated data of the page of program `tid` at `va`, in disk slot `slot`.
 fn nonce_of(ctr: u64) -> [u8; 12] {
@@ -293,9 +293,9 @@ fn start_write(me: usize) -> Option<Op> {
                     }
                     // seal it: the pager gets ciphertext (no key, no write-back)
                     if p.key.is_none() {
-                        let mut k = [0u8; metal_aead::KEY_LEN];
+                        let mut k = [0u8; metallium_aead::KEY_LEN];
                         if crate::rand::secure_fill(&mut k) {
-                            p.key = Some(metal_aead::key_from_bytes(&k));
+                            p.key = Some(metallium_aead::key_from_bytes(&k));
                         }
                     }
                     let Some(key) = p.key else {
@@ -306,7 +306,7 @@ fn start_write(me: usize) -> Option<Op> {
                     };
                     p.ctr += 1;
                     let ctr = p.ctr;
-                    let tag = metal_aead::seal(&key, &nonce_of(ctr), &aad_of(slot, tid, va), &mut SCRATCH.get()[..]);
+                    let tag = metallium_aead::seal(&key, &nonce_of(ctr), &aad_of(slot, tid, va), &mut SCRATCH.get()[..]);
                     p.meta[slot as usize] = SlotMeta { sealed: true, ctr, tag };
                     let op = Op::Write { tid: tid as u16, l1: t.l1, va, handle, slot, cancelled: false };
                     p.cur = Some(op);
@@ -433,7 +433,7 @@ fn open_into(pa: usize, src: usize, tid: usize, va: usize, slot: u32) -> Opened 
         return Opened::Unreadable;
     }
     let ok = match (key, meta) {
-        (Some(key), Some(m)) if m.sealed => metal_aead::open(&key, &nonce_of(m.ctr), &aad_of(slot, tid, va), &mut page[..], &m.tag),
+        (Some(key), Some(m)) if m.sealed => metallium_aead::open(&key, &nonce_of(m.ctr), &aad_of(slot, tid, va), &mut page[..], &m.tag),
         _ => false,
     };
     let done = ok && crate::frame::phys::try_copy_to(pa, &page[..]);

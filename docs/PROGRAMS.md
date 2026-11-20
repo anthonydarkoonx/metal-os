@@ -6,7 +6,7 @@ asks for, tells them when they move between foreground and background, and resta
 the kernel: `progmgr` is an ordinary program that holds the spawn capability, and a program is an ordinary PIE ELF program
 built with the `programs` crate.
 
-## The package (`libs/metal-map`, `tools/mkmap.py`)
+## The package (`libs/metallium-map`, `tools/mkmap.py`)
 Header (32 bytes: magic `METALMAP`, version 1, manifest length, file count, table length, CRC-32 of the rest), manifest,
 file table, data. `Package::parse` checks sizes, the checksum, the manifest, that every path is a plain relative path
 inside the package, and that every ability's entry is an ELF file; it never panics (unit-tested, including every
@@ -17,15 +17,15 @@ Manifest (`key = value`, `#` comments): `id` (1-16 of `a-z 0-9 _ - .`), `name`, 
 (1-4096, default 128), `threads` (0-8), `class` (interactive/background/heavy), `permission` (`files`, `network`,
 repeatable; `display` gives the program the display endpoint (slot 2; for a window system to use); `allfiles` gives the whole file system instead of the program's own directory (for programs that browse the whole disk); `shell` makes the program a shell client: the program manager gives it its control endpoint as slot 3; `spawn` lets the program start programs of its own, see *Starting programs* below), `spawn_pages` (with `spawn`: pages it may hand down to the programs it starts, 1-16384, default 4096), `ability = NAME ui|service bin/PROGRAM` (repeatable, up to 8).
 
-## Signing and trust (`libs/metal-ed25519`)
+## Signing and trust (`libs/metallium-ed25519`)
 A package may carry a signature block (72 bytes at the end: a key id and an Ed25519 signature of every byte before it). The system
 decides whom to trust with two files of the read-only system image: `/system/etc/program-keys` (`name = <64 hex digits>`, one line per
-trusted public key) and `/system/etc/program-policy` (`allow_unsigned = false`). `metal_map::check` accepts a package only if it is
+trusted public key) and `/system/etc/program-policy` (`allow_unsigned = false`). `metallium_map::check` accepts a package only if it is
 signed by a trusted key and the signature verifies, or, in developer mode (`allow_unsigned = true`), if it is unsigned *and* its
 manifest says `unsigned = true`. A missing trust store trusts nobody and an unreadable policy is the strict one. The manager
 checks at install *and again at every start* (the copy in `/data/programs` is on a writable partition).
 
-`libs/metal-ed25519` is SHA-512 and Ed25519 verification, written from FIPS 180-4 and RFC 8032 with no heap and no `unsafe`. Its
+`libs/metallium-ed25519` is SHA-512 and Ed25519 verification, written from FIPS 180-4 and RFC 8032 with no heap and no `unsafe`. Its
 constants are generated from their definitions; it is tested against RFC 8032 vectors 1 and 2, signatures made by Python's
 `cryptography` package, a check that `[L]B` is the identity, and that every changed byte of a signature, key or message is
 refused (it is not constant time: verification handles only public data). `tools/mkmap.py` signs with `tools/keys/dev.seed`;
@@ -51,7 +51,7 @@ A program that runs other programs (a terminal running command-line programs) de
 | 5 | endpoint factory | create endpoints (for its children's consoles); not the right to pass it on |
 | 6 | spawn | start programs; **with file access only if the program has `allfiles`**, with network only if it has `network`; not the right to pass it on |
 
-and a budget of `spawn_pages` (default 4096) to hand down, taken from the manager's own. These are the slots `metal-programs`' `Command`
+and a budget of `spawn_pages` (default 4096) to hand down, taken from the manager's own. These are the slots `metallium-programs`' `Command`
 uses, so `Command::new("ls").spawn()` works in such a program as it is. The rules:
 * **Children never get more than their parent.** File access for a child needs `allfiles`, not `files`: a child started with file access
   gets a new file session that is *not* confined to the parent's directory (confinement belongs to one session, see `docs/ABI.md`
@@ -70,7 +70,7 @@ rewrites its paths after refusing `..`, so it cannot name another program's data
 partition; `/system` stays readable and read-only. The directory is made when the program first starts and removed when it is
 uninstalled. A program may have at most 12 files and directories in it (the data store holds few entries in all). The manager asks
 the VFS to confine the program *after the program is loaded and before it runs its first instruction* (`Command::scope`,
-`metal_loader::spawn_with`, VFS `SCOPE`, see `docs/ABI.md`), and the VFS accepts that request only from the program's parent. The `fsprog`
+`metallium_loader::spawn_with`, VFS `SCOPE`, see `docs/ABI.md`), and the VFS accepts that request only from the program's parent. The `fsprog`
 sample checks all of it from inside two programs with the same code.
 
 ## Lifecycle (`programs/src/ability.rs`)
@@ -98,7 +98,7 @@ runs), 5 failed, 6 not marked unsigned, 7 all 16 board entries in use. `progctl`
 `make qemu-test` starts `progmgr` and runs `progctl`'s scenario: install five packages and refuse four flawed ones,
 lifecycle callbacks, a crash and restart with saved state while another program keeps running, a memory hog that is stopped
 by its limit and given up on, rights (files, control endpoint, spawn), stop, uninstall, reinstall, and a leak check
-(tasks, frames, capability nodes). `make map-check` and `cargo test -p metal-map` cover the format.
+(tasks, frames, capability nodes). `make map-check` and `cargo test -p metallium-map` cover the format.
 
 ## Boot and the shell
 `make run-window` no longer runs the test suite first: the conductor starts the program manager, gives the screen task a send

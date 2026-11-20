@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 program!("hello", |c| {
     if c.arg == 41 {

@@ -5,10 +5,10 @@
 //! (`KBD_POLL`) and the driver drains the queue, turns key presses into characters with a US
 //! layout, and returns up to 16 at a time. Key numbers are the PC/AT scan-code-set-1 numbering of
 //! the main keyboard block, which is what the virtio specification's evdev codes use for these keys.
-use metal_driver_rt::proto::input::*;
-use metal_driver_rt::virtio;
+use metallium_driver_rt::proto::input::*;
+use metallium_driver_rt::virtio;
 use crate::xhci;
-use metal_driver_rt::*;
+use metallium_driver_rt::*;
 
 
 // where the two devices' memory goes in this task: (registers, queue page, config copy)

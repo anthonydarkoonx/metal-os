@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Memory limits: the argument is the heap quota the parent set (pages). Takes all of it, writes and checks every page,
 // then asks for one page more, which must be refused. Exits 0 if everything is as it should be.

@@ -16,7 +16,7 @@ servers, a VFS, and host-tested storage / memory libraries. Licensed Apache-2.0 
     make run RAM_MIB=32     # choose the RAM size (passed to the kernel via QEMU fw_cfg)
 
 See `PROVENANCE.md` for where every component comes from (no GPL-derived code). The Radxa ROCK 3C board port, whose drivers are
-ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metal-os-rock3c](https://github.com/anthonydarkoonx/metal-os-rock3c).
+ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metallium-os-rock3c](https://github.com/anthonydarkoonx/metallium-os-rock3c).
 
 ## Layout
 | path | what |
@@ -24,20 +24,20 @@ ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metal-os-r
 | `kernel/` | boot, MMU, frame allocator, device-tree reader, GICv2/GICv3 + timer, SMP (up to 32 cores), scheduler, capabilities, IPC, async rings, syscalls, PCIe enumeration, SMMUv3 IOMMU |
 | `user/` | one userspace image, role chosen at start: test conductor, IPC service, crashy demo driver, CPU-hog worker, virtio-blk driver, virtio-gpu display driver, virtio-input keyboard driver, screen task + shell, EROFS server, LFS server, VFS server, `prog`; per-task heap, ring library |
 | `tools/` | host tools: EROFS image builder (fallback), disk assembler (uses `mkfs.erofs` when present), post-run disk checker |
-| `libs/metal-lz4` | LZ4 block compress/decompress (interop-checked against the `lz4` CLI) |
-| `libs/metal-zram` | compressed page store with compaction; LZ4 or Zstandard pages; used by the kernel at boot |
-| `libs/metal-zstd` | Zstandard (RFC 8878), from the spec: a frame decoder (bounds-checked, verifies the XXH64 checksum), an allocation-free *compressor*, and an allocation-free decoder for the compressor's output (the kernel has no heap) |
-| `libs/metal-erofs` | read-only EROFS reader incl. LZ4- and ZSTD-compressed files and big physical clusters; runs in the `rofs-server` task |
-| `libs/metal-lfs` | log-structured CoW block store with segment cleaning; runs in the `lfs-server` task |
-| `libs/metal-map` | the `.map` program package format: parser, validator, builder, trust store and signature policy (see `docs/PROGRAMS.md`) |
-| `libs/metal-gfx` | 2D drawing primitives and the bitmap/outline typefaces; the terminal draws its text with it. The OS ships no window system: it is meant to run one (a window manager or desktop environment) as ordinary user programs; see `docs/DESKTOP-INTERFACE.md` |
-| `libs/metal-input` | device-neutral input events: pointer (mouse/touch/pen) and key events in 24.8 fixed point, the translator for the drivers' packed words, the gesture recogniser (tap, context menu, pan, fling, pinch). Host-tested, for a window system to use |
-| `libs/metal-fdt` | flattened device tree reader (RAM, cores and their speeds, GIC, PSCI conduit); host-tested on real QEMU trees and damaged copies |
-| `libs/metal-usb` | USB input without hardware: HID descriptor and report parsing, key tables; host-tested |
-| `libs/metal-ed25519` | SHA-512 and Ed25519 signature verification (RFC 8032), no heap |
-| `libs/metal-sched` | big.LITTLE placement policy; the kernel feeds it a mock topology |
-| `libs/metal-driver-rt` | what the user-space tasks and the device drivers share: the system-call layer and `println!`, the mapping layer, virtio, DMA cache maintenance, the driver/client protocols (`proto`) and the network ring layout (see `docs/DRIVER-PACKAGES.md`) |
-| `libs/metal-compact` | physical-memory compaction planner (two-finger scan) and fragmentation metrics; property-tested on the host |
+| `libs/metallium-lz4` | LZ4 block compress/decompress (interop-checked against the `lz4` CLI) |
+| `libs/metallium-zram` | compressed page store with compaction; LZ4 or Zstandard pages; used by the kernel at boot |
+| `libs/metallium-zstd` | Zstandard (RFC 8878), from the spec: a frame decoder (bounds-checked, verifies the XXH64 checksum), an allocation-free *compressor*, and an allocation-free decoder for the compressor's output (the kernel has no heap) |
+| `libs/metallium-erofs` | read-only EROFS reader incl. LZ4- and ZSTD-compressed files and big physical clusters; runs in the `rofs-server` task |
+| `libs/metallium-lfs` | log-structured CoW block store with segment cleaning; runs in the `lfs-server` task |
+| `libs/metallium-map` | the `.map` program package format: parser, validator, builder, trust store and signature policy (see `docs/PROGRAMS.md`) |
+| `libs/metallium-gfx` | 2D drawing primitives and the bitmap/outline typefaces; the terminal draws its text with it. The OS ships no window system: it is meant to run one (a window manager or desktop environment) as ordinary user programs; see `docs/DESKTOP-INTERFACE.md` |
+| `libs/metallium-input` | device-neutral input events: pointer (mouse/touch/pen) and key events in 24.8 fixed point, the translator for the drivers' packed words, the gesture recogniser (tap, context menu, pan, fling, pinch). Host-tested, for a window system to use |
+| `libs/metallium-fdt` | flattened device tree reader (RAM, cores and their speeds, GIC, PSCI conduit); host-tested on real QEMU trees and damaged copies |
+| `libs/metallium-usb` | USB input without hardware: HID descriptor and report parsing, key tables; host-tested |
+| `libs/metallium-ed25519` | SHA-512 and Ed25519 signature verification (RFC 8032), no heap |
+| `libs/metallium-sched` | big.LITTLE placement policy; the kernel feeds it a mock topology |
+| `libs/metallium-driver-rt` | what the user-space tasks and the device drivers share: the system-call layer and `println!`, the mapping layer, virtio, DMA cache maintenance, the driver/client protocols (`proto`) and the network ring layout (see `docs/DRIVER-PACKAGES.md`) |
+| `libs/metallium-compact` | physical-memory compaction planner (two-finger scan) and fragmentation metrics; property-tested on the host |
 
 ## Syscall ABI (`svc #0`)
 x0 = id, x1..x5 = args; x0 = result (negative = error); extra results in x1..x5.
@@ -64,7 +64,7 @@ a core that touches the page in that window faults, waits for the kernel lock, f
 and retries), allocate physically contiguous memory, and report fragmentation statistics. The *policy*
 is the userspace `compactd` task: demand-driven, it does nothing until contiguous allocations have
 failed, then compacts in bounded batches of 64 pages with a pause between them. A contiguous allocation
-can also compact synchronously (`MC_ALLOC` with the direct flag). The planner is `libs/metal-compact`.
+can also compact synchronously (`MC_ALLOC` with the direct flag). The planner is `libs/metallium-compact`.
 
 Tested in QEMU with 64 MiB: the conductor fills memory with pages holding known data, frees every other
 one (thousands of single-frame holes), shows a 512 KiB contiguous request fail, lets `compactd` fix it,
@@ -72,7 +72,7 @@ hammers the pages being moved from another core (faults that raced with a move a
 retried), verifies every page afterwards, then repeats with synchronous compaction.
 
 ## Task slots
-The number of task slots is chosen at boot (`task::tasks_for`): one per MiB of RAM, between 64 and 1024, or what the fw_cfg file `opt/metal/max-tasks` says. All per-task state (task records, saved registers, scheduler slots, spawn bookkeeping) is carved out of RAM at that size (`kernel/src/table.rs`), and so are the endpoint table (the 22 boot-time endpoints and `MAX_OWNED_EPS` = 4 for every task slot: 4118 at 1024 slots) and the memory-object table (64 boot-time entries and 8 for every slot, at least 192). The capability node pool holds 8192 nodes. Endpoint and object ids are 16 bits. `make scale` starts programs until all 997 free slots of a 1024-slot table are used (each holding 4 endpoints and 2 shared-memory objects), ends them together and checks that every frame, node and slot comes back.
+The number of task slots is chosen at boot (`task::tasks_for`): one per MiB of RAM, between 64 and 1024, or what the fw_cfg file `opt/metallium/max-tasks` says. All per-task state (task records, saved registers, scheduler slots, spawn bookkeeping) is carved out of RAM at that size (`kernel/src/table.rs`), and so are the endpoint table (the 22 boot-time endpoints and `MAX_OWNED_EPS` = 4 for every task slot: 4118 at 1024 slots) and the memory-object table (64 boot-time entries and 8 for every slot, at least 192). The capability node pool holds 8192 nodes. Endpoint and object ids are 16 bits. `make scale` starts programs until all 997 free slots of a 1024-slot table are used (each holding 4 endpoints and 2 shared-memory objects), ends them together and checks that every frame, node and slot comes back.
 
 ## Scheduling, SMP and locking
 Cores come up through PSCI `CPU_ON` (up to 32; how many, and their MPIDRs, come from the device tree), each with its own stack (made from RAM, with an unmapped guard below it), MMU setup and timer. There is
@@ -98,7 +98,7 @@ frame first and publish with a release store; a core that claims the task sees i
 a caller is marked blocked *before* the task that will reply can run; idle cores announce themselves,
 re-check for work, and are woken by a targeted IPI (one core per runnable task, claimed by the sender).
 
-Policy (`kernel/src/sched.rs`; the arithmetic lives in `libs/metal-sched` and is unit-tested on the host):
+Policy (`kernel/src/sched.rs`; the arithmetic lives in `libs/metallium-sched` and is unit-tested on the host):
 
 * **Real-time reservations.** A task holding a `Sched` capability with `R_RT` can reserve `runtime` microseconds of CPU in
   every `period` (`SCHED(SC_RT_SET, ...)`). It is admitted if the reserved shares on one core stay under 80% (earliest
@@ -181,7 +181,7 @@ created at run time with a `Spawn` capability (right `R_SPAWN`; the conductor ho
 grant right, so programs can start programs). **The kernel knows no executable format.** `SPAWN` makes an *embryo* — a
 task with a 64 KiB stack, its arguments and its capabilities but no code — `TASK_LOAD` puts fresh pages with chosen
 contents and permissions into it (never writable and executable at once), and `TASK_START` begins execution. Reading
-the image is the job of the loader (`libs/metal-loader`, ordinary code in the parent, unit-tested and fuzzed on the
+the image is the job of the loader (`libs/metallium-loader`, ordinary code in the parent, unit-tested and fuzzed on the
 host): the flat format of `programs/link.ld` (a 32-byte header with magic, size of the read-execute part, total memory and
 an 8-byte name, then code) and static ELF files. The program starts at EL0 with `x1` = a 64-bit argument and `x2` = its
 parent. A program
@@ -230,7 +230,7 @@ tasks 500 times through one word, time out waits, crash and kill programs whose 
 through the shared session, start 150 threads in a row and check that every frame and capability node comes back.
 
 ## The std-like layer
-`programs/src/` (the library `metal_programs`) is what a Metallium-OS program links: a native API shaped like Rust's `std` where that
+`programs/src/` (the library `metallium_programs`) is what a Metallium-OS program links: a native API shaped like Rust's `std` where that
 fits, with no POSIX in it. `heap` is the allocator (a coalescing free list over `HEAP_GROW`), so `Vec`, `String`, `Box`,
 `BTreeMap` and `Arc` work; `io` has `Read`/`Write`, `stdin`/`stdout`/`stderr` (standard error is its own operation on the
 console endpoint) and `print!`/`println!`/`eprintln!`; `fs` has `File`, `OpenOptions`, `read`/`write`, `metadata`,
@@ -244,7 +244,7 @@ exit code. `stdtest` (an 8-section program, ~80 checks) runs all of it under QEM
 endpoint, children whose output is captured, and a check that no frame or capability node is left behind.
 
 ## Networking
-The stack is written from the RFCs (`libs/metal-net`, `no_std`, driven by its caller: frames in, time in, frames out):
+The stack is written from the RFCs (`libs/metallium-net`, `no_std`, driven by its caller: frames in, time in, frames out):
 Ethernet and ARP, IPv4 with fragment reassembly, ICMP echo and errors, UDP, **TCP** (RFC 9293 state machine with
 RFC 5961 blind-reset protection, window scaling, Nagle, delayed ACKs, RFC 6298 retransmission timer, RFC 5681/6582 slow
 start, congestion avoidance, fast retransmit and NewReno recovery, zero-window probes; no SACK or timestamps yet), a
@@ -266,7 +266,7 @@ row, four threads with a connection each, a listener the host reaches through a 
 program that exits, and `netd` killed while a connection is open. `make quick-net` runs just those.
 
 ## Syscall fuzzer
-`make fuzz` (`fw_cfg opt/metal/fuzz=<seed>`, part of `make test`) starts a task (role 17, `user/src/fuzz.rs`) that holds
+`make fuzz` (`fw_cfg opt/metallium/fuzz=<seed>`, part of `make test`) starts a task (role 17, `user/src/fuzz.rs`) that holds
 a deliberately mixed set of capabilities (send rights to the VFS, block driver, filesystems, display and keyboard
 drivers, a `MemCtl` with every right, a `Sched`, shared memory, one grantable endpoint) and calls every system call
 for 15 s with random and hostile arguments (wrapping addresses, kernel and device addresses, stale slots, a ring page
@@ -280,7 +280,7 @@ entries of `MC_ALLOC` memory were not released when their task died (six deaths 
 ## Fault injection: the chaos test
 Services are meant to be killable at any instant, so `make chaos` kills them at random instead of at
 hand-picked points. A *monkey* task (role 15, started only when the harness passes `fw_cfg
-opt/metal/chaos=<seed>`) holds the only `Admin` capability; it sleeps 0.2-2 s, then kills one of the block
+opt/metallium/chaos=<seed>`) holds the only `Admin` capability; it sleeps 0.2-2 s, then kills one of the block
 driver, the EROFS server, the LFS server, the VFS, the display driver or the keyboard driver (a `KILL_ROLE`
 syscall that needs that capability and can name only those roles). The kernel then restarts it the usual way:
 reclaims its pages, cuts its device off in the SMMU, rebuilds it. Meanwhile the conductor runs a workload
@@ -307,8 +307,8 @@ has run for 3 s. (It used to be 5 for the whole run, so a driver that crashed on
 on its sixth crash. The chaos test kills services more than five times, so it relies on the budget recovering.) A service that crashes in a tight loop still gives up.
 
 ## ZRAM with two codecs
-`libs/metal-zram` is a compressed page store (static arenas, no heap). It compresses with LZ4 or with
-**Zstandard**: `libs/metal-zstd`'s compressor is allocation-free (a 4 KiB-page workspace is about 50 KiB). Per
+`libs/metallium-zram` is a compressed page store (static arenas, no heap). It compresses with LZ4 or with
+**Zstandard**: `libs/metallium-zstd`'s compressor is allocation-free (a 4 KiB-page workspace is about 50 KiB). Per
 block it finds matches with short hash chains and one step of lazy matching; Huffman-codes the literals
 (one stream below 1 KiB of literals, four above; the code description is 4-bit weights or an FSE stream),
 falling back to raw or RLE literals when those are smaller; and gives each of the three sequence streams
@@ -319,9 +319,9 @@ random pages, and pages whose byte distributions force each description format).
 back with a small allocation-free decoder for exactly that subset (Huffman codes up to 10 bits, tables up
 to 2^8 states; it says `Unsupported` for anything else, such as repeat-offset codes or a table reused from
 an earlier block, never misreads; 30,000 random corruptions of entropy-coded frames must not panic).
-Measured page sizes (`cargo test -p metal-zram -- --nocapture compare`): zero page 26 B (LZ4) vs 11 B,
+Measured page sizes (`cargo test -p metallium-zram -- --nocapture compare`): zero page 26 B (LZ4) vs 11 B,
 numbered text 431 vs 276 B, source code 967 vs 544 B, small-integer array 826 vs 346 B, noise 4096 vs 4096 B
-(kept raw). On real files, one frame per 4 KiB page (`ratio_report` in `libs/metal-zstd/tests/encoder.rs`),
+(kept raw). On real files, one frame per 4 KiB page (`ratio_report` in `libs/metallium-zstd/tests/encoder.rs`),
 the output is the same size as the real `zstd -3` or a little smaller (Rust source 43% of the input vs 44%,
 a Python binary 59% vs 60%, libc 55% vs 57%), because a page is too small for what the higher levels do
 (repeat offsets, optimal parsing) to pay. Missing: repeat-offset codes, a Huffman table or sequence
@@ -452,7 +452,7 @@ driver: no interrupt, the shell asks for keys (`KBD_POLL`) and the driver drains
 presses with a US layout (Shift, Caps Lock, Ctrl, arrows) and returns up to 16 characters. A desktop asks for raw
 events instead (`INPUT_POLL`: keys, pointer position, buttons, wheel), or sleeps until there is one (`INPUT_WAIT`, up to a second at a time).
 
-*USB input.* The same task also drives a USB controller (`user/src/xhci.rs`, xHCI; the parsing is in `libs/metal-usb`): keyboards
+*USB input.* The same task also drives a USB controller (`user/src/xhci.rs`, xHCI; the parsing is in `libs/metallium-usb`): keyboards
 and pointers on root ports or behind hubs (up to three tiers, 16 devices at once), plugged and unplugged while the system runs,
 with key repeat (the device does not do it). The controller's interrupt wakes a waiting client when the machine has no virtio
 input device; `make usb-test`, `usb-test-hub`, `usb-test-many` and `usb-test-noncoherent` drive it through QEMU's monitor. Not done: SuperSpeed hubs and hubs

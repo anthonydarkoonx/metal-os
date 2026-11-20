@@ -1,5 +1,5 @@
 [package]
-name = "metal-kernel"
+name = "metallium-kernel"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
@@ -7,14 +7,14 @@ license = "Apache-2.0 OR MIT"
 [workspace]
 
 [dependencies]
-metal-lz4 = { path = "../libs/metal-lz4" }
-metal-zram = { path = "../libs/metal-zram" }
-metal-sched = { path = "../libs/metal-sched" }
-metal-compact = { path = "../libs/metal-compact" }
-metal-rand = { path = "../libs/metal-rand" }
-metal-aead = { path = "../libs/metal-aead" }
-metal-loader = { path = "../libs/metal-loader" }
-metal-fdt = { path = "../libs/metal-fdt" }
+metallium-lz4 = { path = "../libs/metallium-lz4" }
+metallium-zram = { path = "../libs/metallium-zram" }
+metallium-sched = { path = "../libs/metallium-sched" }
+metallium-compact = { path = "../libs/metallium-compact" }
+metallium-rand = { path = "../libs/metallium-rand" }
+metallium-aead = { path = "../libs/metallium-aead" }
+metallium-loader = { path = "../libs/metallium-loader" }
+metallium-fdt = { path = "../libs/metallium-fdt" }
 
 [features]
 # The machine to build for (kernel/src/platform.rs). Exactly one.

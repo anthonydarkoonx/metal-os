@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Prints its command line and a few environment variables; exits with the number of arguments.
 program!("argdump", |c| {

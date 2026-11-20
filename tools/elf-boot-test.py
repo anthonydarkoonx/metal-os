@@ -4,7 +4,7 @@ come up. Usage: elf-boot-test.py '<qemu command line of the usual tests>'."""
 import re, shlex, subprocess, sys
 
 cmd = sys.argv[1]
-cmd = re.sub(r"(\S+metal-kernel)\.img", r"\1", cmd)  # the ELF, not the flat Image
+cmd = re.sub(r"(\S+metallium-kernel)\.img", r"\1", cmd)  # the ELF, not the flat Image
 ver = sys.argv[2] if len(sys.argv) > 2 else "2"  # (no tree: the kernel asks the controller which version it is)
 n = "8" if ver == "2" else "32"  # (QEMU's GICv2 has up to 8 cores)
 cmd = re.sub(r"gic-version=\d", f"gic-version={ver}", cmd)

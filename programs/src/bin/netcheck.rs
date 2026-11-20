@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
-use metal_programs::net::*;
-use metal_programs::time::Duration;
-use metal_programs::*;
+use metallium_programs::net::*;
+use metallium_programs::time::Duration;
+use metallium_programs::*;
 
 // netcheck [name]: the machine's network configuration, a ping to the gateway, and the addresses of `name`, if given.
 program!("netcheck", |c| -> u64 {
@@ -16,7 +16,7 @@ program!("netcheck", |c| -> u64 {
     println!("address {}  mask {}  gateway {}  dns {}", cfg.addr, cfg.mask, cfg.gateway.map_or(alloc_str("-"), |g| alloc_fmt(g)), cfg.dns.map_or(alloc_str("-"), |g| alloc_fmt(g)));
     let mut code = 0;
     if let Some(gw) = cfg.gateway {
-        match ping(gw, b"metal os", Duration::from_secs(2)) {
+        match ping(gw, b"metallium os", Duration::from_secs(2)) {
             Ok(rtt) => println!("ping {gw}: {} ms", rtt.as_millis()),
             Err(e) => {
                 println!("ping {gw}: {e}");

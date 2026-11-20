@@ -956,7 +956,7 @@ pub fn vfs_server() -> ! {
 /// `V_SCOPE`: the caller (program `who`) confines its child `w1` to the directory in the page. Only the program's parent may
 /// (the kernel says who that is), only while the child has a file session, and the directory is named as the *caller* sees it, so
 /// a caller that is itself confined can only narrow, never widen. The child is confined from its first request: it is
-/// normally still an embryo when this arrives (see `metal_loader::spawn_with`).
+/// normally still an embryo when this arrives (see `metallium_loader::spawn_with`).
 fn scope_request(ds: &Datafs, scopes: &mut [Option<(u64, String)>], gens: &[u64], who: usize, pg: Pg, child: u64) -> [u64; 3] {
     let err = |e: u64| [e, 0, 0];
     let child = child as usize;

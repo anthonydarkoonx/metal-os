@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::fs::*;
-use metal_programs::*;
+use metallium_programs::fs::*;
+use metallium_programs::*;
 
 // fswrite <path> <text>: writes the text to the file (created or replaced); exits 0, or 1000 + the error.
 program!("fswrite", |c| {

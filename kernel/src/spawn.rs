@@ -1,6 +1,6 @@
 //! Tasks created at run time: `SPAWN` makes an *embryo* (a task with stack, arguments and capabilities but no code),
 //! `TASK_LOAD` and `TASK_START` fill and start it, `WAIT` collects a child's exit code, `KILL` ends it. The kernel reads
-//! no executable format: the loader (`libs/metal-loader`) runs in the parent and turns an image into page loads.
+//! no executable format: the loader (`libs/metallium-loader`) runs in the parent and turns an image into page loads.
 //!
 //! A program runs in the first free slot from `FIRST_DYNAMIC_TASK` on, as a non-restartable task of role `ROLE_PROGRAM`.
 //! What it may do is exactly what its parent delegated: up to eight capabilities, chosen by slot and only if the parent
@@ -25,7 +25,7 @@ use crate::sync::{SpinLock, R_SPAWNING};
 use crate::task::{self, frame, lock, MapRec, State, World, FIRST_DYNAMIC_TASK, IMAGE_END, STACK_PAGES, USER_BASE};
 use crate::trap::TrapFrame;
 use core::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use metal_sched::Class;
+use metallium_sched::Class;
 
 pub const ROLE_PROGRAM: u8 = 32;
 /// A thread: a task that runs in another task's address space (see `thread_create`).
@@ -246,7 +246,7 @@ fn copy_from_user(tid: usize, mut va: usize, dst: &mut [u8]) -> bool {
 //
 // The kernel knows no executable format. `SPAWN` makes an *embryo*: a task with its stack, arguments and capabilities
 // but no code, in `State::Embryo` (never scheduled). Its parent fills the image area with `TASK_LOAD`, one run of
-// pages at a time, and starts it with `TASK_START`. The format readers live in `libs/metal-loader`.
+// pages at a time, and starts it with `TASK_START`. The format readers live in `libs/metallium-loader`.
 
 /// Pages a program may occupy: from the image base up to the stack.
 const IMAGE_PAGES: usize = task::PIE_MAX_IMAGE / PAGE; // (the larger of the two kinds of image)

@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
 use core::sync::atomic::{AtomicU32, Ordering};
-use metal_programs::fs::{self, OpenOptions, SeekFrom};
-use metal_programs::io::{Read, Write};
-use metal_programs::thread::wait_word;
-use metal_programs::*;
+use metallium_programs::fs::{self, OpenOptions, SeekFrom};
+use metallium_programs::io::{Read, Write};
+use metallium_programs::thread::wait_word;
+use metallium_programs::*;
 
 // The pager (kernel/src/pager.rs): writes pages the kernel pushes out of its compressed store to a swap file, and reads
 // them back when a program touches them. `pager <slots>`: the argument is the size of /data/swap in pages. It needs file

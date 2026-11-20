@@ -1,0 +1,11 @@
+[package]
+name = "metallium-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A text editor as pure state: the buffer, cursor, selection, search, clipboard and file handling, with a nano-style keymap and the terminal screen layout (`term`). Programs only supply files and a screen."
+
+[dependencies]
+
+[lints]
+workspace = true

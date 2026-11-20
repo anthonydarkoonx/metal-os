@@ -106,6 +106,6 @@ pub fn conductor_start() {
     println!("[client] TEST system information screen is drawn and presented (status={st}): {}", verdict(st == 0 && r[0] == 0));
     println!("[fetch] screen presented");
     // Hold still for the screenshot harness. When the harness is going to type into the guest
-    // (fw_cfg opt/metal/interactive) hold much longer: it ends the run itself.
+    // (fw_cfg opt/metallium/interactive) hold much longer: it ends the run itself.
     sleep(if sysinfo(2)[1] != 0 { 60000 } else { 250 });
 }

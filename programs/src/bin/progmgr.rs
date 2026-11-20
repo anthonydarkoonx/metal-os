@@ -6,11 +6,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use metal_programs::ability::*;
-use metal_programs::ipc::{self, Endpoint};
-use metal_programs::process::{Child, Command};
-use metal_programs::*;
-use metal_map::{Kind, Manifest, Package, Policy, Trust, TrustError, TrustedKey};
+use metallium_programs::ability::*;
+use metallium_programs::ipc::{self, Endpoint};
+use metallium_programs::process::{Child, Command};
+use metallium_programs::*;
+use metallium_map::{Kind, Manifest, Package, Policy, Trust, TrustError, TrustedKey};
 
 // The program manager. Slot 0: the control endpoint (receive; its holders may install, start and stop programs), slot 5: the
 // endpoint factory, slot 6: the spawn capability. It keeps the installed programs (packages in /data/programs, the system's own
@@ -63,7 +63,7 @@ const R_SPAWN: u16 = 1 << 12;
 const R_SPAWN_FS: u16 = 1 << 13;
 const R_EP_CREATE: u16 = 1 << 14;
 const R_SPAWN_NET: u16 = 1 << 15;
-/// Where a program with `permission = spawn` finds its endpoint factory and spawn capability: the slots `metal-programs`' `Command` uses.
+/// Where a program with `permission = spawn` finds its endpoint factory and spawn capability: the slots `metallium-programs`' `Command` uses.
 const FACTORY_PROGRAM_SLOT: u8 = 5;
 const SPAWN_PROGRAM_SLOT: u8 = 6;
 /// All the permission bits (bit 0 files, 1 network, 2 display, 3 shell, 4 allfiles, 5 admin, 6 spawn).
@@ -234,7 +234,7 @@ impl Mgr {
         if pkg.manifest.id != id {
             return Err(E_STATE);
         }
-        let signer = match metal_map::check(&pkg, &self.keys, &self.policy) {
+        let signer = match metallium_map::check(&pkg, &self.keys, &self.policy) {
             Ok(Trust::Signed(name)) => Some(name),
             Ok(Trust::Unsigned) => None,
             Err(e) => return Err(trust_status(e)),
@@ -307,7 +307,7 @@ impl Mgr {
         let mut bytes = read_package(&id).map_err(|_| E_FAILED)?;
         let pkg = Package::parse(&bytes).map_err(|_| E_FAILED)?;
         // (the file lives on a writable partition: look at it again before running it)
-        if metal_map::check(&pkg, &self.keys, &self.policy).is_err() {
+        if metallium_map::check(&pkg, &self.keys, &self.policy).is_err() {
             println!("[progmgr] {id}: the package on disk no longer passes the trust check, not starting it");
             return Err(E_FAILED);
         }
@@ -674,8 +674,8 @@ program!("progmgr", |_c| {
     };
     // who may sign programs and whether unsigned ones are allowed: both files are in the read-only system image. A missing or
     // unreadable trust store trusts nobody; an unreadable policy is the strict one.
-    let keys = fs::read_to_string("/system/etc/program-keys").ok().and_then(|t| metal_map::parse_keys(&t).ok()).unwrap_or_default();
-    let policy = fs::read_to_string("/system/etc/program-policy").ok().and_then(|t| metal_map::parse_policy(&t).ok()).unwrap_or_default();
+    let keys = fs::read_to_string("/system/etc/program-keys").ok().and_then(|t| metallium_map::parse_keys(&t).ok()).unwrap_or_default();
+    let policy = fs::read_to_string("/system/etc/program-policy").ok().and_then(|t| metallium_map::parse_policy(&t).ok()).unwrap_or_default();
     println!("[progmgr] {} trusted signing keys, unsigned programs {}", keys.len(), if policy.allow_unsigned { "allowed (developer mode)" } else { "not allowed" });
     let mut m = Mgr { board_slot: board_slot as u64, board: base as usize as *mut u8, program_ep, programs: Vec::new(), insts: Vec::new(), keys, policy };
     process::set_capabilities(SPAWN, FACTORY);

@@ -1,7 +1,7 @@
 //! Chaos test: kill the system's services at random moments while a workload uses them, then
 //! check that nothing was lost or corrupted and that everything came back.
 //!
-//! Enabled by `fw_cfg opt/metal/chaos=<seed>` (`make chaos`). The *monkey* (role 15) holds the only
+//! Enabled by `fw_cfg opt/metallium/chaos=<seed>` (`make chaos`). The *monkey* (role 15) holds the only
 //! `Admin` capability; it sleeps a random time and kills one of the block driver, the two
 //! filesystem servers, the VFS, the display driver or the keyboard driver, which the kernel then
 //! restarts. The *workload* (the conductor, role 0) keeps using every one of them.
@@ -280,7 +280,7 @@ pub fn run() -> ! {
         for i in 0..8 {
             rq[64 + 4 * i] = 0xFF;
         }
-        let t = metal_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], 26, &mut rq, &image);
+        let t = metallium_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], 26, &mut rq, &image);
         (t > 0).then_some(t)
     });
     println!("[chaos] network workload: {}", if net_prog.is_some() { "started" } else { "not available (no network device)" });

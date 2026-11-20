@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 use core::ptr::read_volatile;
-use metal_programs::*;
+use metallium_programs::*;
 
 // Meant to be built position-independent (`make programs`): follows pointers that only work once the loader has relocated
 // them, and prints where its code and data really are.

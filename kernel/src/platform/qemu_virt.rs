@@ -3,7 +3,7 @@
 //!
 //! The harness switches come from QEMU's documented `fw_cfg`
 //! interface: a data register at the base and a big-endian 16-bit selector at base + 8.
-//! The harness passes the RAM size with `-fw_cfg name=opt/metal/ram-bytes,string=<n>`;
+//! The harness passes the RAM size with `-fw_cfg name=opt/metallium/ram-bytes,string=<n>`;
 //! on real hardware this would come from the firmware's memory map instead.
 use crate::hal::{PowerControl, Rtc};
 use core::ptr::{read_volatile, write_volatile};
@@ -21,7 +21,7 @@ pub type Clock = Pl031;
 const FW_CFG: usize = 0x0902_0000;
 const KEY_SIGNATURE: u16 = 0x0000;
 const KEY_FILE_DIR: u16 = 0x0019;
-const RAM_FILE: &[u8] = b"opt/metal/ram-bytes";
+const RAM_FILE: &[u8] = b"opt/metallium/ram-bytes";
 
 fn select(key: u16) {
     // SAFETY: FW_CFG+8 is the fw_cfg selector register (2 bytes) in the device block (l1[0] of `map_devices`); volatile MMIO write.
@@ -72,7 +72,7 @@ fn find_file(name: &[u8]) -> Option<(u16, u32)> {
 // ---- the device tree -------------------------------------------------------------------------------------------------------------------
 
 use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use metal_fdt::{Conduit, Fdt, Gic};
+use metallium_fdt::{Conduit, Fdt, Gic};
 
 /// Where firmware put the device tree (x0 at entry); 0 if it did not say.
 static DTB: AtomicUsize = AtomicUsize::new(0);
@@ -99,7 +99,7 @@ fn dtb_ram() -> Option<(u64, u64)> {
     }
     // SAFETY: `set_dtb` accepted `d` as an 8-aligned address inside RAM, and the limit keeps the read inside the first GiB of it; every load is a
     // single-byte volatile one (see `early_memory`), so it is also safe with the MMU off.
-    unsafe { metal_fdt::early_memory(d as *const u8, DTB_LIMIT.min(RAM_BASE + (1 << 30) - d)) }
+    unsafe { metallium_fdt::early_memory(d as *const u8, DTB_LIMIT.min(RAM_BASE + (1 << 30) - d)) }
 }
 
 /// What the tree says about the machine, kept in plain atomics once read (`init_machine`).
@@ -111,7 +111,7 @@ static CONDUIT_SMC: AtomicU8 = AtomicU8::new(0);
 /// 2 or 3: the interrupt controller's version (2 until the tree says otherwise).
 static GIC_VERSION: AtomicU8 = AtomicU8::new(2);
 
-fn read_machine() -> Option<metal_fdt::Machine> {
+fn read_machine() -> Option<metallium_fdt::Machine> {
     let d = DTB.load(Ordering::Relaxed);
     if d == 0 {
         return None;
@@ -122,7 +122,7 @@ fn read_machine() -> Option<metal_fdt::Machine> {
     let total = u32::from_be_bytes(head.get(4..8)?.try_into().ok()?) as usize;
     // SAFETY: `total` bytes at `d` are inside the first GiB of RAM (checked against `max`), and nothing writes the tree.
     let blob = unsafe { core::slice::from_raw_parts(d as *const u8, total.min(max).min(DTB_LIMIT)) };
-    Some(metal_fdt::machine(&Fdt::new(blob)?))
+    Some(metallium_fdt::machine(&Fdt::new(blob)?))
 }
 
 /// Read the tree (MMU on, boot core, before anything that needs the interrupt controller or the core list): sets the controller's version and
@@ -355,21 +355,21 @@ static INTERACTIVE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicB
 /// Read the harness's switches once at boot.
 pub fn init_flags() {
     // the test harness types into the guest: the conductor must keep the system up for it
-    INTERACTIVE.store(flag(b"opt/metal/interactive"), core::sync::atomic::Ordering::Relaxed);
+    INTERACTIVE.store(flag(b"opt/metallium/interactive"), core::sync::atomic::Ordering::Relaxed);
     // a non-zero seed switches the system into chaos-test mode (see user/src/chaos.rs)
-    CHAOS_SEED.store(number(b"opt/metal/chaos").unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
-    MAP_LOG.store(flag(b"opt/metal/map-log"), core::sync::atomic::Ordering::Relaxed);
+    CHAOS_SEED.store(number(b"opt/metallium/chaos").unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
+    MAP_LOG.store(flag(b"opt/metallium/map-log"), core::sync::atomic::Ordering::Relaxed);
     // development: run just one group of the conductor's tests (1 = the IPC benchmark, 2 = the scheduler tests)
-    ONLY.store(number(b"opt/metal/only").unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
+    ONLY.store(number(b"opt/metallium/only").unwrap_or(0), core::sync::atomic::Ordering::Relaxed);
     // a non-zero seed starts the syscall fuzzer and runs only its checks (user/src/fuzz.rs)
-    let fuzz = number(b"opt/metal/fuzz").unwrap_or(0);
+    let fuzz = number(b"opt/metallium/fuzz").unwrap_or(0);
     FUZZ_SEED.store(fuzz, core::sync::atomic::Ordering::Relaxed);
     if fuzz != 0 {
         ONLY.store(6, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
-/// Test aid (`opt/metal/map-log=1`): the kernel logs where it places every mapping it chooses an address for.
+/// Test aid (`opt/metallium/map-log=1`): the kernel logs where it places every mapping it chooses an address for.
 static MAP_LOG: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn map_log() -> bool {

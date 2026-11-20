@@ -237,7 +237,7 @@ pub fn init() {
     // shareable. One that is not accesses memory as non-cacheable and non-shareable, whatever is programmed (the
     // architecture requires these fields to be 0 then), and only the cache maintenance below keeps it in step.
     // (the harness can pretend the SMMU is not coherent, to exercise the cache-maintenance path under QEMU)
-    let coherent = idr0 & (1 << 4) != 0 && !crate::platform::flag(b"opt/metal/dma-noncoherent");
+    let coherent = idr0 & (1 << 4) != 0 && !crate::platform::flag(b"opt/metallium/dma-noncoherent");
     s.coherent = coherent;
     w32(CR1, if coherent { 0b11 << 10 | 0b01 << 8 | 0b01 << 6 | 0b11 << 4 | 0b01 << 2 | 0b01 } else { 0 });
     w64(STRTAB_BASE, strtab as u64 | 1 << 62); // read-allocate hint

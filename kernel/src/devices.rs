@@ -11,7 +11,7 @@ use crate::ipc;
 use crate::obj::*;
 use crate::{irq, kprintln, mem, pci};
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use metal_sched::Class as SchedClass;
+use metallium_sched::Class as SchedClass;
 
 /// What a device is for. Several drivers can serve one class on different machines; clients ask for a class, not for a device.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

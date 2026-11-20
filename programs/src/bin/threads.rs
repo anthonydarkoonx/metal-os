@@ -1,9 +1,9 @@
 #![no_std]
 #![no_main]
 use core::sync::atomic::{AtomicU32, Ordering::*};
-use metal_programs::fs::*;
-use metal_programs::thread::{self, Mutex};
-use metal_programs::*;
+use metallium_programs::fs::*;
+use metallium_programs::thread::{self, Mutex};
+use metallium_programs::*;
 
 // Tests of threads. The argument selects the scenario; the exit code is 0 when it behaved (or says what did not).
 // Capabilities the threads need: bit 8 = the VFS endpoint.

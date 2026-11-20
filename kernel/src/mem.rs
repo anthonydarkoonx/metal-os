@@ -16,7 +16,7 @@
 //! to everyone else).
 #![forbid(unsafe_code)]
 use crate::sync::{Guard, SpinLock, R_MEM};
-use metal_compact::Frames;
+use metallium_compact::Frames;
 
 pub const RAM_BASE: usize = crate::platform::RAM_BASE;
 pub const PAGE: usize = 4096;
@@ -392,7 +392,7 @@ pub fn free_owned(owner: Owner) -> usize {
 pub fn alloc_contig(n: usize, owner: Owner) -> Option<usize> {
     let start = {
         let mut m = lock();
-        let start = metal_compact::find_run(&*m, m.low_hint, n)?;
+        let start = metallium_compact::find_run(&*m, m.low_hint, n)?;
         for i in start..start + n {
             m.claim(i, owner, FKind::Pinned);
         }
@@ -420,9 +420,9 @@ pub fn total_frames() -> usize {
 }
 
 pub fn largest_free_run() -> usize {
-    metal_compact::largest_free_run(&*lock())
+    metallium_compact::largest_free_run(&*lock())
 }
 
 pub fn free_runs() -> usize {
-    metal_compact::free_runs(&*lock())
+    metallium_compact::free_runs(&*lock())
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal EROFS image builder (uncompressed, 4 KiB blocks, compact inodes,
 flat-plain layout). Written from the public format description; the Rust
-reader in libs/metal-erofs is the independent check (see `make erofs-check`)."""
+reader in libs/metallium-erofs is the independent check (see `make erofs-check`)."""
 import struct
 
 BLK = 4096

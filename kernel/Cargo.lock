@@ -3,58 +3,58 @@
 version = 4
 
 [[package]]
-name = "metal-aead"
+name = "metallium-aead"
 version = "0.1.0"
 dependencies = [
- "metal-rand",
+ "metallium-rand",
 ]
 
 [[package]]
-name = "metal-compact"
+name = "metallium-compact"
 version = "0.1.0"
 
 [[package]]
-name = "metal-fdt"
+name = "metallium-fdt"
 version = "0.1.0"
 
 [[package]]
-name = "metal-kernel"
+name = "metallium-kernel"
 version = "0.1.0"
 dependencies = [
- "metal-aead",
- "metal-compact",
- "metal-fdt",
- "metal-loader",
- "metal-lz4",
- "metal-rand",
- "metal-sched",
- "metal-zram",
+ "metallium-aead",
+ "metallium-compact",
+ "metallium-fdt",
+ "metallium-loader",
+ "metallium-lz4",
+ "metallium-rand",
+ "metallium-sched",
+ "metallium-zram",
 ]
 
 [[package]]
-name = "metal-loader"
+name = "metallium-loader"
 version = "0.1.0"
 
 [[package]]
-name = "metal-lz4"
+name = "metallium-lz4"
 version = "0.1.0"
 
 [[package]]
-name = "metal-rand"
+name = "metallium-rand"
 version = "0.1.0"
 
 [[package]]
-name = "metal-sched"
+name = "metallium-sched"
 version = "0.1.0"
 
 [[package]]
-name = "metal-zram"
+name = "metallium-zram"
 version = "0.1.0"
 dependencies = [
- "metal-lz4",
- "metal-zstd",
+ "metallium-lz4",
+ "metallium-zstd",
 ]
 
 [[package]]
-name = "metal-zstd"
+name = "metallium-zstd"
 version = "0.1.0"

@@ -1,4 +1,4 @@
-//! Syscall fuzzer (`fw_cfg opt/metal/fuzz=<seed>`, `make fuzz`): role 17 calls every system call with
+//! Syscall fuzzer (`fw_cfg opt/metallium/fuzz=<seed>`, `make fuzz`): role 17 calls every system call with
 //! random and hostile arguments, holding a deliberately mixed set of capabilities (send rights to
 //! most services, a MemCtl, a Sched, shared memory, one grantable capability). The conductor
 //! (development mode 6) waits for it to finish and then checks what no single call could show:
@@ -117,7 +117,7 @@ fn fuzz_spawn(rng: &mut u64, kids: &mut [i64; 8]) -> bool {
     let t = if raw {
         svc(SPAWN, SPAWN_SLOT, rq.as_ptr() as u64, 0, 0, 0)[0] as i64
     } else {
-        metal_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], SPAWN_SLOT, &mut rq, &img[..(len as usize).min(img.len())])
+        metallium_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], SPAWN_SLOT, &mut rq, &img[..(len as usize).min(img.len())])
     };
     if t > 0 && raw {
         // an embryo made by hand: throw hostile loads and starts at it, then maybe let it start

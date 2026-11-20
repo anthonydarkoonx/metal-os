@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use metal_programs::*;
+use metallium_programs::*;
 
 static SLEEPER: &[u8] = include_bytes!("../../build/sleeper.bin");
 

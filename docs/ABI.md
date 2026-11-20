@@ -43,9 +43,9 @@ task (`CAP_GRANT`) or to a program it starts (the spawn request).
 | 18 | MEMCTL | memory capability slot, op…: statistics, compaction, contiguous allocation, swap; ops 6–10: the pager (below) |
 | 20 | NCPUS | → online cores |
 | 41 | RESTORE_OF | admin slot, task, log id → the slot: gives back a capability that `REVOKE_OF` took from `task` (listed by `SYSINFO` page 14), in the slot it had (refused if that slot is in use now), as a new child of the node it hung under (refused if that node or the object is gone). Every capability a program has without a parent is one of three kinds. The ones the kernel gives it at spawn (its console, and its file and network session capabilities in slots 8 to 11) are logged too and come back as roots, but only while they are still exactly what the kernel would give (the session must exist). The ones the program made itself (the creator's capability of an endpoint, of shared memory, of a memory allocation) are refused by `REVOKE_OF`: revoking them would destroy the object. Everything else hangs under a node and comes back under it. A restored capability takes a node that is not counted against any grant quota (it replaces one the revoke freed); a memory capability that was mapped is mapped again at the same address. Needs the same `Admin` capability with `R_REVOKE`. Only what the kernel's log of the last 16 revokes holds can come back, so nothing can be made up; copies derived from it stay gone. The log forgets a task's entries when it ends |
-| 43 | GETRANDOM | no arguments → 0 and 40 random bytes in `x1`..`x5` (little endian), drawn from the kernel's generator for cryptographic use; `E_NOSYS` (-7) when that generator has no real entropy behind it (no RNDR, no full `opt/metal/seed`, no virtio-rng device, or one of the layout debugging modes): the caller must then refuse to do cryptography, not fall back to something weaker (`programs/src/random.rs`) |
+| 43 | GETRANDOM | no arguments → 0 and 40 random bytes in `x1`..`x5` (little endian), drawn from the kernel's generator for cryptographic use; `E_NOSYS` (-7) when that generator has no real entropy behind it (no RNDR, no full `opt/metallium/seed`, no virtio-rng device, or one of the layout debugging modes): the caller must then refuse to do cryptography, not fall back to something weaker (`programs/src/random.rs`) |
 | 40 | REVOKE_OF | admin slot, task, slot → how many capabilities went: revokes the capability in `slot` of another program (and what was derived from it). Needs an `Admin` capability with `R_REVOKE` (1 << 10); only programs started at run time can be named, never the caller, never the root capability of an endpoint or of shared memory (that would end the object for everyone). The conductor holds it (slot 28), the program manager gets a copy, and a program with `permission = admin` (the task manager) gets one in slot 4 |
-| 21 | SYSINFO | page, arg → facts (pages 10, 11, 13 and 14, which show what other tasks hold, answer `-1` unless the caller holds an `Admin` capability; pages 0..18 (18: the number of file and network sessions, and of task slots): 0 memory, 1 tasks, 2 harness flags, 3 task table rows (`arg` = slot; `-5` past the last of the machine's task slots, 64 to 1024: one per MiB of RAM, or the fw_cfg file `opt/metal/max-tasks`), 4 fuzz seed, 5 file sessions (page, generation, program, parent program or 0xFFFF), 6 network sessions, 7 pages held by a task's program, 8 the caller's own task id, 9 the caller's layout: heap start, stack top, whether randomisation is on, whether the CPU has hardware random numbers, 10 one capability slot of a task (`arg` = task \| slot << 16; any task): kind, object, rights, node; 11 who holds a capability to an object (`arg` = kind \| object << 8 \| window << 24, the object in 16 bits): bit masks of the tasks of one window (bit t is task `window * 64 + t`; all holders, may send / write, may receive / map), the creator or 0xFFFF, how many capabilities name it in all windows; 12 what the object is (`arg` as in 11): 16-byte name in `x1`,`x2`, size in pages or interrupt number, class, creator or 0xFFFF; 13 what revoking a capability would take with it (`arg` = task \| slot << 16 \| window << 24): how many other capabilities derive from it, the tasks of that window holding them (bit mask), how many capability nodes hang under it, 1 if it is the root capability of its object (`REVOKE_OF` refuses those); 14 what has been revoked from a task and can be given back (`arg` = task \| n << 16, oldest first): id, slot, kind, object, rights \| 1 << 16 if what it hung under is still there) |
+| 21 | SYSINFO | page, arg → facts (pages 10, 11, 13 and 14, which show what other tasks hold, answer `-1` unless the caller holds an `Admin` capability; pages 0..18 (18: the number of file and network sessions, and of task slots): 0 memory, 1 tasks, 2 harness flags, 3 task table rows (`arg` = slot; `-5` past the last of the machine's task slots, 64 to 1024: one per MiB of RAM, or the fw_cfg file `opt/metallium/max-tasks`), 4 fuzz seed, 5 file sessions (page, generation, program, parent program or 0xFFFF), 6 network sessions, 7 pages held by a task's program, 8 the caller's own task id, 9 the caller's layout: heap start, stack top, whether randomisation is on, whether the CPU has hardware random numbers, 10 one capability slot of a task (`arg` = task \| slot << 16; any task): kind, object, rights, node; 11 who holds a capability to an object (`arg` = kind \| object << 8 \| window << 24, the object in 16 bits): bit masks of the tasks of one window (bit t is task `window * 64 + t`; all holders, may send / write, may receive / map), the creator or 0xFFFF, how many capabilities name it in all windows; 12 what the object is (`arg` as in 11): 16-byte name in `x1`,`x2`, size in pages or interrupt number, class, creator or 0xFFFF; 13 what revoking a capability would take with it (`arg` = task \| slot << 16 \| window << 24): how many other capabilities derive from it, the tasks of that window holding them (bit mask), how many capability nodes hang under it, 1 if it is the root capability of its object (`REVOKE_OF` refuses those); 14 what has been revoked from a task and can be given back (`arg` = task \| n << 16, oldest first): id, slot, kind, object, rights \| 1 << 16 if what it hung under is still there) |
 | 23 | SCHED | op…: real-time reservations (`R_RT`), statistics |
 | 24 | SPAWN | spawn capability slot, request va → task id of a new *embryo* (a task with stack, arguments and capabilities but no code; never scheduled) |
 | 25 | WAIT | task id, nohang → the child's exit code (blocks until it ends unless nohang: `-10`) |
@@ -67,7 +67,7 @@ task (`CAP_GRANT`) or to a program it starts (the spawn request).
 ## Programs
 The kernel knows no executable format. `SPAWN` makes an embryo, the parent fills the image area (0x8000_0000 up to the
 stack) with `TASK_LOAD` and starts it with `TASK_START`; only the parent may do so, and `WAIT` on an unstarted embryo is
-refused (`KILL` collects it). The loader (`libs/metal-loader`, linked into every program that starts programs: `spawn()`
+refused (`KILL` collects it). The loader (`libs/metallium-loader`, linked into every program that starts programs: `spawn()`
 in `programs/src/lib.rs`) reads two image formats, recognised by their first bytes. It is ordinary user code, unit-tested and
 fuzzed on the host, and refuses what it cannot load with `-5`.
 
@@ -237,7 +237,7 @@ ENOTEMPTY 9, EPERM 10. A program's descriptors belong to it and vanish with it (
 child's task id. Afterwards the child's `/data` *is* that directory (a path is rewritten after `..` has been refused, so nothing
 outside can be named), `/system` stays readable, and the child may have at most 12 entries (files and directories) under it, so one
 program cannot use up the store's few. Only the child's parent may do it (the kernel reports the parent in `SYSINFO` page 5), and a
-confined parent names the directory as it sees it, so confinement can only narrow. `metal_loader::spawn_with` calls a hook after the
+confined parent names the directory as it sees it, so confinement can only narrow. `metallium_loader::spawn_with` calls a hook after the
 program is loaded and before its first instruction, which is where the program manager does it: there is no moment at which the program
 runs unconfined. A confinement belongs to one session (generation): the next program in that slot starts unconfined.
 
@@ -247,7 +247,7 @@ runs unconfined. A confinement belongs to one session (generation): the next pro
 it from a blocked receive; destroying the endpoint (`CAP_REVOKE` flag 1) fails every call still waiting on it with `-4`.
 
 ## Address-space layout randomisation and guard pages
-Each program (and each restart of a boot-time service) gets a fresh layout, drawn by `kernel/src/rand.rs` (ChaCha20 with fast key erasure, `libs/metal-rand`, written from RFC 8439 and checked against its test vectors; every draw is independent
+Each program (and each restart of a boot-time service) gets a fresh layout, drawn by `kernel/src/rand.rs` (ChaCha20 with fast key erasure, `libs/metallium-rand`, written from RFC 8439 and checked against its test vectors; every draw is independent
 of the others, so one program's layout says nothing about the next one's; not a vetted cryptographic RNG):
 
 | what | where | choices |
@@ -259,11 +259,11 @@ of the others, so one program's layout says nothing about the next one's; not a 
 Unmapped guard pages: one below the stack, one at (and above) its top, one after the last heap page (`HEAP_GROW` refuses to
 pass 0x8F00_0000); nothing a program can map (the shared-memory windows are elsewhere) lands next to the stack, so a stack
 overflow (of the main stack or of a kernel-made thread stack) or an overrun of the heap's end faults the program instead of corrupting a neighbour.
-Seeding folds together the CPU's RNDR register (FEAT_RNG), the first 32 bytes of `-fw_cfg name=opt/metal/seed,file=<file>` (the Makefile
+Seeding folds together the CPU's RNDR register (FEAT_RNG), the first 32 bytes of `-fw_cfg name=opt/metallium/seed,file=<file>` (the Makefile
 passes 32 fresh bytes from `/dev/urandom` on every run), the counter and machine ID, 32 bytes read once from a virtio-rng device when the bus is probed (`kernel/src/virtio_rng.rs`; the device sits behind its own SMMU stream, reaches one page, and is shut down again), and, after boot, the time of every interrupt. Without
 RNDR and without the seed file only the counter is unpredictable and the boot log says "(weak ...)". Debugging modes, all of which give up
-unpredictability on purpose: `opt/metal/noaslr=1` fixes every layout (the lowest value of each range); `opt/metal/aslr-log=1` prints a boot
-seed and runs from it; `opt/metal/aslr-seed=<n>` replays that seed (the boot tasks then get the same layouts as in the logged run; the boot
+unpredictability on purpose: `opt/metallium/noaslr=1` fixes every layout (the lowest value of each range); `opt/metallium/aslr-log=1` prints a boot
+seed and runs from it; `opt/metallium/aslr-seed=<n>` replays that seed (the boot tasks then get the same layouts as in the logged run; the boot
 log lists them; programs started later depend on the order they are started in). `make aslr-replay` checks that. Each of the three modes prints a `[rand] WARNING` line at boot and leaves the virtio-rng device unread; `make entropy` checks the warnings and that a normal boot folds the device's bytes in.
 Program images: position-independent `ET_DYN` programs (everything under `/bin` and the boot-time services) get a random base in
 `0x2_0000_0000..0x40_0000_0000` and may be 8 MiB; flat images and static `ET_EXEC` programs stay at 0x8000_0000 (960 KiB).
@@ -278,7 +278,7 @@ loads it. At boot it applies its relocations, picks a random page-aligned addres
 fits clear of the first 512 KiB and of the old image, copies itself there with the copy's pointers corrected, and continues in the copy; `kmain`
 clears the old image and the allocator treats it as free memory. RAM is identity-mapped, so this changes the physical and the virtual address
 together. With 64 MiB of RAM that is about 14 bits. The generator takes RNDR, the harness's seed file and the counter; with neither RNDR nor the
-seed file the boot log says the address is guessable. `opt/metal/noaslr` and the seed modes do not fix it. It does not hide the kernel from
+seed file the boot log says the address is guessable. `opt/metallium/noaslr` and the seed modes do not fix it. It does not hide the kernel from
 anything that learns one kernel address (the boot log prints them; no system call does). If the RAM size is unknown the image stays put, with a
 warning. `make kaslr` boots eight times and checks the addresses differ and lie in RAM.
 
@@ -287,7 +287,7 @@ image, the others' are made from RAM when the core starts; RAM is mapped with 2 
 kernel stops with "kernel stack overflow on core N" instead of overwriting memory below. A single stack frame larger than the
 guard cannot jump over it: for large frames the compiler emits an inline probe that touches one 4 KiB page at a time
 (`stack-probes` in the target spec), so the probe lands in the guard. `make stack-guard` provokes an overflow on cores 0, 1 and 31 (32 cores, GICv3)
-and with one 128 KiB frame (`opt/metal/stack-overflow=1`, `opt/metal/stack-overflow-core1=1`, `opt/metal/stack-overflow-core=N`, `opt/metal/stack-overflow-bigframe=1`).
+and with one 128 KiB frame (`opt/metallium/stack-overflow=1`, `opt/metallium/stack-overflow-core1=1`, `opt/metallium/stack-overflow-core=N`, `opt/metallium/stack-overflow-bigframe=1`).
 
 ## The pager (`kernel/src/pager.rs`)
 `MEMCTL` ops on a `MemCtl` capability. `MC_SWAP_WRITEBACK`(9, `n`) needs `R_MEM_SWAP`; 6, 7, 8 need `R_MEM_PAGER` (rights bit 5 of a

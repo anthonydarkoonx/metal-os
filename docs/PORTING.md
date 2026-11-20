@@ -4,12 +4,12 @@ An audit of 2026-11-13 (read-only: nothing was changed or run on a board). Every
 from memory and **must be checked against each board's documentation** before relying on them.
 
 ## What is portable as it is
-* The architecture-neutral core: scheduler (`kernel/src/sched.rs`, `libs/metal-sched`), capabilities, IPC and rings, memory manager policy
+* The architecture-neutral core: scheduler (`kernel/src/sched.rs`, `libs/metallium-sched`), capabilities, IPC and rings, memory manager policy
   (compaction, zram swap, pager), spawn and the loader, the program manager, and every crate in `libs/` (file systems, network stack, programs). They are `no_std`, safe Rust, and host-tested.
 * The Rust target (`aarch64-unknown-none-softfloat`: no floating point in the kernel) runs on any ARMv8-A core.
 * `boot.S` already drops from EL2 to EL1 and enables the GICv3 system-register interface "on hardware with a GICv3", so it expects to be entered the way
   U-Boot or board firmware enters a kernel. The kernel is position independent (KASLR moves it), so the link address is not a hard problem.
-* DMA cache maintenance (`user/src/dma.rs`, `kernel/src/cache.rs`) and a non-coherent mode (`opt/metal/dma-noncoherent`, tested by
+* DMA cache maintenance (`user/src/dma.rs`, `kernel/src/cache.rs`) and a non-coherent mode (`opt/metallium/dma-noncoherent`, tested by
   `make qemu-test-noncoherent`) already exist, which most SBCs need.
 
 ## What is specific to QEMU's `virt` machine
@@ -23,7 +23,7 @@ from memory and **must be checked against each board's documentation** before re
 | Interrupts | `gic.rs` (GICv2: GICD 0x0800_0000, GICC 0x0801_0000) | GICv2 at fixed addresses | the board's GIC (`platform/qemu_virt/gicv3.rs` is a GICv3 driver: distributor, redistributors, system-register interface; the platform picks v2 or v3 from the device tree); many SoCs have a GICv3 (distributor, redistributors, system registers): `gic.rs` has no GICv3 driver |
 | Cores, power | `smp.rs` (`MAX_CPUS` 32, each core's stacks made from RAM at boot, the machine's own count and MPIDRs from `platform::cpu_count` / `cpu_mpidr`, PSCI CPU_ON through `hvc #0`), `frame::cpu::psci_power` (SYSTEM_OFF / SYSTEM_RESET, same conduit, used to shut down and restart) | PSCI over HVC, core id = index | PSCI over **SMC** (after the EL2 to EL1 drop nothing handles HVC), the board's core ids, 4 or 8 cores; some older firmware uses spin tables instead of PSCI |
 | Clock | `platform.rs` (PL031 RTC at 0x0901_0000) | an RTC at a fixed address | the board's RTC, or none (`SystemTime::now()` is `None`) |
-| Test hooks | `platform.rs` (fw_cfg: RAM size, `opt/metal/*` flags), semihosting exit in `sched.rs` | QEMU's fw_cfg and semihosting | nothing: both are already optional (no fw_cfg means every flag is off and RAM is 128 MiB; keep an explicit RAM size) |
+| Test hooks | `platform.rs` (fw_cfg: RAM size, `opt/metallium/*` flags), semihosting exit in `sched.rs` | QEMU's fw_cfg and semihosting | nothing: both are already optional (no fw_cfg means every flag is off and RAM is 128 MiB; keep an explicit RAM size) |
 | PCIe | `pci.rs` (ECAM 0x40_1000_0000, window 0x1000_0000..0x3eff_0000, only virtio vendor 0x1af4 matched) | firmware-free, ready-made host bridge | a host-controller driver and window set-up per SoC (if the board's devices hang off PCIe at all) |
 | IOMMU | `smmu.rs` (SMMUv3 at 0x0905_0000) | an Arm SMMUv3 confines every user-space driver's DMA | most SBC SoCs do not have one (some have a vendor IOMMU, a few an SMMU). Without it a user-space driver with a DMA-capable device can reach any memory, which weakens the "drivers are ordinary confined programs" story (see below) |
 | Entropy | `virtio_rng.rs`, `rand.rs` | a virtio-rng device; `RNDR` if the CPU has it (ARMv8.5, so not on A53/A55/A72) | the SoC's hardware random generator driver, for ASLR/KASLR quality |
@@ -33,7 +33,7 @@ from memory and **must be checked against each board's documentation** before re
 1. **Storage:** an SD/eMMC controller (SDHCI, Arasan, DesignWare MMC or a Broadcom/Rockchip variant) plus clocks.
 2. **Display:** start with the framebuffer the firmware leaves (a "simple framebuffer": address, size, stride from the device tree or firmware); a real HDMI/DSI driver is far larger. The terminal session (`user/src/desktop.rs`) already draws into a framebuffer and flushes rectangles, so it needs only a driver that shows a rectangle (the `GPU_FLUSH` / `GPU_FLUSH2` protocol; on a plain framebuffer a flush is a cache clean).
 3. **Input:** USB keyboard and mouse need a USB host controller stack (xHCI or DWC2) and HID: the largest single item. A serial-only shell is the first milestone.
-4. **Network:** the SoC's Ethernet MAC (or a PCIe NIC) plus PHY set-up; the stack in `libs/metal-net` is independent of it.
+4. **Network:** the SoC's Ethernet MAC (or a PCIe NIC) plus PHY set-up; the stack in `libs/metallium-net` is independent of it.
 5. **Platform plumbing** (clocks, resets, pin mux, regulators) that firmware may or may not have done.
 
 ## Suggested order

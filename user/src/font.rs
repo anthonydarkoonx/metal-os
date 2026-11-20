@@ -1,6 +1,6 @@
-//! Drawing text straight into a framebuffer (the console). The 5x9 glyph table itself is in `metal_gfx::font`.
+//! Drawing text straight into a framebuffer (the console). The 5x9 glyph table itself is in `metallium_gfx::font`.
 
-pub use metal_gfx::font::GLYPHS;
+pub use metallium_gfx::font::GLYPHS;
 
 fn glyph(c: u8) -> Option<&'static [u8; 9]> {
     GLYPHS.iter().find(|(g, _)| *g == c).map(|(_, rows)| rows)
@@ -35,7 +35,7 @@ pub fn draw_char(fb: &mut [u32], width: usize, x: usize, y: usize, scale: usize,
 /// Draw character `ch` of the monospace face (IBM Plex Mono, 14 px) with the top left of its cell at (x, y): each pixel is the cell's own colour blended
 /// with `color` by the glyph's coverage, so it is smooth on any ground.
 pub fn draw_mono(fb: &mut [u32], width: usize, x: usize, y: usize, color: u32, ch: u8) {
-    let face = &metal_gfx::typeface::MONO;
+    let face = &metallium_gfx::typeface::MONO;
     let Some(g) = face.glyph(ch as char) else { return };
     for row in 0..g.h as usize {
         for col in 0..g.w as usize {
@@ -50,7 +50,7 @@ pub fn draw_mono(fb: &mut [u32], width: usize, x: usize, y: usize, color: u32, c
                 continue;
             }
             if let Some(p) = fb.get_mut(py as usize * width + px as usize) {
-                *p = metal_gfx::blend(*p, color, cov);
+                *p = metallium_gfx::blend(*p, color, cov);
             }
         }
     }

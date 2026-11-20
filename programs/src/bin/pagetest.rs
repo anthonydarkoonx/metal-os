@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // The victim of the pager tests (user/src/programs.rs): keeps a known pattern in heap pages while the conductor pushes the
 // pages out to the compressed store and on to disk, then checks that every byte comes back.
@@ -52,7 +52,7 @@ program!("pagetest", |c| -> u64 {
             println!("[pagetest] filled");
             // wait for the conductor (it has pushed the pages out to the disk) to create the file that says so
             let give_up = ticks() + 3000;
-            while !metal_programs::fs::exists("/data/pagetest.go") {
+            while !metallium_programs::fs::exists("/data/pagetest.go") {
                 if ticks() > give_up {
                     println!("[pagetest] nobody came");
                     return 201;

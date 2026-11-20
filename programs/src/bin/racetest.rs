@@ -1,8 +1,8 @@
 #![no_std]
 #![no_main]
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering::*};
-use metal_programs::thread;
-use metal_programs::*;
+use metallium_programs::thread;
+use metallium_programs::*;
 
 // Regression tests for the two races found by the kernel audit (SECURITY.md, H1 and H2). Each needs two cores and is a
 // race, so a pass means "not seen in these runs"; the test is written so that the unfixed kernel fails it quickly.
@@ -679,7 +679,7 @@ fn n6() -> u64 {
         // (the thread gets the spawn capability: slot 0)
         return 2;
     }
-    let mut r = svc(metal_programs::random::GETRANDOM, 0, 0, 0, 0, 0)[1] | 1; // (a different delay every run)
+    let mut r = svc(metallium_programs::random::GETRANDOM, 0, 0, 0, 0, 0)[1] | 1; // (a different delay every run)
     for _ in 0..(rng(&mut r) % 100_000) {
         core::hint::spin_loop();
     }

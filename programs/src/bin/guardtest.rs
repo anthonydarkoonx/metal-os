@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Checks the guard pages and shows the randomised layout: `guardtest <mode>`.
 //   0  print the layout: stack top, heap base, a ring page (exit 0)

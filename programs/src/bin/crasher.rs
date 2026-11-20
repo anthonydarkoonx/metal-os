@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::ability::*;
-use metal_programs::*;
+use metallium_programs::ability::*;
+use metallium_programs::*;
 
 // Sample program that crashes once: its first instance touches unmapped memory after 10 ticks; the instance the manager
 // starts afterwards is given the count and runs on (saved word 1 is 1 for the first instance, 2 for the next).

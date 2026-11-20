@@ -1,0 +1,11 @@
+[package]
+name = "metallium-ed25519"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SHA-512 and Ed25519 signature verification (RFC 8032), no_std, no heap"
+
+[dev-dependencies]
+
+[lints]
+workspace = true

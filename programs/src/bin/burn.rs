@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Computes for `arg` ticks of wall time, then exits with a checksum (so that the loop is not optimised away).
 program!("burn", |c| {

@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Calls the endpoint its parent delegated as slot 0 (the demo driver: OP_PING answers with a counter) and exits with
 // the answer; 1000 + the error if there is no such capability.

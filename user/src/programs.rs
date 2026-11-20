@@ -111,7 +111,7 @@ impl Req {
     }
     fn go_with(&self, slot: u64, img: &[u8]) -> i64 {
         let mut b = self.bytes();
-        metal_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], slot, &mut b, img)
+        metallium_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], slot, &mut b, img)
     }
     fn go(&self, img: &[u8]) -> i64 {
         self.go_with(SPAWN_SLOT, img)

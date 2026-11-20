@@ -1,4 +1,4 @@
-//! The network service (role 19): the IP stack (`metal-net`) behind an endpoint. Programs started with network access
+//! The network service (role 19): the IP stack (`metallium-net`) behind an endpoint. Programs started with network access
 //! hold a send capability to that endpoint (slot 10) and a session page (slot 11); a request is an `IPC_CALL` whose
 //! words say what to do and whose page carries names and data, as with the VFS. Every call is answered at once (reads
 //! that find nothing say "would block": the caller asks again), so the service never waits for the network while a
@@ -16,8 +16,8 @@ use crate::*;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
-use metal_net::tcp::{self, State};
-use metal_net::{DnsResult, Io, NetError, Stack};
+use metallium_net::tcp::{self, State};
+use metallium_net::{DnsResult, Io, NetError, Stack};
 
 const BUFS_VA: usize = 0x8030_0000;
 const RING_VA: usize = 0x8024_0000;
@@ -122,7 +122,7 @@ struct Netd {
     udp: Vec<Owner>,
     listeners: Vec<Owner>,
     dns: Vec<Owner>,
-    echoes: Vec<VecDeque<metal_net::EchoReply>>,
+    echoes: Vec<VecDeque<metallium_net::EchoReply>>,
     watches: Vec<Vec<Want>>,
     last_reap: u64,
     driver_tid: Option<u64>,

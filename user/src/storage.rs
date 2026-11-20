@@ -80,15 +80,15 @@ impl BlkDev {
     }
 }
 
-impl metal_lfs::BlockDev for BlkDev {
+impl metallium_lfs::BlockDev for BlkDev {
     fn blocks(&self) -> u64 {
         self.blocks
     }
-    fn read(&self, blk: u64, buf: &mut [u8; 4096]) -> Result<(), metal_lfs::Error> {
-        self.read_block(blk, buf).map_err(|_| metal_lfs::Error::Io)
+    fn read(&self, blk: u64, buf: &mut [u8; 4096]) -> Result<(), metallium_lfs::Error> {
+        self.read_block(blk, buf).map_err(|_| metallium_lfs::Error::Io)
     }
-    fn write(&mut self, blk: u64, buf: &[u8; 4096]) -> Result<(), metal_lfs::Error> {
-        self.write_block(blk, buf).map_err(|_| metal_lfs::Error::Io)
+    fn write(&mut self, blk: u64, buf: &[u8; 4096]) -> Result<(), metallium_lfs::Error> {
+        self.write_block(blk, buf).map_err(|_| metallium_lfs::Error::Io)
     }
 }
 
@@ -98,15 +98,15 @@ struct BlkSource {
     cache: RefCell<(u64, Box<[u8; 4096]>)>,
 }
 
-impl metal_erofs::Source for BlkSource {
-    fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<(), metal_erofs::Error> {
+impl metallium_erofs::Source for BlkSource {
+    fn read_at(&self, off: u64, buf: &mut [u8]) -> Result<(), metallium_erofs::Error> {
         let mut done = 0;
         while done < buf.len() {
             let pos = off + done as u64;
             let (idx, inb) = (pos / 4096, (pos % 4096) as usize);
             let mut c = self.cache.borrow_mut();
             if c.0 != idx {
-                self.dev.read_block(idx, &mut c.1).map_err(|_| metal_erofs::Error::Io)?;
+                self.dev.read_block(idx, &mut c.1).map_err(|_| metallium_erofs::Error::Io)?;
                 c.0 = idx;
             }
             let n = (buf.len() - done).min(4096 - inb);
@@ -146,7 +146,7 @@ pub fn rofs_server() -> ! {
     map_server_memory(2);
     let dev = BlkDev { ep: 1, buf: va(SERVER_BUF_VA), base: ROFS_BASE, blocks: ROFS_SECTORS / 8 };
     let src = BlkSource { dev, cache: RefCell::new((u64::MAX, Box::new([0; 4096]))) };
-    let fs = match metal_erofs::Erofs::new(src) {
+    let fs = match metallium_erofs::Erofs::new(src) {
         Ok(fs) => fs,
         Err(e) => {
             println!("[rofs] mount failed: {e:?}");
@@ -216,12 +216,12 @@ pub fn lfs_server() -> ! {
     };
     let dev = BlkDev { ep: 1, buf: va(SERVER_BUF_VA), base: LFS_BASE, blocks: sectors / 8 };
     println!("[lfs] data partition: {} KiB", sectors / 2);
-    let mut fs = match metal_lfs::Lfs::mount(dev) {
+    let mut fs = match metallium_lfs::Lfs::mount(dev) {
         Ok(fs) => {
             println!("[lfs] mounted existing store: {} blocks live", fs.len());
             fs
         }
-        Err(_) => match metal_lfs::Lfs::format(dev) {
+        Err(_) => match metallium_lfs::Lfs::format(dev) {
             Ok(fs) => {
                 println!("[lfs] no valid checkpoint: formatted fresh store");
                 fs
@@ -250,12 +250,12 @@ pub fn lfs_server() -> ! {
             }
             // status 0 = found, 1 = there is no such block (a hole), 2 = the store could not tell (I/O error):
             // a client must never take an error for a hole, or a failed read turns into zeros
-            LFS_GET => match if core::mem::take(&mut fail_get) { Err(metal_lfs::Error::Io) } else { fs.read_block(key, &mut tmp) } {
+            LFS_GET => match if core::mem::take(&mut fail_get) { Err(metallium_lfs::Error::Io) } else { fs.read_block(key, &mut tmp) } {
                 Ok(()) => {
                     sh.copy_from_slice(&tmp[..]);
                     reply([0, epoch, 0]);
                 }
-                Err(metal_lfs::Error::NotFound) => {
+                Err(metallium_lfs::Error::NotFound) => {
                     reply([1, epoch, 0]);
                 }
                 Err(_) => {

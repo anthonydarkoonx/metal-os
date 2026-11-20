@@ -266,7 +266,7 @@ impl Command {
                     None => 0,
                 }
             };
-            let id = metal_loader::spawn_with(|i, a1, a2, a3, a4| crate::svc(i, a1, a2, a3, a4, 0)[0], slot, &mut rq, &image, &mut hook);
+            let id = metallium_loader::spawn_with(|i, a1, a2, a3, a4| crate::svc(i, a1, a2, a3, a4, 0)[0], slot, &mut rq, &image, &mut hook);
             match id {
                 id if id > 0 => return Ok(Child { id }),
                 -1 if fs || net => continue, // not allowed to hand out file or network access: try with less

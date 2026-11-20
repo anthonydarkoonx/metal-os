@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::fs::*;
-use metal_programs::*;
+use metallium_programs::fs::*;
+use metallium_programs::*;
 
 // cat <path>: prints a file through the VFS; exits with the number of bytes, or 1000 + the error.
 program!("cat", |c| {

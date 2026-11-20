@@ -2,8 +2,8 @@
 #![no_main]
 extern crate alloc;
 use alloc::vec::Vec;
-use metal_programs::ability::*;
-use metal_programs::*;
+use metallium_programs::ability::*;
+use metallium_programs::*;
 
 // Sample program that eats memory until its limit stops it, every time it is started.
 struct Hog;

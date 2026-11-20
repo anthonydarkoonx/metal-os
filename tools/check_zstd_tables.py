@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that the constant tables in libs/metal-zstd/src/tables.rs equal the ones printed in
+"""Check that the constant tables in libs/metallium-zstd/src/tables.rs equal the ones printed in
 RFC 8878 (sections 3.1.1.3.2.1 and 3.1.1.3.2.2). Usage: check_zstd_tables.py rfc8878.txt
 (fetch it from https://www.rfc-editor.org/rfc/rfc8878.txt). The RFC is the sole source of
 these constants; this script is the proof."""
@@ -7,7 +7,7 @@ import re
 import sys
 
 rfc = open(sys.argv[1]).read()
-src = open(__file__.rsplit("/", 2)[0] + "/libs/metal-zstd/src/tables.rs").read()
+src = open(__file__.rsplit("/", 2)[0] + "/libs/metallium-zstd/src/tables.rs").read()
 
 def rust_array(name):
     m = re.search(r"const %s: \[\w+; \d+\] = \[(.*?)\];" % name, src, re.S)

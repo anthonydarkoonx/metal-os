@@ -4,9 +4,9 @@
 //! its command page and the framebuffer. A client holds only the framebuffer (mapped for
 //! drawing) and an endpoint: it draws pixels itself and asks the driver to present a rectangle.
 //! Commands follow the virtio specification's GPU device (2D resources, one scanout).
-use metal_driver_rt::proto::gpu::*;
-use metal_driver_rt::virtio;
-use metal_driver_rt::*;
+use metallium_driver_rt::proto::gpu::*;
+use metallium_driver_rt::virtio;
+use metallium_driver_rt::*;
 
 /// The screen size: a property of the machine's display, so it lives with its driver, not in the protocol (a board gives its own).
 pub const W: usize = 1024;
@@ -140,7 +140,7 @@ impl Gpu {
         // the device reads the rectangle from memory: what the screen task drew must have left the CPU's caches
         // (only the resource this driver itself backs with the framebuffer is mapped here: id 1)
         if id == RESOURCE {
-            metal_driver_rt::dma::clean(va(FB_VA) + (y * W + x) * 4, ((h - 1) * W + w) * 4);
+            metallium_driver_rt::dma::clean(va(FB_VA) + (y * W + x) * 4, ((h - 1) * W + w) * 4);
         }
         self.begin(CMD_TRANSFER_TO_HOST_2D);
         self.rect(24, x, y, w, h);

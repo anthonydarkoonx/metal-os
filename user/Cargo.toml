@@ -1,5 +1,5 @@
 [package]
-name = "metal-user"
+name = "metallium-user"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
@@ -7,16 +7,16 @@ license = "Apache-2.0 OR MIT"
 [workspace]
 
 [dependencies]
-metal-erofs = { path = "../libs/metal-erofs" }
-metal-lfs = { path = "../libs/metal-lfs" }
-metal-loader = { path = "../libs/metal-loader" }
-metal-net = { path = "../libs/metal-net" }
-metal-gfx = { path = "../libs/metal-gfx" }
-metal-input = { path = "../libs/metal-input" }
-metal-edit = { path = "../libs/metal-edit" }
-metal-compact = { path = "../libs/metal-compact" }
-metal-driver-rt = { path = "../libs/metal-driver-rt" }
-metal-usb = { path = "../libs/metal-usb" }
+metallium-erofs = { path = "../libs/metallium-erofs" }
+metallium-lfs = { path = "../libs/metallium-lfs" }
+metallium-loader = { path = "../libs/metallium-loader" }
+metallium-net = { path = "../libs/metallium-net" }
+metallium-gfx = { path = "../libs/metallium-gfx" }
+metallium-input = { path = "../libs/metallium-input" }
+metallium-edit = { path = "../libs/metallium-edit" }
+metallium-compact = { path = "../libs/metallium-compact" }
+metallium-driver-rt = { path = "../libs/metallium-driver-rt" }
+metallium-usb = { path = "../libs/metallium-usb" }
 
 [profile.release]
 panic = "abort"
@@ -26,7 +26,7 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 
-[profile.release.package.metal-gfx]
+[profile.release.package.metallium-gfx]
 opt-level = 3
 
 [profile.dev]

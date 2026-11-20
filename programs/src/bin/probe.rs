@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::ability::*;
-use metal_programs::*;
+use metallium_programs::ability::*;
+use metallium_programs::*;
 
 static SLEEPER: &[u8] = include_bytes!("../../build/sleeper.bin");
 

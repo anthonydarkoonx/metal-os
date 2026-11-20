@@ -1,11 +1,11 @@
-//! The editor in the terminal: `edit FILE` (or `nano FILE`) takes over the console with a nano-style full-screen editor (`metal-edit`), working on
+//! The editor in the terminal: `edit FILE` (or `nano FILE`) takes over the console with a nano-style full-screen editor (`metallium-edit`), working on
 //! the shell's own VFS session. This file only draws the editor's character grid with the console and feeds it keys; everything else is the library.
 use crate::console::{Console, COLS, ROWS};
 use crate::vfs::{self, Vfs};
 use alloc::string::String;
 use alloc::vec::Vec;
-use metal_edit::term::{self, Cell};
-use metal_edit::{Editor, IoError, Mode, Outcome, Storage};
+use metallium_edit::term::{self, Cell};
+use metallium_edit::{Editor, IoError, Mode, Outcome, Storage};
 
 struct VfsIo<'a>(&'a Vfs);
 

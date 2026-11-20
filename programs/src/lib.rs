@@ -157,7 +157,7 @@ pub fn spawn(slot: u64, p: &Spawn) -> i64 {
         b[64 + 4 * i] = from;
         b[66 + 4 * i..68 + 4 * i].copy_from_slice(&mask.to_le_bytes());
     }
-    metal_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], slot, &mut b, p.image)
+    metallium_loader::spawn(|id, a1, a2, a3, a4| svc(id, a1, a2, a3, a4, 0)[0], slot, &mut b, p.image)
 }
 
 /// Create an endpoint with the factory capability in `slot`; the slot of the new (send+receive+grant) capability.

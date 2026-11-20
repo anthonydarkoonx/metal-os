@@ -16,13 +16,13 @@ use crate::sync::{Guard, SlotTable, SpinLock, R_TASK, R_TEARDOWN};
 use crate::trap::TrapFrame;
 use crate::{kprintln, mmu, obj};
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-use metal_sched::Class;
+use metallium_sched::Class;
 
 /// Boot-time tasks first, then slots for tasks created at run time (programs and their threads). This is the most a boot can have
 /// (the lock ranks in sync.rs and the scheduler's task masks are sized by it); `limit()` is how many it does have.
 pub const MAX_TASKS: usize = 1024;
 /// The smallest number of task slots a boot gets, and the most it gets from RAM alone: one slot per MiB of RAM, so that the tables
-/// (about 4 KiB a slot) stay a small part of memory. The fw_cfg file `opt/metal/max-tasks` overrides it (within these bounds' outer limits).
+/// (about 4 KiB a slot) stay a small part of memory. The fw_cfg file `opt/metallium/max-tasks` overrides it (within these bounds' outer limits).
 pub const MIN_TASKS: usize = 64;
 
 /// How many task slots a machine with `ram` bytes gets.
@@ -496,7 +496,7 @@ fn build(t: &mut Task, tid: usize) -> Result<(), &'static str> {
     let own = owner(tid);
     // The boot-time programs are one position-independent ELF file, read by the same loader that user programs go through
     // and put at a fresh random base each time a task is built (a restarted service moves).
-    let mut plan = metal_loader::plan(USER_IMG).map_err(|_| "bad user image")?;
+    let mut plan = metallium_loader::plan(USER_IMG).map_err(|_| "bad user image")?;
     if !plan.is_pie() {
         return Err("user image not position-independent");
     }
@@ -506,15 +506,15 @@ fn build(t: &mut Task, tid: usize) -> Result<(), &'static str> {
     for (va, page, flags) in plan.pages(USER_IMG) {
         let pa = mem::alloc_movable(own, tid, va).ok_or("out of memory")?;
         crate::frame::phys::copy_to(pa, &page[..PAGE]);
-        let perm = if flags & metal_loader::X != 0 {
+        let perm = if flags & metallium_loader::X != 0 {
             mmu::Perm::Rx
-        } else if flags & metal_loader::W != 0 {
+        } else if flags & metallium_loader::W != 0 {
             mmu::Perm::Rw
         } else {
             mmu::Perm::Ro
         };
         mmu::map_user(l1, va, pa, perm, own).map_err(|_| "map failed")?;
-        if flags & metal_loader::X != 0 {
+        if flags & metallium_loader::X != 0 {
             mmu::sync_icache(pa, PAGE);
         }
     }

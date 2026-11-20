@@ -82,7 +82,7 @@ pub const RESTORE_OF: u64 = 41;
 /// POWER(admin, op): 0 switches the machine off, 1 restarts it. Needs an `Admin` capability with `R_POWER`; does not return when it works.
 pub const POWER: u64 = 42;
 /// GETRANDOM() -> 0 and 40 random bytes in x1..x5 (little endian), drawn from the kernel's generator, for cryptography. `E_NOSYS` when that generator has no
-/// real entropy behind it: no RNDR (FEAT_RNG), no full `opt/metal/seed`, no virtio-rng device, or one of the layout debugging modes. A caller must treat that
+/// real entropy behind it: no RNDR (FEAT_RNG), no full `opt/metallium/seed`, no virtio-rng device, or one of the layout debugging modes. A caller must treat that
 /// as "no secure random numbers" and refuse to do cryptography rather than fall back to something weaker.
 pub const GETRANDOM: u64 = 43;
 /// Sleep for `a1` microseconds (not rounded up to the 10 ms scheduler tick): the wake-up is an exact counter deadline.
@@ -911,7 +911,7 @@ fn sched_call(cur: usize, a: [u64; 5]) -> Out {
                         return Out::Ret(E_INVAL);
                     }
                     let (u, busy) = sched::core_stats(a[2] as usize);
-                    (f.x[1], f.x[2], f.x[3], f.x[4]) = (u as u64, busy, sched::core_kind(a[2] as usize) as u64, metal_sched::energy::target_util(u) as u64);
+                    (f.x[1], f.x[2], f.x[3], f.x[4]) = (u as u64, busy, sched::core_kind(a[2] as usize) as u64, metallium_sched::energy::target_util(u) as u64);
                 }
                 // the calling task's real-time reservation: (jobs, missed deadlines, budget left, runtime, period) in counter ticks
                 4 => match sched::rt_stats(cur) {

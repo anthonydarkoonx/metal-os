@@ -36,8 +36,8 @@ mod uart;
 mod virtio_rng;
 
 use core::panic::PanicInfo;
-use metal_sched::Class;
-use metal_zram::{PageWorkspace, Slot, Zram, PAGE};
+use metallium_sched::Class;
+use metallium_zram::{PageWorkspace, Slot, Zram, PAGE};
 use sync::Global;
 
 extern "C" {
@@ -99,8 +99,8 @@ fn zram_check(codec: &str, mut z: Zram) {
     }
 }
 
-/// Test aid (`opt/metal/stack-overflow=1`): use up the kernel stack, which must end in the stack-guard panic.
-/// (`opt/metal/stack-overflow-core1=1`, or `opt/metal/stack-overflow-core=N`: the same on core N, whose stack was made from RAM and has a guard of its own.)
+/// Test aid (`opt/metallium/stack-overflow=1`): use up the kernel stack, which must end in the stack-guard panic.
+/// (`opt/metallium/stack-overflow-core1=1`, or `opt/metallium/stack-overflow-core=N`: the same on core N, whose stack was made from RAM and has a guard of its own.)
 pub static OVERFLOW_ON_CORE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
 
 #[inline(never)]
@@ -113,7 +113,7 @@ pub fn overflow_stack(depth: u64) -> u64 {
     overflow_stack(depth + 1) + p[(depth % 1024) as usize] as u64
 }
 
-/// Test aid (`opt/metal/stack-overflow-bigframe=1`): one stack frame bigger than stack and guard together. The compiler
+/// Test aid (`opt/metallium/stack-overflow-bigframe=1`): one stack frame bigger than stack and guard together. The compiler
 /// probes the stack a page at a time for frames like this, so the probe lands in the guard page instead of the frame
 /// skipping over it.
 #[inline(never)]
@@ -147,14 +147,14 @@ extern "C" fn kmain(dtb: usize) -> ! {
     let kernel_end = unsafe { &__kernel_end as *const u8 as usize };
     platform::entropy_report();
     platform::init_flags();
-    rand::init(platform::flag(b"opt/metal/noaslr"));
-    let overflow_core = if platform::flag(b"opt/metal/stack-overflow-core1") { Some(1) } else { platform::number(b"opt/metal/stack-overflow-core").map(|n| n as usize) };
+    rand::init(platform::flag(b"opt/metallium/noaslr"));
+    let overflow_core = if platform::flag(b"opt/metallium/stack-overflow-core1") { Some(1) } else { platform::number(b"opt/metallium/stack-overflow-core").map(|n| n as usize) };
     OVERFLOW_ON_CORE.store(overflow_core.unwrap_or(usize::MAX), core::sync::atomic::Ordering::SeqCst);
-    if platform::flag(b"opt/metal/stack-overflow") {
+    if platform::flag(b"opt/metallium/stack-overflow") {
         kprintln!("[kernel] stack-overflow test: recursing");
         kprintln!("[kernel] ... {}", overflow_stack(0));
     }
-    if platform::flag(b"opt/metal/stack-overflow-bigframe") {
+    if platform::flag(b"opt/metallium/stack-overflow-bigframe") {
         kprintln!("[kernel] stack-overflow test: one frame of 128 KiB");
         kprintln!("[kernel] ... {}", overflow_stack_bigframe(1));
     }
@@ -200,7 +200,7 @@ extern "C" fn kmain(dtb: usize) -> ! {
         None => kprintln!("[mem] TEST RAM above the first GiB is reached through the direct map: SKIPPED (RAM ends inside the first GiB)"),
     }
     kprintln!("[mem] TEST the reverse map holds the addresses of the whole user space (up to 256 GiB): {}", v(mem::rmap_selftest()));
-    let tasks = task::tasks_for(ram, platform::number(b"opt/metal/max-tasks"));
+    let tasks = task::tasks_for(ram, platform::number(b"opt/metallium/max-tasks"));
     task::init_tables(tasks);
     obj::init_table(obj::objs_for(tasks));
     obj::init_sessions(tasks);

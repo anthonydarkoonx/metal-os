@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Copies standard input to standard output in capitals, line by line; exits with the number of lines.
 program!("upper", |_c| {

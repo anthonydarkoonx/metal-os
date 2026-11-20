@@ -20,10 +20,10 @@ const MC_SWAP_WRITEBACK: u64 = 9;
 const MCS_FORCE: u64 = 1;
 const MCS_SELF: u64 = 2;
 const MCS_HEAP: u64 = 4;
-/// Memory policy (`metal_compact::policy`, host-tested): below the low mark of free frames, push cold pages into the compressed swap store until the
+/// Memory policy (`metallium_compact::policy`, host-tested): below the low mark of free frames, push cold pages into the compressed swap store until the
 /// high mark is free. With a pager registered (swap to disk is set up: an interactive system) the marks scale with the machine's memory; without one only
 /// the emergency reserve applies (well under the 96 frames the compaction test leaves free, so that test is unaffected).
-use metal_compact::policy::{self, Marks};
+use metallium_compact::policy::{self, Marks};
 
 fn current_marks() -> Marks {
     let pager_running = sysinfo(16)[2] >> 16 & 1 != 0;

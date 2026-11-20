@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
-use metal_programs::fs::*;
-use metal_programs::*;
+use metallium_programs::fs::*;
+use metallium_programs::*;
 
 // ls <dir>: prints the names; exits with their number.
 program!("ls", |c| {

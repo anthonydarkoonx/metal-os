@@ -3,10 +3,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use metal_programs::io::{ErrorKind, Read, Write};
-use metal_programs::net::*;
-use metal_programs::time::{Duration, Instant};
-use metal_programs::*;
+use metallium_programs::io::{ErrorKind, Read, Write};
+use metallium_programs::net::*;
+use metallium_programs::time::{Duration, Instant};
+use metallium_programs::*;
 
 // Tests of the network stack against the host peer (tools/netpeer.py) behind QEMU's user-mode network. The argument
 // selects the scenario; the exit code is 0 when it behaved, otherwise a number saying which check failed. The peer is

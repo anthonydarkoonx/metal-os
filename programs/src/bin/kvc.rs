@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // kv client: slot 0 is a send capability to the server. Stores `arg` keys (scaled by its argument so that clients do not
 // overlap), reads them back; exits 0 if everything matched, else 1 + the index that did not (or 5000 + the IPC error).

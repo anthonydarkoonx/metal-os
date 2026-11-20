@@ -1,9 +1,0 @@
-[package]
-name = "metal-loader"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Program loader for Metallium-OS: reads flat images and static AArch64 ELF files and builds a new task page by page"
-
-[lints]
-workspace = true

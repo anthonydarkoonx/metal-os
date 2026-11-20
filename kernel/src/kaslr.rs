@@ -10,13 +10,13 @@
 //! The address is any page in RAM where the whole image (code, data, .bss and the stacks) fits without touching the
 //! first 512 KiB (QEMU keeps the device tree there) or the old image. With 64 MiB of RAM that is about 14 bits of
 //! choice. The generator is seeded like the one for the program layouts (`rand.rs`): RNDR, the first bytes of the
-//! harness's seed file, the counter. `opt/metal/noaslr` does not fix this address: it is a debugging aid for the
+//! harness's seed file, the counter. `opt/metallium/noaslr` does not fix this address: it is a debugging aid for the
 //! layouts of programs, and a kernel that can be told to sit still gives that up too easily.
 use crate::mem::{PAGE, RAM_BASE};
 use core::arch::asm;
 use core::ptr::read_volatile;
 use core::sync::atomic::{AtomicU64, Ordering};
-use metal_rand::Rng;
+use metallium_rand::Rng;
 
 extern "C" {
     static __kernel_start: u8;
@@ -83,7 +83,7 @@ extern "C" fn kaslr_place(dtb: usize) -> usize {
         return 0;
     }
     let mut seed = [0u8; 32];
-    let from_file = crate::platform::bytes(b"opt/metal/seed", &mut seed);
+    let from_file = crate::platform::bytes(b"opt/metallium/seed", &mut seed);
     let mut rng = Rng::from_seed(seed);
     let mut hw = [0u8; 32];
     let mut rndrs = 0;
@@ -95,7 +95,7 @@ extern "C" fn kaslr_place(dtb: usize) -> usize {
     }
     rng.mix(&hw);
     rng.mix(&counter().to_le_bytes());
-    rng.mix(b"metal-os kaslr");
+    rng.mix(b"metallium-os kaslr");
     WEAK.store((from_file != 32 && rndrs != 4) as u64, Ordering::Relaxed);
     // candidates: page-aligned addresses from LINK_BASE up, where the image fits below the top of RAM
     let n = ((top - size - LINK_BASE) / PAGE + 1) as u64;

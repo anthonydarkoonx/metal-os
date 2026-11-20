@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // Lives until it is killed (or its parent goes away). With argument 1 and an endpoint factory in slot 1 it first makes what a program
 // with several endpoints and shared-memory objects holds (4 endpoints and 2 objects, `make scale`); if that is refused it ends

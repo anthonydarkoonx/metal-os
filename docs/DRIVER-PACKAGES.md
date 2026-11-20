@@ -15,7 +15,7 @@ servers at run time (they must be there before any package can be read, see belo
   them and restarts them when they die.
 * `kernel/src/devices.rs` holds, per driver: the PCI id it matches, its role, the tasks that exist because of it, the capabilities it starts with (`grants`)
   and the memory its device may reach (`dma`). Boot-time capability set-up and the IOMMU attach (`smmu::attach`) are driven by that table.
-* A program started at run time (`SPAWN`, `docs/ABI.md`) gets up to eight delegated capabilities, can be signed and checked by `metal-map`, is not
+* A program started at run time (`SPAWN`, `docs/ABI.md`) gets up to eight delegated capabilities, can be signed and checked by `metallium-map`, is not
   restarted by the kernel (its parent supervises), and has role `ROLE_PROGRAM` (`set_dynamic_info` can give another role).
 * Kernel rules keyed on a task's role: IOMMU fault condemns the role's tasks (`smmu.rs`), the stream is torn down at the task's death (`task.rs`),
   `restrict_boot_task`, heap quotas.
@@ -62,7 +62,7 @@ swapped); (c) a stolen or misused signing key; (d) a compromised driver once run
 
 | Threat | Mitigation |
 |---|---|
-| Unsigned or tampered package | `metal-map` checks (CRC, Ed25519) at install **and at every start**, as for programs. |
+| Unsigned or tampered package | `metallium-map` checks (CRC, Ed25519) at install **and at every start**, as for programs. |
 | A package signed with an ordinary *program* key | **Separate trust store for drivers** (`/system/etc/driver-keys`). A key trusted for programs is not trusted for drivers. |
 | Package asks for objects it should not have | Not possible: the manifest cannot name objects; the kernel grants the registry's set for a bound device only. |
 | Compromised driver reads or writes other memory by DMA | IOMMU confinement to the registry's DMA objects (as now). **Without an IOMMU (ROCK 3C)** a DMA-capable device reaches everything: see decision 2. |
@@ -96,10 +96,10 @@ Each step boots, passes the existing QEMU checks, and gets a line in `docs/BOARD
 
 ## Progress
 
-**3b-i (2026-11-16): done.** New crate `libs/metal-driver-rt` holds the system-call layer, `println!`, the mapping layer, virtio, DMA cache maintenance, the driver
+**3b-i (2026-11-16): done.** New crate `libs/metallium-driver-rt` holds the system-call layer, `println!`, the mapping layer, virtio, DMA cache maintenance, the driver
 protocols (`proto::{blk, gpu, input, net}`) and the network ring layout (`netring`). The four drivers (`blk.rs`, `gpu.rs`, `kbd.rs`, `netdrv.rs`) now `use`
 only that crate: no line of them names anything else of the user image, so each can become its own binary (3b-ii). The user image re-exports the crate
-(`pub use metal_driver_rt::*` in `main.rs`) so every other file, and the board's overlay drivers, compile as before. The crate compiles on the host (the
+(`pub use metallium_driver_rt::*` in `main.rs`) so every other file, and the board's overlay drivers, compile as before. The crate compiles on the host (the
 four AArch64 instructions have host stand-ins), so `cargo test --workspace` still builds it.
 Moved out of the drivers because they are not driver code: the conductor's display tests and the colour-bar test card (`user/src/gputest.rs`) and the
 protocol constants (`proto`). **The screen size `W`/`H` stays in `gpu.rs`** (it is the display's, a board's driver gives its own 1920x1080).

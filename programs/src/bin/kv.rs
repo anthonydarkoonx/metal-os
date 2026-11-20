@@ -1,6 +1,6 @@
 #![no_std]
 #![no_main]
-use metal_programs::*;
+use metallium_programs::*;
 
 // A key-value server on the endpoint its parent made and gave it as slot 0 (send+receive): SET(key, value) = 1,
 // GET(key) = 2, replies [status, value]. Runs until killed or its endpoint ends.

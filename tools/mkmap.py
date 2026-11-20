@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build Metal Program Packages (.map) from programs/packages/<id>.manifest.
 
-Format: see libs/metal-map/src/lib.rs (header, manifest text, file table, data; CRC-32 over everything after the header).
+Format: see libs/metallium-map/src/lib.rs (header, manifest text, file table, data; CRC-32 over everything after the header).
 Every `ability = name kind bin/X` line names a program: the package carries programs/build/X.pie as bin/X.
 
   mkmap.py                      build every package into programs/build/maps/<id>.map
@@ -23,9 +23,9 @@ from cryptography.hazmat.primitives import serialization
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.join(HERE, "..")
-# A desktop (or anything else built outside this tree) can bring packages: METAL_EXTRA_PACKAGES is a directory with
+# A desktop (or anything else built outside this tree) can bring packages: METALLIUM_EXTRA_PACKAGES is a directory with
 # packages/<id>.manifest, bin/<program>.pie and an optional `defaults` file (see docs/DESKTOP-INTERFACE.md). They are signed with the dev key.
-EXTRA = os.environ.get("METAL_EXTRA_PACKAGES")
+EXTRA = os.environ.get("METALLIUM_EXTRA_PACKAGES")
 
 
 def extra_defaults():

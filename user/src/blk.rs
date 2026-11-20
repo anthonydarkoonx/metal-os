@@ -1,7 +1,7 @@
 //! The block device driver of QEMU's virtio-blk (role 4): the device window, its queue and three buffers (the file servers' and the client's) in shared memory,
 //! requests answered one at a time. A machine with a different disk supplies its own `blk.rs`.
-use metal_driver_rt::virtio::*;
-use metal_driver_rt::*;
+use metallium_driver_rt::virtio::*;
+use metallium_driver_rt::*;
 
 const MMIO_VA: usize = 0x8020_0000; // the device's register BAR
 const RING_VA: usize = 0x8021_0000;

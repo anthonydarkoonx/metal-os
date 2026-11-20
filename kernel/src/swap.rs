@@ -27,7 +27,7 @@ use crate::task::State;
 use crate::sync::{Global, SpinLock, R_SWAP};
 use crate::task;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use metal_zram::{Handle, PageWorkspace, Slot, Zram};
+use metallium_zram::{Handle, PageWorkspace, Slot, Zram};
 
 /// Check every page right after compressing it (costs a decompression per eviction).
 const VERIFY_STORE: bool = false;
@@ -155,7 +155,7 @@ fn try_evict(frame: usize, tid: usize, va: usize, f: Filter) -> Tried {
                     crate::kprintln!("[swap] VERIFY FAILED: page of task {tid} at {va:#x} does not survive compression");
                 }
             }
-            Ok::<_, metal_zram::Error>(h)
+            Ok::<_, metallium_zram::Error>(h)
         })
     }) {
         Ok(h) => {

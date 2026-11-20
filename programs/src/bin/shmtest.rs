@@ -3,7 +3,7 @@
 extern crate alloc;
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use metal_programs::*;
+use metallium_programs::*;
 
 const MEMCTL: u64 = 18;
 const MC_STATS: u64 = 0;
@@ -247,7 +247,7 @@ program!("shmtest", |c| {
             // SAFETY: slot 0 was just mapped at BIG (`map` returned 0), so BIG is 4-aligned and inside a live mapping.
             let w = unsafe { word(BIG) };
             let t0 = ticks();
-            let r = metal_programs::thread::wait_word(w, 0, 300);
+            let r = metallium_programs::thread::wait_word(w, 0, 300);
             let dt = ticks() - t0;
             if r != 0 || w.load(Ordering::SeqCst) != 1 {
                 return 2;

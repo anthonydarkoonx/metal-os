@@ -1,5 +1,5 @@
 [package]
-name = "metal-programs"
+name = "metallium-programs"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
@@ -8,8 +8,8 @@ description = "Programs that run on Metallium-OS as ordinary tasks (started with
 [workspace]
 
 [dependencies]
-metal-loader = { path = "../libs/metal-loader" }
-metal-map = { path = "../libs/metal-map" }
+metallium-loader = { path = "../libs/metallium-loader" }
+metallium-map = { path = "../libs/metallium-map" }
 
 [profile.release]
 panic = "abort"

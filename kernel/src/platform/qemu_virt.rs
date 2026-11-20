@@ -192,6 +192,11 @@ pub fn storage_name() -> &'static str {
     "virtio-blk"
 }
 
+/// Why no device is confined, for `fetch`, when the machine has no IOMMU the kernel drives (at most 32 bytes). QEMU `virt` has the SMMUv3 unless it was started without one.
+pub fn iommu_note() -> &'static str {
+    "no SMMU in this machine"
+}
+
 /// Without a tree: the cores the firmware started are the machine's cores (called once, after `start_secondaries`).
 pub fn set_cpu_count_if_unknown(n: usize) {
     if NCPUS.load(Ordering::Relaxed) == 0 {

@@ -210,7 +210,7 @@ impl Shell {
             ("GPU", format!("{} {}x{}", dev.0, f.gpu_w, f.gpu_h)),
             ("RAM", info::ram(f)),
             ("STORAGE", format!("{} MiB {} (EROFS + LFS)", f.sectors * 512 >> 20, dev.1)),
-            ("IOMMU", if tasks[1] != 0 { format!("Arm SMMUv3, {} devices confined", tasks[2]) } else { String::from("none") }),
+            ("IOMMU", if tasks[1] != 0 { format!("Arm SMMUv3, {} devices confined", tasks[2]) } else { format!("none ({})", iommu_note()) }),
             ("TASKS", format!("{} running, {} driver restarts", tasks[3], tasks[4])),
         ];
         // the planet on the left, the rows beside it (8 rows of 19 px hold the 152 px logo)
@@ -1111,4 +1111,14 @@ fn device_names() -> (String, String) {
         String::from_utf8_lossy(&bytes).into_owned()
     };
     (name(r[1], r[2]), name(r[3], r[4]))
+}
+
+/// Why there is no IOMMU on this machine (the kernel's platform says; an older kernel: nothing more than "none").
+fn iommu_note() -> String {
+    let r = sysinfo(20);
+    if r[0] as i64 != 0 {
+        return String::from("not used by this kernel");
+    }
+    let bytes: alloc::vec::Vec<u8> = r[1..5].iter().flat_map(|w| w.to_le_bytes()).take_while(|&c| c != 0).collect();
+    String::from_utf8_lossy(&bytes).into_owned()
 }

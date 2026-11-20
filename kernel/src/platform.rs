@@ -4,7 +4,7 @@
 //! * constants: `RAM_BASE`, `LINK_BASE`, `RAM_UNMAPPED_BELOW`, `HAS_SMMU`, `SWAP_*`, `CONSOLE_HEAP_PAGES`, `BANNER_SUFFIX`, `SEED_SOURCE`;
 //! * the machine's description (QEMU: read from the device tree firmware passes in x0): `set_dtb`, `init_machine`, `cpu_count`, `cpu_mpidr`, `core_is_little`, `intc_name`;
 //! * hooks: `map_devices`, `psci_power`, `psci_cpu_on`, `psci_core_exists`, `exit_machine`, `early_boot`, `entropy_report`, `init_devices`, `irq`, `probe_devices`,
-//!   `boot_caps`, `spawn_extra_tasks`, `rtc_seconds`, `gpu_name`, `storage_name` (what `fetch` calls the display and the storage);
+//!   `boot_caps`, `spawn_extra_tasks`, `rtc_seconds`, `gpu_name`, `storage_name`, `iommu_note` (what `fetch` calls the display and the storage, and why there is no IOMMU);
 //! * the boot-time parameters and test switches: `ram_size`, `flag`, `number`, `bytes`, `init_flags`, `interactive`, `map_log`, `only`, `fuzz_seed`,
 //!   `chaos_seed`.
 //!

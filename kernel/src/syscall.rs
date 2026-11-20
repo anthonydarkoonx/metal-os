@@ -678,6 +678,16 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             f.x[4] = s[1];
             Out::Ret(0)
         }
+        20 => {
+            // why the machine has no IOMMU, in at most 32 bytes (x1..x4, NUL padded): `fetch` shows it when SYSINFO page 1 says no device is confined
+            let s = crate::platform::iommu_note();
+            let mut w = [0u64; 4];
+            for (i, b) in s.bytes().take(32).enumerate() {
+                w[i / 8] |= (b as u64) << (8 * (i % 8));
+            }
+            f.x[1..5].copy_from_slice(&w);
+            Out::Ret(0)
+        }
         15 => {
             // how many capability nodes there are (the Capabilities program draws its meter against it)
             f.x[1] = crate::cap::NODES as u64;

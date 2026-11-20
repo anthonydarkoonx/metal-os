@@ -464,7 +464,7 @@ cells of a hand-drawn 5x9 font, a banner, a status bar with live uptime and RAM)
 VFS server); beyond its screen it holds three capabilities: the keyboard driver, one VFS endpoint and
 that page. What you see after boot:
 
-    METAL OS
+    METALLIUM-OS
     KERNEL   Metallium-OS 0.1 aarch64 microkernel
     UPTIME   0h 0m 4s
     CPU      4x Cortex-A72           <- MIDR_EL1, through the SYSINFO syscall
@@ -473,12 +473,12 @@ that page. What you see after boot:
     STORAGE  10 MiB virtio-blk (EROFS + LFS)
     IOMMU    Arm SMMUv3, 3 devices confined
     TASKS    20 running, 9 driver restarts
-    metal /> ls /system
+    metallium /> ls /system
     bin/  etc/  hello.txt  usr/
-    metal /> echo hi > /data/note.txt
-    metal /> cat /data/note.txt
+    metallium /> echo hi > /data/note.txt
+    metallium /> cat /data/note.txt
     hi
-    metal /> _
+    metallium /> _
     up 0h 0m 50s   RAM 9 MiB / 64 MiB   18 tasks
 
 Commands: `help fetch uptime free clear pwd cd ls cat stat mkdir rm echo ps grep wc head tail sort`.

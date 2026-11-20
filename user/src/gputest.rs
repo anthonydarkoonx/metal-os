@@ -26,7 +26,7 @@ pub unsafe fn draw_test_card(fb: *mut u32) {
         }
     }
     // SAFETY: the contract: `fb` is `W * H` mapped words; the reference lives for this call only.
-    font::draw_text(unsafe { core::slice::from_raw_parts_mut(fb, W * H) }, W, (W - 8 * 6 * 8) / 2, H * 5 / 6 + 28, 8, 0xFFFFFF, "METAL OS");
+    font::draw_text(unsafe { core::slice::from_raw_parts_mut(fb, W * H) }, W, (W - 12 * 6 * 8) / 2, H * 5 / 6 + 28, 8, 0xFFFFFF, "METALLIUM-OS");
 }
 
 fn flush_all() -> i64 {

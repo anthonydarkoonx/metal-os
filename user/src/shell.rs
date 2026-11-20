@@ -227,7 +227,7 @@ impl Shell {
 
     fn prompt(&mut self) {
         self.con.set_color(ACCENT);
-        let p = format!("metal {}> ", self.cwd);
+        let p = format!("metallium {}> ", self.cwd);
         self.con.print(&p);
         self.con.set_color(FG);
     }

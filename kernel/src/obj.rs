@@ -67,6 +67,12 @@ pub const OBJ_SHM_SPIN: u16 = 23;
 /// The VFS server's view of the session pages of programs with file-system access: all of them as one object (`sessions()` pages),
 /// which it maps once. Programs get one page each as objects of their own (`OBJ_SHM_VFS_PROG0 + k`) over the same frames.
 pub const OBJ_SHM_VFS_REGION: u16 = 24;
+/// The USB controller (the input driver's third device): its registers, its config-space copy, and the memory it and the driver share (rings, contexts, report buffers).
+pub const OBJ_USB_MMIO: u16 = 25;
+pub const OBJ_USB_PCICFG: u16 = 26;
+pub const OBJ_USB_DMA: u16 = 27;
+/// Pages of the USB DMA memory.
+pub const USB_DMA_PAGES: usize = 32;
 /// The network device: registers, config copy, the two virtqueue pages, the packet buffers (shared with `netd`), the
 /// ring the driver and `netd` talk through, and the session pages of programs with network access (40..48).
 pub const OBJ_NET_MMIO: u16 = 32;
@@ -104,7 +110,7 @@ pub fn init_table(n: usize) {
 }
 
 /// All streams a driver role's devices sit behind (the input driver has two: keyboard and pointer).
-pub fn sids_of_role(role: u8) -> [Option<u16>; 2] {
+pub fn sids_of_role(role: u8) -> [Option<u16>; 3] {
     crate::devices::sids_of_role(role)
 }
 

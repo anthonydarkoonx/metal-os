@@ -7,6 +7,7 @@
 //! the main keyboard block, which is what the virtio specification's evdev codes use for these keys.
 use metal_driver_rt::proto::input::*;
 use metal_driver_rt::virtio;
+use crate::xhci;
 use metal_driver_rt::*;
 
 
@@ -82,6 +83,8 @@ struct Dev {
 
 struct Kbd {
     dev: [Option<Dev>; 2],
+    /// The USB controller, if the machine has one: keyboards and pointers on its ports feed the same queues.
+    usb: Option<xhci::Usb>,
     shift: bool,
     ctrl: bool,
     alt: bool,
@@ -176,6 +179,10 @@ impl Kbd {
 
     /// Drain finished event buffers, give each back to the device, and decode the events.
     fn pump(&mut self) {
+        if let Some(mut u) = self.usb.take() {
+            u.poll(self);
+            self.usb = Some(u);
+        }
         for i in 0..2 {
             let mut posted = false;
             if let Some(d) = &self.dev[i] {
@@ -229,8 +236,17 @@ impl Kbd {
             self.ev_len -= 1;
             n += 1;
         }
-        r[0] = n as u64 | (self.dev.iter().flatten().any(|d| d.pointer) as u64) << 8;
+        r[0] = n as u64 | (self.dev.iter().flatten().any(|d| d.pointer) as u64 | self.usb.as_ref().is_some_and(|u| u.pointers > 0) as u64) << 8;
         r
+    }
+}
+
+impl xhci::Sink for Kbd {
+    fn key(&mut self, code: u16, value: u32) {
+        Kbd::key(self, code, value);
+    }
+    fn pointer(&mut self, ty: u16, code: u16, value: u32) {
+        self.pointer_event(ty, code, value);
     }
 }
 
@@ -266,10 +282,26 @@ fn dev_init(which: usize, base: u64) -> Result<Dev, &'static str> {
 }
 
 fn kbd_init() -> Result<Kbd, &'static str> {
-    let first = dev_init(0, 1)?;
+    let first = dev_init(0, 1).ok();
     let second = dev_init(1, 4).ok(); // (no second device: no pointer)
+    // the USB controller's registers are in slot 7 when the machine has one
+    let usb = if cap_info(7).0 == 0 {
+        match xhci::Usb::init() {
+            Ok(u) => Some(u),
+            Err(e) => {
+                println!("[usb] controller: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if first.is_none() && second.is_none() && usb.is_none() {
+        return Err("no input device");
+    }
     Ok(Kbd {
-        dev: [Some(first), second],
+        dev: [first, second],
+        usb,
         shift: false,
         ctrl: false,
         alt: false,
@@ -296,7 +328,12 @@ pub fn kbd_driver() -> ! {
         }
     };
     let kinds: alloc::vec::Vec<&str> = k.dev.iter().flatten().map(|d| if d.pointer { "pointer" } else { "keyboard" }).collect();
-    println!("[kbd] virtio-input ready: {} ({NBUF} event buffers each, polled)", kinds.join(" + "));
+    if !kinds.is_empty() {
+        println!("[kbd] virtio-input ready: {} ({NBUF} event buffers each, polled)", kinds.join(" + "));
+    }
+    if let Some(u) = &k.usb {
+        println!("[kbd] usb ready: {} keyboard(s), {} pointer(s), polled", u.keyboards, u.pointers);
+    }
     loop {
         let m = recv(0);
         k.pump();

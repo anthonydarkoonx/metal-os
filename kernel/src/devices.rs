@@ -20,6 +20,7 @@ pub enum DevClass {
     Display,
     Keyboard,
     Pointer,
+    Usb,
     Net,
     Entropy,
 }
@@ -105,7 +106,7 @@ pub struct Driver {
 }
 
 /// The drivers, in matching order (two entries may share an id: the first function matched goes to the first, the next to the second).
-pub static DRIVERS: [Driver; 6] = [
+pub static DRIVERS: [Driver; 7] = [
     Driver {
         name: "virtio-blk",
         class: DevClass::Block,
@@ -189,6 +190,23 @@ pub static DRIVERS: [Driver; 6] = [
         tasks: &[],
         missing_note: None,
     },
+    // USB: an xHCI controller with keyboards and pointers on its ports, driven by the same task as the virtio input devices (its events go the same way)
+    Driver {
+        name: "xhci",
+        class: DevClass::Usb,
+        pci: pci::XHCI,
+        role: 14,
+        bind: Bind::Expose { setup: setup_usb },
+        grants: &[
+        cap(7, Kind::Memory, OBJ_USB_MMIO, DEV),
+        cap(8, Kind::Memory, OBJ_USB_DMA, DEV),
+        cap(9, Kind::Memory, OBJ_USB_PCICFG, R_MAP),
+    ],
+        dma: &[OBJ_USB_DMA],
+        // (the input driver is started once, by whichever of its devices comes first in this table: `spawn_tasks` skips a role it has already made)
+        tasks: &[task(14, "kbd-driver", SchedClass::Interactive, true, 1, Phase::Drivers, Some(DevClass::Display))],
+        missing_note: None,
+    },
     Driver {
         name: "virtio-net",
         class: DevClass::Net,
@@ -240,6 +258,7 @@ pub fn present(class: DevClass) -> bool {
         DevClass::Display => OBJ_GPU_MMIO,
         DevClass::Keyboard => OBJ_KBD_MMIO,
         DevClass::Pointer => OBJ_PTR_MMIO,
+        DevClass::Usb => OBJ_USB_MMIO,
         DevClass::Net => OBJ_NET_MMIO,
         DevClass::Entropy => return false,
     };
@@ -291,8 +310,13 @@ const _: () = assert!(slots_distinct(), "two capabilities of one driver role sha
 
 /// Boot time, single core: make the tasks of `phase` for every device that is present, in table order.
 pub fn spawn_tasks(phase: Phase) {
+    // (a role several devices share is started by the first of them only)
+    let mut made = [false; 32];
     for d in DRIVERS.iter().filter(|d| present(d.class)) {
         for t in d.tasks.iter().filter(|t| t.phase == phase && t.requires.map_or(true, present)) {
+            if t.count == 1 && core::mem::replace(&mut made[t.role as usize % 32], true) {
+                continue;
+            }
             for _ in 0..t.count {
                 crate::task::spawn(t.role, t.name, t.class, t.restartable);
             }
@@ -305,12 +329,12 @@ pub fn sid_of(class: DevClass) -> u16 {
     index_of(class).map_or(0, |i| SIDS[i].load(Ordering::Relaxed))
 }
 
-/// All streams the devices driven by `role` sit behind (at most two: the input driver has a keyboard and a pointer).
-pub fn sids_of_role(role: u8) -> [Option<u16>; 2] {
-    let mut out = [None, None];
+/// All streams the devices driven by `role` sit behind (at most three: the input driver has a keyboard, a pointer and a USB controller).
+pub fn sids_of_role(role: u8) -> [Option<u16>; 3] {
+    let mut out = [None, None, None];
     let mut n = 0;
     for (i, d) in DRIVERS.iter().enumerate() {
-        if d.role == role && role != 0 && CLAIMED[i].load(Ordering::Relaxed) && n < 2 {
+        if d.role == role && role != 0 && CLAIMED[i].load(Ordering::Relaxed) && n < 3 {
             out[n] = Some(SIDS[i].load(Ordering::Relaxed));
             n += 1;
         }
@@ -320,10 +344,11 @@ pub fn sids_of_role(role: u8) -> [Option<u16>; 2] {
 
 /// Place the function's BARs, enable it, and describe what the driver gets. The driver is handed
 /// only the BAR holding the virtio registers, never the bus.
-fn expose(f: &pci::Func, cursor: &mut usize, what: &str) -> Option<Exposed> {
+fn expose(f: &pci::Func, cursor: &mut usize, what: &str, virtio: bool) -> Option<Exposed> {
     let mut bars = [(0usize, 0usize); 6];
     pci::assign_bars(f, cursor, &mut bars);
-    let Some(bar) = pci::virtio_bar(f).map(|b| bars[b as usize % 6]).filter(|b| b.1 >= 4096) else {
+    // (a virtio device says which BAR holds its registers; an xHCI controller's are in BAR 0)
+    let Some(bar) = (if virtio { pci::virtio_bar(f) } else { Some(0) }).map(|b| bars[b as usize % 6]).filter(|b| b.1 >= 4096) else {
         kprintln!("[dev] {what} at 00:{:02x}.0 has no usable register BAR", f.dev);
         return None;
     };
@@ -343,7 +368,7 @@ pub(crate) fn probe_pci() {
         let Some(i) = DRIVERS.iter().enumerate().position(|(i, d)| d.pci == (f.vendor(), f.device()) && !CLAIMED[i].load(Ordering::Relaxed)) else { continue };
         match &DRIVERS[i].bind {
             Bind::Expose { setup } => {
-                let Some(d) = expose(&f, &mut cursor, DRIVERS[i].name) else { continue };
+                let Some(d) = expose(&f, &mut cursor, DRIVERS[i].name, DRIVERS[i].pci.0 == pci::VIRTIO_VENDOR) else { continue };
                 CLAIMED[i].store(true, Ordering::Relaxed);
                 SIDS[i].store(d.sid, Ordering::Relaxed);
                 setup(&f, &d);
@@ -398,6 +423,13 @@ fn setup_ptr(f: &pci::Func, d: &Exposed) {
     set(OBJ_PTR_MMIO, ObjKind::Mmio, d.bar_pa, d.bar_pages, 0);
     set(OBJ_PTR_PCICFG, ObjKind::Ram, d.cfg_pa, 1, 0);
     set(OBJ_PTR_QUEUE, ObjKind::Dma, mem::alloc(mem::OWNER_KERNEL).expect("pointer queue"), 1, 0);
+}
+
+fn setup_usb(f: &pci::Func, d: &Exposed) {
+    pci::disable_intx(f); // (polled, like the virtio input devices)
+    set(OBJ_USB_MMIO, ObjKind::Mmio, d.bar_pa, d.bar_pages, 0);
+    set(OBJ_USB_PCICFG, ObjKind::Ram, d.cfg_pa, 1, 0);
+    set(OBJ_USB_DMA, ObjKind::Dma, mem::alloc_contig(USB_DMA_PAGES, mem::OWNER_KERNEL).expect("usb memory"), USB_DMA_PAGES, 0);
 }
 
 fn setup_net(_f: &pci::Func, d: &Exposed) {

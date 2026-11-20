@@ -581,6 +581,9 @@ pub struct CoreStats {
     pub steals: AtomicU64,
     /// Heavy tasks run on efficiency cores (or light ones on performance cores) after waiting.
     pub spills: AtomicU64,
+    /// Candidate searches (`best_candidate`), and the ready tasks they looked at in all.
+    pub picks: AtomicU64,
+    pub scanned: AtomicU64,
     /// Timer interrupts this core has taken (ticks, slice ends, real-time events).
     timer_irqs: AtomicU64,
     /// Wake-to-run latency per level: maximum, sum, count (counter ticks).
@@ -613,6 +616,8 @@ impl CoreStats {
         migrations: AtomicU64::new(0),
         steals: AtomicU64::new(0),
         spills: AtomicU64::new(0),
+        picks: AtomicU64::new(0),
+        scanned: AtomicU64::new(0),
         timer_irqs: AtomicU64::new(0),
         lat_max: [const { AtomicU64::new(0) }; 4],
         lat_sum: [const { AtomicU64::new(0) }; 4],
@@ -648,6 +653,8 @@ pub struct Totals {
     pub migrations: u64,
     pub steals: u64,
     pub spills: u64,
+    pub picks: u64,
+    pub scanned: u64,
 }
 
 pub fn totals() -> Totals {
@@ -660,6 +667,8 @@ pub fn totals() -> Totals {
         migrations: sum(|s| &s.migrations),
         steals: sum(|s| &s.steals),
         spills: sum(|s| &s.spills),
+        picks: sum(|s| &s.picks),
+        scanned: sum(|s| &s.scanned),
     }
 }
 
@@ -712,6 +721,7 @@ fn placeable() -> usize {
 
 /// Give the placement table its kinds; once at boot.
 pub fn init_placement() {
+    work_out_kinds();
     let mut cores = CORES.lock(R_RT);
     for (c, core) in cores.iter_mut().enumerate() {
         core.kind = core_kind(c);
@@ -745,13 +755,25 @@ pub fn home_core(tid: usize) -> usize {
     SLOT[tid].home.load(Ordering::Relaxed) as usize
 }
 
+/// Which cores are efficiency cores (bit per core), worked out once at boot (`init_placement`): `core_kind` is asked for every candidate of every search.
+static LITTLE: AtomicU32 = AtomicU32::new(0b11);
+
 pub fn core_kind(core: usize) -> CoreKind {
-    // (the topology is fixed: cores 0 and 1 are the little ones, all the others the big ones)
-    if core < 2 { CoreKind::Little } else { CoreKind::Big }
+    if LITTLE.load(Ordering::Relaxed) >> core & 1 != 0 { CoreKind::Little } else { CoreKind::Big }
+}
+
+/// The device tree's core speeds (`capacity-dmips-mhz`) say which are the efficiency cores when the machine has two kinds; otherwise the model is
+/// fixed: cores 0 and 1 are the little ones, all the others the big ones (QEMU's cores are alike).
+fn work_out_kinds() {
+    let mask = (0..MAX_CPUS).fold(0u32, |m, c| {
+        let little = crate::platform::core_is_little(c).unwrap_or(c < 2);
+        m | (little as u32) << c
+    });
+    LITTLE.store(mask, Ordering::Relaxed);
 }
 
 fn big_online() -> bool {
-    smp::online_mask() & !0b11 != 0
+    (0..MAX_CPUS).any(|c| smp::online_mask() & (1 << c) != 0 && core_kind(c) == CoreKind::Big)
 }
 
 /// A new task (or a new instance of one): where it starts, with no history.
@@ -1111,7 +1133,10 @@ fn best_candidate(core: usize, cur: usize, now: u64, skip: &TaskSet) -> Option<u
     let mut rt: Option<(u64, u64, usize)> = None;
     let mut starving: Option<(u64, usize)> = None;
     let mut by_level: [Option<(u64, bool, usize)>; 4] = [None; 4];
+    let looked = &mine().scanned;
+    bump(&mine().picks);
     for i in ready_mask().without(skip).iter() {
+        looked.fetch_add(1, Ordering::Relaxed);
         if !can_run(i, core, cur, now) {
             continue;
         }
@@ -1705,6 +1730,7 @@ pub fn finish(code: u32) -> ! {
         "[sched] {} switches ({} by slice expiry, {} by a higher-priority wakeup, {} interrupts sent for preemption and slice timers); {} migrations, {} taken from a busy core, {} onto the other kind of core",
         k.switches, k.slice_preempts, k.prio_preempts, k.preempt_ipis, k.migrations, k.steals, k.spills
     );
+    kprintln!("[sched] {} candidate searches looked at {} ready tasks ({} each)", k.picks, k.scanned, k.scanned / k.picks.max(1));
     let now = timer::counter();
     let wall = now.max(1);
     let mut est_mj = 0u64;

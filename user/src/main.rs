@@ -40,6 +40,7 @@ mod fuzz;
 mod programs;
 mod info;
 mod kbd;
+mod xhci;
 mod logo;
 mod netd;
 mod netdrv;
@@ -115,6 +116,11 @@ fn client() -> ! {
         }
         9 => {
             programs::scale_tests(); // make scale: every slot of a table of 1024 tasks
+            exit(0)
+        }
+        10 => {
+            // make usb-test: nothing to run; the input driver logs what arrives while the harness types (the machine is stopped from outside)
+            sleep(6000);
             exit(0)
         }
         _ => {}

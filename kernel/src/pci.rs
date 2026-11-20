@@ -18,6 +18,9 @@ pub const VIRTIO_BLK_MODERN: u16 = 0x1040 + 2;
 pub const VIRTIO_GPU_MODERN: u16 = 0x1040 + 16;
 pub const VIRTIO_INPUT_MODERN: u16 = 0x1040 + 18;
 
+/// The xHCI USB controller QEMU emulates (`-device qemu-xhci`): Red Hat's vendor id and its device id. Its registers are in BAR 0.
+pub const XHCI: (u16, u16) = (0x1b36, 0x000d);
+
 const CAP_VENDOR: u8 = 0x09;
 
 /// A function at bus 0: `dev` is the device number (function 0 only).

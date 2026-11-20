@@ -104,6 +104,8 @@ fn dtb_ram() -> Option<(u64, u64)> {
 
 /// What the tree says about the machine, kept in plain atomics once read (`init_machine`).
 static NCPUS: AtomicUsize = AtomicUsize::new(0);
+/// Each core's `capacity-dmips-mhz` (0 if the tree gave none), in the core order of `MPIDRS`.
+static CAPACITY: [core::sync::atomic::AtomicU32; crate::smp::MAX_CPUS] = [const { core::sync::atomic::AtomicU32::new(0) }; crate::smp::MAX_CPUS];
 static MPIDRS: [AtomicU64; crate::smp::MAX_CPUS] = [const { AtomicU64::new(0) }; crate::smp::MAX_CPUS];
 static CONDUIT_SMC: AtomicU8 = AtomicU8::new(0);
 /// 2 or 3: the interrupt controller's version (2 until the tree says otherwise).
@@ -131,6 +133,7 @@ pub fn init_machine() {
     unsafe { core::arch::asm!("mrs {}, mpidr_el1", out(reg) boot, options(nomem, nostack)) };
     let boot = boot & 0xFF_00FF_FFFF;
     MPIDRS[0].store(boot, Ordering::Relaxed);
+    CAPACITY[0].store(0, Ordering::Relaxed);
     NCPUS.store(0, Ordering::Relaxed);
     let Some(m) = read_machine() else { return };
     match m.gic {
@@ -149,9 +152,12 @@ pub fn init_machine() {
     CONDUIT_SMC.store((m.conduit == Some(Conduit::Smc)) as u8, Ordering::Relaxed);
     // the cores: this one first (it is core 0 whatever its place in the tree), then the rest in tree order
     let mut n = 1;
-    for &c in &m.cpus[..m.ncpus] {
-        if c != boot && n < crate::smp::MAX_CPUS {
+    for (i, &c) in m.cpus[..m.ncpus].iter().enumerate() {
+        if c == boot {
+            CAPACITY[0].store(m.capacity[i], Ordering::Relaxed);
+        } else if n < crate::smp::MAX_CPUS {
             MPIDRS[n].store(c, Ordering::Relaxed);
+            CAPACITY[n].store(m.capacity[i], Ordering::Relaxed);
             n += 1;
         }
     }
@@ -186,6 +192,15 @@ pub fn dtb_span() -> Option<(usize, usize)> {
 /// Where the device tree was found (0: none).
 pub fn dtb_addr() -> usize {
     DTB.load(Ordering::Relaxed)
+}
+
+/// Whether core `core` is an efficiency core, if the tree says the cores differ in speed (`capacity-dmips-mhz`: the slower ones are); `None` if it
+/// does not, and the kernel uses its fixed model.
+pub fn core_is_little(core: usize) -> Option<bool> {
+    let n = NCPUS.load(Ordering::Relaxed);
+    let caps = || CAPACITY[..n].iter().map(|c| c.load(Ordering::Relaxed));
+    let (lo, hi) = (caps().min()?, caps().max()?);
+    (core < n && lo != hi && lo != 0).then(|| CAPACITY[core].load(Ordering::Relaxed) < hi)
 }
 
 pub fn intc_name() -> &'static str {

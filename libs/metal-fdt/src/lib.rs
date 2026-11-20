@@ -193,6 +193,8 @@ pub struct Machine {
     pub ram: Option<(u64, u64)>,
     /// MPIDR affinity values (`/cpus/cpu@N` `reg`) in tree order; the first is the boot core in practice, the caller decides.
     pub cpus: [u64; MAX_CORES],
+    /// `capacity-dmips-mhz` of each core of `cpus` (0: the core has none): how fast it is, relative to the others; big.LITTLE machines differ here.
+    pub capacity: [u32; MAX_CORES],
     pub ncpus: usize,
     pub gic: Option<Gic>,
     pub conduit: Option<Conduit>,
@@ -202,7 +204,7 @@ pub struct Machine {
 
 impl Machine {
     const fn empty() -> Machine {
-        Machine { ram: None, cpus: [0; MAX_CORES], ncpus: 0, gic: None, conduit: None, uart: None }
+        Machine { ram: None, cpus: [0; MAX_CORES], capacity: [0; MAX_CORES], ncpus: 0, gic: None, conduit: None, uart: None }
     }
 }
 
@@ -213,6 +215,7 @@ pub fn machine(fdt: &Fdt) -> Machine {
         reg: Option<&'a [u8]>,
         compatible: Option<Prop<'a>>,
         method: Option<&'a [u8]>,
+        capacity: u32,
         disabled: bool,
     }
     let mut m = Machine::empty();
@@ -235,6 +238,7 @@ pub fn machine(fdt: &Fdt) -> Machine {
                 b"reg" => cur[depth].reg = Some(p.value),
                 b"compatible" => cur[depth].compatible = Some(p),
                 b"method" => cur[depth].method = p.str(),
+                b"capacity-dmips-mhz" => cur[depth].capacity = p.u32().unwrap_or(0),
                 b"status" => cur[depth].disabled = p.str().is_some_and(|s| s != b"okay" && s != b"ok"),
                 _ => {}
             },
@@ -255,6 +259,7 @@ pub fn machine(fdt: &Fdt) -> Machine {
                         if let Some(v) = r.num(0, ac) {
                             if m.ncpus < MAX_CORES {
                                 m.cpus[m.ncpus] = v & 0xFF_00FF_FFFF; // Aff3 Aff2 Aff1 Aff0
+                                m.capacity[m.ncpus] = c.capacity;
                                 m.ncpus += 1;
                             }
                         }

@@ -16,6 +16,7 @@ metal-input = { path = "../libs/metal-input" }
 metal-edit = { path = "../libs/metal-edit" }
 metal-compact = { path = "../libs/metal-compact" }
 metal-driver-rt = { path = "../libs/metal-driver-rt" }
+metal-usb = { path = "../libs/metal-usb" }
 
 [profile.release]
 panic = "abort"

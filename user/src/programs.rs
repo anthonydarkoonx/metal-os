@@ -200,6 +200,17 @@ pub fn scale_tests() {
     }
     let ended = counter() - begin;
     sleep(20);
+    // many programs that all want the CPU at once: the scheduler must still answer the conductor's own sleep promptly, and all of them must finish
+    let burn = v.read_file("/system/bin/burn").unwrap_or_default();
+    if burn.len() >= 32 {
+        let want = (slots - FIRST_DYNAMIC as usize - busy0).min(400);
+        let burners: Vec<i64> = (0..want).map(|_| Req::new().arg(40).heap(4).go(&burn)).filter(|&t| t > 0).collect(); // (0.4 s of wall time each)
+        let t0 = counter();
+        sleep(10);
+        let woke = (counter() - t0) * 1000 / frequency(); // ms
+        let done = burners.iter().filter(|&&b| wait(b, false) >= 0).count();
+        println!("[client] TEST with {} programs all wanting the CPU, a 10 ms sleep of the conductor takes {woke} ms and every program finishes ({done}): {}", burners.len(), verdict(woke < 500 && done == burners.len() && burners.len() == want));
+    }
     let (free1, nodes1, busy1) = (sysinfo(0)[3], sysinfo(1)[5], live_dynamic());
     println!("[client] TEST they are all killed and collected together, and every frame, capability node and task slot is back (collected {collected} of {}, {} us each; frames {free0} -> {free1}, nodes {nodes0} -> {nodes1}, live programs {busy0} -> {busy1}): {}",
         kids.len(), ended * 1_000_000 / frequency() / kids.len().max(1) as u64, verdict(collected == kids.len() && free1 + 8 >= free0 && nodes1 <= nodes0 && busy1 == busy0));

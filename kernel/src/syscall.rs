@@ -132,8 +132,9 @@ pub fn lookup(tid: usize, slot: u64, kind: Kind, need: Rights) -> Result<Cap, i6
 }
 
 /// Bit `t` of the task masks the task-manager pages answer with: only the first 64 task slots have one.
-fn task_bit(t: usize) -> u64 {
-    if t < 64 { 1 << t } else { 0 }
+/// Bit `t % 64` if task `t` lies in window `w` (tasks `64 * w..64 * w + 64`), else 0: the task-holder masks of SYSINFO pages 11 and 13 cover one window at a time.
+fn task_bit(t: usize, w: usize) -> u64 {
+    if t / 64 == w { 1 << (t % 64) } else { 0 }
 }
 
 fn lookup_any(tid: usize, slot: u64) -> Result<Cap, i64> {
@@ -522,6 +523,9 @@ fn obj_name(o: u16) -> &'static str {
         obj::OBJ_SHM_VFS_SHELL => "vfs shell shm",
         obj::OBJ_SHM_SPIN => "spin flag",
         obj::OBJ_SHM_VFS_REGION => "vfs sessions",
+        obj::OBJ_USB_MMIO => "usb registers",
+        obj::OBJ_USB_PCICFG => "usb pci config",
+        obj::OBJ_USB_DMA => "usb memory",
         obj::OBJ_NET_MMIO => "net registers",
         obj::OBJ_NET_PCICFG => "net pci config",
         obj::OBJ_NET_QUEUES => "net queues",
@@ -682,9 +686,9 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             Out::Ret(s.written as i64)
         }
         10 => {
-            // one capability slot of a task, for the task manager: `arg` = task | slot << 8; answers (kind, object, rights, node), kind 0 for an
+            // one capability slot of a task, for the task manager: `arg` = task | slot << 16; answers (kind, object, rights, node), kind 0 for an
             // empty slot (Endpoint 1, Memory 2, Console 3, Irq 4, MemCtl 5, Admin 6, Sched 7, Spawn 8, Factory 9). Read-only, like the other pages.
-            let (t, slot) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
+            let (t, slot) = ((arg & 0xFFFF) as usize, (arg >> 16) as usize);
             if t >= task::limit() || slot >= NCAPS {
                 return Out::Ret(E_INVAL);
             }
@@ -699,9 +703,9 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             Out::Ret(0)
         }
         14 => {
-            // what has been revoked from a task and can be given back, for the capabilities manager: `arg` = task | n << 8, the nth (oldest first).
+            // what has been revoked from a task and can be given back, for the capabilities manager: `arg` = task | n << 16, the nth (oldest first).
             // Answers (id, slot, kind, object, rights | 1 << 16 if what it hung under is still there); `x0` is E_INVAL past the end. Read-only.
-            let (t, n) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
+            let (t, n) = ((arg & 0xFFFF) as usize, (arg >> 16) as usize);
             if t >= task::limit() {
                 return Out::Ret(E_INVAL);
             }
@@ -714,10 +718,10 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             }
         }
         13 => {
-            // what revoking a capability would take with it, for the task manager: `arg` = task | slot << 8. Answers (how many other capabilities are
-            // derived from it, a bit mask of the tasks holding them, how many capability nodes hang under it (it included), 1 if it is the root capability
+            // what revoking a capability would take with it, for the task manager: `arg` = task | slot << 16 | window << 24. Answers (how many other
+            // capabilities are derived from it, a bit mask of the tasks of that window (64 tasks: `window * 64 ..`) holding them, how many capability nodes hang under it (it included), 1 if it is the root capability
             // of its object, which `REVOKE_OF` refuses). Read-only.
-            let (t, slot) = ((arg & 0xFF) as usize, (arg >> 8) as usize);
+            let (t, slot, w) = ((arg & 0xFFFF) as usize, (arg >> 16 & 0xFF) as usize, (arg >> 24) as usize);
             if t >= task::limit() || slot >= NCAPS {
                 return Out::Ret(E_INVAL);
             }
@@ -733,7 +737,7 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                 for (i, cc) in caps.iter().enumerate() {
                     if cc.kind != Kind::None && marked.has(cc.node as usize) && !(tt == t && i == slot) {
                         copies += 1;
-                        holders |= task_bit(tt);
+                        holders |= task_bit(tt, w);
                     }
                 }
             }
@@ -742,10 +746,10 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
             Out::Ret(0)
         }
         11 => {
-            // who holds a capability to an object, for the task manager: `arg` = kind | object << 8 (kinds as in page 10). Answers bit masks of
-            // tasks (bit t is task t): (all holders, holders that may send / write, holders that may receive / map, the creator or 255, how many
-            // capabilities name it). Read-only.
-            let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFFFF) as u16);
+            // who holds a capability to an object, for the task manager: `arg` = kind | object << 8 | window << 24 (kinds as in page 10). Answers
+            // bit masks of the tasks of that window (bit t is task `window * 64 + t`): (all holders, holders that may send / write, holders that may
+            // receive / map, the creator or 0xFFFF, how many capabilities name it, in all windows). Read-only.
+            let (kind, obj, w) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFFFF) as u16, (arg >> 24) as usize);
             let (mut any, mut user, mut serve, mut total) = (0u64, 0u64, 0u64, 0u64);
             for t in 0..task::limit() {
                 let caps = task::lock(t).caps;
@@ -753,36 +757,36 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                     if c.kind as u8 != kind || c.kind == Kind::None || (c.obj != obj && matches!(c.kind, Kind::Endpoint | Kind::Memory | Kind::Irq)) {
                         continue;
                     }
-                    any |= task_bit(t);
+                    any |= task_bit(t, w);
                     total += 1;
                     match c.kind {
                         Kind::Endpoint => {
                             if c.rights & R_SEND != 0 {
-                                user |= task_bit(t);
+                                user |= task_bit(t, w);
                             }
                             if c.rights & R_RECV != 0 {
-                                serve |= task_bit(t);
+                                serve |= task_bit(t, w);
                             }
                         }
                         Kind::Memory => {
                             if c.rights & R_WRITE != 0 {
-                                user |= task_bit(t);
+                                user |= task_bit(t, w);
                             }
                             if c.rights & R_MAP != 0 {
-                                serve |= task_bit(t);
+                                serve |= task_bit(t, w);
                             }
                         }
                         _ => {
-                            user |= task_bit(t);
-                            serve |= task_bit(t);
+                            user |= task_bit(t, w);
+                            serve |= task_bit(t, w);
                         }
                     }
                 }
             }
             let owner = match kind {
-                k if k == Kind::Endpoint as u8 => ipc::dynamic_owner(obj).map_or(255, |t| t as u64),
-                k if k == Kind::Memory as u8 => obj::get(obj).filter(|o| o.kind == ObjKind::Shared).map_or(255, |o| o.aux as u64),
-                _ => 255,
+                k if k == Kind::Endpoint as u8 => ipc::dynamic_owner(obj).map_or(0xFFFF, |t| t as u64),
+                k if k == Kind::Memory as u8 => obj::get(obj).filter(|o| o.kind == ObjKind::Shared).map_or(0xFFFF, |o| o.aux as u64),
+                _ => 0xFFFF,
             };
             f.x[1] = any;
             f.x[2] = user;
@@ -793,13 +797,13 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
         }
         12 => {
             // what a capability's object is, for the task manager: `arg` = kind | object << 8. Answers (name bytes 0..8, name bytes 8..16, size in pages
-            // or the interrupt number, class, creator or 255). Classes: 1 boot endpoint, 2 run-time endpoint, 3 RAM, 4 DMA buffer, 5 device registers,
+            // or the interrupt number, class, creator or 0xFFFF). Classes: 1 boot endpoint, 2 run-time endpoint, 3 RAM, 4 DMA buffer, 5 device registers,
             // 6 shared memory made by a program, 7 interrupt, 8 other.
             let (kind, obj) = ((arg & 0xFF) as u8, ((arg >> 8) & 0xFFFF) as u16);
             let (name, size, class, owner): (&str, u64, u64, u64) = match kind {
                 k if k == Kind::Endpoint as u8 => match ipc::dynamic_owner(obj) {
                     Some(t) => ("dynamic endpoint", 0, 2, t as u64),
-                    None => (ep_name(obj), 0, if obj >= ipc::EP_FIRST_DYNAMIC { 2 } else { 1 }, 255),
+                    None => (ep_name(obj), 0, if obj >= ipc::EP_FIRST_DYNAMIC { 2 } else { 1 }, 0xFFFF),
                 },
                 k if k == Kind::Memory as u8 => match obj::get(obj) {
                     Some(o) => (
@@ -812,18 +816,18 @@ fn sysinfo(cur: usize, page: u64, arg: u64) -> Out {
                             ObjKind::Shared => 6,
                             ObjKind::Unused => 8,
                         },
-                        if o.kind == ObjKind::Shared { o.aux as u64 } else { 255 },
+                        if o.kind == ObjKind::Shared { o.aux as u64 } else { 0xFFFF },
                     ),
-                    None => ("(gone)", 0, 8, 255),
+                    None => ("(gone)", 0, 8, 0xFFFF),
                 },
-                k if k == Kind::Irq as u8 => (match obj { obj::IRQ_BLK => "block irq", obj::IRQ_GPU => "display irq", obj::IRQ_NET => "network irq", _ => "interrupt" }, obj as u64, 7, 255),
-                k if k == Kind::Console as u8 => ("console", 0, 8, 255),
-                k if k == Kind::MemCtl as u8 => ("memory control", 0, 8, 255),
-                k if k == Kind::Admin as u8 => ("admin", 0, 8, 255),
-                k if k == Kind::Sched as u8 => ("scheduler", 0, 8, 255),
-                k if k == Kind::Spawn as u8 => ("spawn", 0, 8, 255),
-                k if k == Kind::Factory as u8 => ("endpoint factory", 0, 8, 255),
-                _ => ("?", 0, 8, 255),
+                k if k == Kind::Irq as u8 => (match obj { obj::IRQ_BLK => "block irq", obj::IRQ_GPU => "display irq", obj::IRQ_NET => "network irq", _ => "interrupt" }, obj as u64, 7, 0xFFFF),
+                k if k == Kind::Console as u8 => ("console", 0, 8, 0xFFFF),
+                k if k == Kind::MemCtl as u8 => ("memory control", 0, 8, 0xFFFF),
+                k if k == Kind::Admin as u8 => ("admin", 0, 8, 0xFFFF),
+                k if k == Kind::Sched as u8 => ("scheduler", 0, 8, 0xFFFF),
+                k if k == Kind::Spawn as u8 => ("spawn", 0, 8, 0xFFFF),
+                k if k == Kind::Factory as u8 => ("endpoint factory", 0, 8, 0xFFFF),
+                _ => ("?", 0, 8, 0xFFFF),
             };
             let b = name.as_bytes();
             let pack = |off: usize| (0..8).fold(0u64, |v, i| v | (b.get(off + i).copied().unwrap_or(0) as u64) << (8 * i));

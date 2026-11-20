@@ -47,6 +47,10 @@ name = "metal-net"
 version = "0.1.0"
 
 [[package]]
+name = "metal-usb"
+version = "0.1.0"
+
+[[package]]
 name = "metal-user"
 version = "0.1.0"
 dependencies = [
@@ -59,6 +63,7 @@ dependencies = [
  "metal-lfs",
  "metal-loader",
  "metal-net",
+ "metal-usb",
 ]
 
 [[package]]

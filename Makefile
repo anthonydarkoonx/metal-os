@@ -23,10 +23,12 @@ SCHED_PAT := '(Heavy): no performance cores online'
 endif
 # Host port forwarded to the guest's TCP port 7777 (the inbound connection of the network tests); tools/netpeer.py uses it.
 NET_FWD_PORT ?= 18077
+# the input devices: virtio keyboard and tablet (the USB test swaps them for an xHCI controller with a USB keyboard and tablet)
+QEMU_INPUT := -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on
+QEMU_USB_INPUT := -device qemu-xhci,id=xhci -device usb-kbd,id=kbd0,bus=xhci.0 -device usb-tablet,id=tab0,bus=xhci.0
 QEMU_DEV := -drive if=none,id=d0,file=$(DISK),format=raw -device virtio-blk-pci,drive=d0,disable-legacy=on,iommu_platform=on \
             -device virtio-gpu-pci,disable-legacy=on,iommu_platform=on,xres=1024,yres=768 \
-            -device virtio-keyboard-pci,disable-legacy=on,iommu_platform=on \
-            -device virtio-tablet-pci,disable-legacy=on,iommu_platform=on \
+            $(QEMU_INPUT) \
             -netdev user,id=n0,hostfwd=tcp:127.0.0.1:$(NET_FWD_PORT)-:7777 -device virtio-net-pci,netdev=n0,disable-legacy=on,iommu_platform=on \
             -device virtio-rng-pci,disable-legacy=on,iommu_platform=on
 # (a fresh 32 random bytes for every make run: the kernel mixes them into its layout generator, see kernel/src/rand.rs)
@@ -52,7 +54,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: usb-test usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -469,7 +471,7 @@ stack-guard: kernel disk
 	 outb=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow-bigframe,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0 and core 1 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$outb =="; exit 1; }
 
-test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard fuzz
+test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard fuzz usb-test usb-test-noncoherent
 
 # Licensing hygiene: the ZSTD constants must equal RFC 8878's tables (needs network once).
 provenance-check:
@@ -518,3 +520,12 @@ clippy:
 	cd kernel && cargo clippy --release
 	cd user && cargo clippy --release
 	cd programs && cargo clippy --release
+
+# USB input: an xHCI controller with a USB keyboard and tablet instead of the virtio ones; the script types and clicks through QEMU's QMP socket and
+# checks that the driver saw each key and button (the driver logs them only in this mode, `opt/metal/only=10`).
+usb-test: kernel disk
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10'
+
+# ... and again with the machine's DMA treated as not cache-coherent (the driver must clean and flush its rings and buffers itself)
+usb-test-noncoherent: kernel disk
+	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1'

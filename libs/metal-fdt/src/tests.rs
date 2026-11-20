@@ -10,6 +10,7 @@ fn qemu_gicv2_machine() {
     assert_eq!(m.ram, Some((0x4000_0000, 128 << 20)));
     assert_eq!(m.ncpus, 4);
     assert_eq!(&m.cpus[..4], &[0, 1, 2, 3]);
+    assert_eq!(&m.capacity[..4], &[0; 4]); // (QEMU's cores are alike and say nothing)
     assert_eq!(m.gic, Some(Gic::V2 { dist: 0x0800_0000, cpu: 0x0801_0000 }));
     assert_eq!(m.conduit, Some(Conduit::Hvc));
     assert_eq!(m.uart, Some(0x0900_0000));
@@ -147,7 +148,7 @@ fn disabled_cpus_are_skipped_and_cells_are_honoured() {
             st.push(0);
         }
     };
-    let (ac, sc, reg, status) = (name("#address-cells"), name("#size-cells"), name("reg"), name("status"));
+    let (ac, sc, reg, status, cap) = (name("#address-cells"), name("#size-cells"), name("reg"), name("status"), name("capacity-dmips-mhz"));
     node(&mut st, "");
     prop(&mut st, ac, &be(2));
     prop(&mut st, sc, &be(2));
@@ -159,6 +160,7 @@ fn disabled_cpus_are_skipped_and_cells_are_honoured() {
     prop(&mut st, sc, &be(0));
     node(&mut st, "cpu@0");
     prop(&mut st, reg, &be(0));
+    prop(&mut st, cap, &be(512));
     st.extend_from_slice(&be(2));
     node(&mut st, "cpu@100");
     prop(&mut st, reg, &be(0x100));
@@ -166,6 +168,7 @@ fn disabled_cpus_are_skipped_and_cells_are_honoured() {
     st.extend_from_slice(&be(2));
     node(&mut st, "cpu@101");
     prop(&mut st, reg, &be(0x101));
+    prop(&mut st, cap, &be(1024));
     st.extend_from_slice(&be(2));
     st.extend_from_slice(&be(2)); // /cpus
     st.extend_from_slice(&be(2)); // /
@@ -184,4 +187,5 @@ fn disabled_cpus_are_skipped_and_cells_are_honoured() {
     assert_eq!(m.ram, Some((0x8000_0000, 0x2000_0000)));
     assert_eq!(m.ncpus, 2);
     assert_eq!(&m.cpus[..2], &[0, 0x101]);
+    assert_eq!(&m.capacity[..2], &[512, 1024]);
 }

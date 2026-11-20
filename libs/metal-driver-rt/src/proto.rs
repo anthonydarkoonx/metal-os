@@ -39,6 +39,10 @@ pub mod input {
     /// Ask for pending input events (keys as the device numbers them, pointer position, buttons, wheel):
     /// reply = [count | 1 << 8 if the machine has a pointer, event, event], at most two events of eight bytes (see `Event`).
     pub const INPUT_POLL: u64 = 71;
+    /// Like `INPUT_POLL`, but if there is no event yet the call waits for one: `w[1]` = the longest wait in milliseconds (at most 1000; 0 = do not wait).
+    /// The reply is the same; no events means the time ran out. The driver does nothing else while it waits (so one client should use it, and a
+    /// `KBD_POLL` from another waits its turn).
+    pub const INPUT_WAIT: u64 = 72;
 
     /// An input event, packed in a word: `kind` (low byte), `code` (next 16 bits), `value` (high 32 bits).
     pub mod ev {

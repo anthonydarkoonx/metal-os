@@ -107,6 +107,10 @@ def run(qemu):
         extra = [("the hub is found", "[usb] hub attached" in open(LOG, errors="replace").read()), ("the devices behind it are found", open(LOG, errors="replace").read().count("[usb] device attached") >= 2)]
     out = open(LOG, errors="replace").read()
     ok = True
+    # a client blocked in INPUT_WAIT (up to 1000 ms) is woken by the input itself, not by its timeout
+    import re
+    woke = [int(m) for m in re.findall(r"\[wait\] \d+ event\(s\) after (\d+) ms", out)]
+    extra.append(("a client waiting for input is woken by the controller's interrupt when the input comes (no wait that ends with input lasts a second, its time limit), and the wait times out when there is none", len(woke) >= 5 and all(w < 700 for w in woke) and "[wait] nothing after" in out))
     expect = [
         ("a pressed", "[usb] key 30 down"), ("a released", "[usb] key 30 up"),
         ("shift pressed", "[usb] key 42 down"), ("b pressed", "[usb] key 48 down"), ("shift released", "[usb] key 42 up"),

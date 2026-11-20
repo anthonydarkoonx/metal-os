@@ -360,6 +360,8 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
                 // chaos mode: the conductor drives a workload against every service and starts the monkey
                 install(t, tid, 14, Kind::Endpoint, ipc::EP_KBD, R_SEND);
                 install(t, tid, 22, Kind::Endpoint, ipc::EP_MONKEY, R_SEND);
+            } else if crate::platform::only() == 10 {
+                install(t, tid, 14, Kind::Endpoint, ipc::EP_KBD, R_SEND); // (the USB input test: the conductor waits for input the way a desktop does)
             }
             if obj::gpu_present() {
                 // the conductor talks to the display driver and to the screen task; it never holds the framebuffer
@@ -367,6 +369,8 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
                 install(t, tid, 23, Kind::Endpoint, ipc::EP_INFO, R_SEND);
             }
         }
+        // the input driver serves its endpoint whichever devices it found (virtio-input, a USB controller, or both)
+        14 => install(t, tid, 0, Kind::Endpoint, ipc::EP_KBD, R_RECV),
         1 => install(t, tid, 0, Kind::Endpoint, ipc::EP_SERVICE, R_RECV),
         2 => install(t, tid, 0, Kind::Endpoint, ipc::EP_DRIVER, R_RECV),
         9 => install(t, tid, 0, Kind::MemCtl, 0, R_MEM_STATS | R_MEM_COMPACT | R_MEM_SWAP), // compactd

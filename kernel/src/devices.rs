@@ -165,7 +165,6 @@ pub static DRIVERS: [Driver; 7] = [
         role: 14,
         bind: Bind::Expose { setup: setup_kbd },
         grants: &[
-        cap(0, Kind::Endpoint, ipc::EP_KBD, R_RECV),
         cap(1, Kind::Memory, OBJ_KBD_MMIO, DEV),
         cap(2, Kind::Memory, OBJ_KBD_QUEUE, DEV),
         cap(3, Kind::Memory, OBJ_KBD_PCICFG, R_MAP),
@@ -201,6 +200,7 @@ pub static DRIVERS: [Driver; 7] = [
         cap(7, Kind::Memory, OBJ_USB_MMIO, DEV),
         cap(8, Kind::Memory, OBJ_USB_DMA, DEV),
         cap(9, Kind::Memory, OBJ_USB_PCICFG, R_MAP),
+        cap(10, Kind::Irq, IRQ_USB, R_RECV),
     ],
         dma: &[OBJ_USB_DMA],
         // (the input driver is started once, by whichever of its devices comes first in this table: `spawn_tasks` skips a role it has already made)
@@ -426,10 +426,10 @@ fn setup_ptr(f: &pci::Func, d: &Exposed) {
 }
 
 fn setup_usb(f: &pci::Func, d: &Exposed) {
-    pci::disable_intx(f); // (polled, like the virtio input devices)
     set(OBJ_USB_MMIO, ObjKind::Mmio, d.bar_pa, d.bar_pages, 0);
     set(OBJ_USB_PCICFG, ObjKind::Ram, d.cfg_pa, 1, 0);
     set(OBJ_USB_DMA, ObjKind::Dma, mem::alloc_contig(USB_DMA_PAGES, mem::OWNER_KERNEL).expect("usb memory"), USB_DMA_PAGES, 0);
+    irq::register(IRQ_USB as usize, d.irq_id); // (the controller's INTx line: the driver may wait for it; it is held off until it does)
 }
 
 fn setup_net(_f: &pci::Func, d: &Exposed) {

@@ -92,6 +92,7 @@ pub const NET_BUF_PAGES: usize = 48;
 pub const IRQ_BLK: u16 = 0;
 pub const IRQ_GPU: u16 = 1;
 pub const IRQ_NET: u16 = 2;
+pub const IRQ_USB: u16 = 3;
 
 /// (ids are `u16`; the first 64 are the boot-time objects, the rest are created at run time: `PROGRAM_OBJ_QUOTA` of them for every
 /// task slot, at least 192, sized at boot)

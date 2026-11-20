@@ -29,7 +29,7 @@ none of the desktop's types:
 |---|---|
 | `display` | slot of the display endpoint to receive on (the one `progmgr` hands to programs with the `window` permission) |
 | `gpu` | slot of the display driver's endpoint (`GPU_INFO`, `GPU_FLUSH2`) |
-| `input` | slot of the input driver's endpoint (`INPUT_POLL`) |
+| `input` | slot of the input driver's endpoint (`INPUT_POLL`, and `INPUT_WAIT`: the same, but the call waits up to `w[1]` ms, at most 1000, for an event instead of answering at once with none; the driver does nothing else meanwhile, so one client should use it) |
 | `framebuffer`, `fb_handle` | slot of the scanout buffer's memory capability, and the handle to map it at (`metal_driver_rt::mem_map`, `va`) |
 | `manager` | the program manager's task id, 0 if there is none |
 | `power` | slot of the power right (`R_POWER`), 0 if there is none |

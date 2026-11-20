@@ -226,6 +226,23 @@ impl Kbd {
         [n, w[0], w[1]]
     }
 
+    /// Collect input until an event is pending or `ms` run out (`INPUT_WAIT`). Virtio input devices are polled, so while there are any this looks again every
+    /// millisecond; with only a USB controller it sleeps on the controller's interrupt.
+    fn wait_events(&mut self, ms: u64) {
+        let end = ticks() + ms.div_ceil(10);
+        loop {
+            self.pump();
+            let now = ticks();
+            if self.ev_len > 0 || now >= end {
+                return;
+            }
+            match &mut self.usb {
+                Some(u) if self.dev.iter().all(|d| d.is_none()) => u.wait(end - now),
+                _ => sleep_us(1000),
+            }
+        }
+    }
+
     /// Up to two pending input events.
     fn take_events(&mut self) -> [u64; 3] {
         let mut r = [0u64; 3];
@@ -340,6 +357,10 @@ pub fn kbd_driver() -> ! {
         match m.w[0] {
             KBD_POLL => reply(k.take()),
             INPUT_POLL => reply(k.take_events()),
+            INPUT_WAIT => {
+                k.wait_events(m.w[1].min(1000));
+                reply(k.take_events())
+            }
             _ => reply([0, 0, 0]),
         };
     }

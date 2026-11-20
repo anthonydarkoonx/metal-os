@@ -19,6 +19,7 @@ const DMA_H: usize = 0xA010_0000;
 /// Capability slots (see `devices.rs`).
 const SLOT_MMIO: u64 = 7;
 const SLOT_DMA: u64 = 8;
+const SLOT_IRQ: u64 = 10;
 
 // layout of the shared memory (the kernel makes it USB_DMA_PAGES = 80 pages: the end of the scratchpad buffers)
 const O_DCBAA: usize = 0x0000; // device context base address array: 256 entries
@@ -152,6 +153,8 @@ pub trait Sink {
 }
 
 pub struct Usb {
+    /// The controller's interrupt line is ours (slot 10, if the kernel gave it): `wait` sleeps until it fires.
+    irq: bool,
     op: usize,
     db: usize,
     ir: usize,
@@ -259,7 +262,7 @@ impl Usb {
         w32(ir + 8, 1); // ERSTSZ
         w64(ir + 0x18, dma_pa + O_EVT as u64); // ERDP
         w64(ir + 0x10, dma_pa + O_ERST as u64); // ERSTBA (last: it starts the ring)
-        w32(ir, 3); // IMAN: IE (the PCI function's interrupt line is held off by the kernel, so this only makes the controller write events) and clear IP
+        w32(ir, 3); // IMAN: IE and clear IP (the PCI function's interrupt line reaches the kernel only while the driver waits for it: `wait`)
         w32(op, 1 | 1 << 2); // run, interrupts enabled
         if !wait_for(|| r32(op + 4) & 1 == 0, 200) {
             return Err("controller will not run");
@@ -283,6 +286,7 @@ impl Usb {
             held: None,
             next_repeat: 0,
             log,
+            irq: true, // (taken away by `wait` if the kernel did not give the driver the line)
             keyboards: 0,
             pointers: 0,
         };
@@ -451,6 +455,8 @@ impl Usb {
             }
         }
         let _ = self.command(0, T_DISABLE_SLOT << 10 | (slot as u32) << 24);
+        // (the controller is done with the slot: whatever it reported for it before is in `stash` by now, and would be taken for a new device that gets the same slot number)
+        self.stash.retain(|e| !(e[3] >> 10 & 0x3F == T_TRANSFER_EVENT && e[3] >> 24 == slot as u32));
         w64(self.dma_va + O_DCBAA + 8 * slot as usize, 0);
         dma::clean(self.dma_va + O_DCBAA, 8 * (MAX_DEVS + 1));
         // SAFETY: the area is `DEV_STRIDE` bytes inside the shared memory, and the slot was just disabled: the controller no longer reads or writes it.
@@ -771,9 +777,27 @@ impl Usb {
         w32(self.db + 4 * slot as usize, e.dci as u32);
     }
 
+    /// Sleep until the controller says something (or `ticks` of 10 ms go by): its interrupt line if the driver has it, else the time. Wakes within
+    /// a tick while a key is held, so that it repeats on time.
+    pub fn wait(&mut self, ticks: u64) {
+        let t = if self.held.is_some() { 1 } else { ticks.max(1) };
+        if self.irq {
+            let r = irq_wait_timeout(SLOT_IRQ, t);
+            if r != 0 && r != E_TIMEDOUT {
+                self.irq = false; // (no interrupt capability here: from now on the time alone)
+                sleep(t);
+            }
+        } else {
+            sleep(t);
+        }
+    }
+
     /// Take what the controller has reported: decode every finished read, give the reports to `sink`, and start the next read; follow devices coming and
     /// going; repeat a held key.
     pub fn poll(&mut self, sink: &mut dyn Sink) {
+        // (the line is level triggered: stays up until the interrupt-pending bit is cleared, and an event that arrives after this makes it rise again)
+        w32(self.ir, 3);
+        w32(self.op + 4, 1 << 3); // USBSTS.EINT
         let mut events = core::mem::take(&mut self.stash);
         while let Some(e) = self.next_event() {
             events.push(e);

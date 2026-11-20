@@ -119,8 +119,24 @@ fn client() -> ! {
             exit(0)
         }
         10 => {
-            // make usb-test: nothing to run; the input driver logs what arrives while the harness types (the machine is stopped from outside)
-            sleep(6000);
+            // make usb-test: the input driver logs what arrives while the harness types (the machine is stopped from outside); this task waits for input
+            // the way a desktop does (`INPUT_WAIT`, up to a second at a time) and says how long each wait took
+            let mut timeouts = 0;
+            for _ in 0..600 {
+                let t0 = ticks();
+                let (st, r) = call(14, [proto::input::INPUT_WAIT, 1000, 0]);
+                if st != 0 {
+                    println!("[wait] call failed: {st}");
+                    break;
+                }
+                let (n, ms) = (r[0] & 0xFF, (ticks() - t0) * 10);
+                if n > 0 {
+                    println!("[wait] {n} event(s) after {ms} ms");
+                } else if timeouts < 2 {
+                    timeouts += 1;
+                    println!("[wait] nothing after {ms} ms");
+                }
+            }
             exit(0)
         }
         _ => {}

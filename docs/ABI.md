@@ -282,12 +282,12 @@ seed file the boot log says the address is guessable. `opt/metal/noaslr` and the
 anything that learns one kernel address (the boot log prints them; no system call does). If the RAM size is unknown the image stays put, with a
 warning. `make kaslr` boots eight times and checks the addresses differ and lie in RAM.
 
-**Kernel stacks.** Each core has 64 KiB of stack with a 16 KiB unmapped guard below it (RAM is mapped with 2 MiB blocks, and 4 KiB
-pages where the stacks are). A kernel stack overflow faults; the exception vector switches to a per-core emergency stack and the
+**Kernel stacks.** Each core has 64 KiB of stack with a 16 KiB unmapped guard below it and a 16 KiB emergency stack (the boot core's are in the kernel
+image, the others' are made from RAM when the core starts; RAM is mapped with 2 MiB blocks, and 4 KiB pages where the stacks are). A kernel stack overflow faults; the exception vector switches to a per-core emergency stack and the
 kernel stops with "kernel stack overflow on core N" instead of overwriting memory below. A single stack frame larger than the
 guard cannot jump over it: for large frames the compiler emits an inline probe that touches one 4 KiB page at a time
-(`stack-probes` in the target spec), so the probe lands in the guard. `make stack-guard` provokes an overflow on cores 0 and 1
-and with one 128 KiB frame (`opt/metal/stack-overflow=1`, `opt/metal/stack-overflow-core1=1`, `opt/metal/stack-overflow-bigframe=1`).
+(`stack-probes` in the target spec), so the probe lands in the guard. `make stack-guard` provokes an overflow on cores 0, 1 and 31 (32 cores, GICv3)
+and with one 128 KiB frame (`opt/metal/stack-overflow=1`, `opt/metal/stack-overflow-core1=1`, `opt/metal/stack-overflow-core=N`, `opt/metal/stack-overflow-bigframe=1`).
 
 ## The pager (`kernel/src/pager.rs`)
 `MEMCTL` ops on a `MemCtl` capability. `MC_SWAP_WRITEBACK`(9, `n`) needs `R_MEM_SWAP`; 6, 7, 8 need `R_MEM_PAGER` (rights bit 5 of a

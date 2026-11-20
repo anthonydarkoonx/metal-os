@@ -53,13 +53,15 @@ static KERNEL_L2: Global<Table> = Global::new(Table([0; 512]));
 /// 2 MiB blocks of `KERNEL_L2_HI`. The same for every task; the user windows live in TTBR0.
 static KERNEL_L1_HI: Global<Table> = Global::new(Table([0; 512]));
 static KERNEL_L2_HI: Global<Table> = Global::new(Table([0; 512]));
-/// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 5.5 MiB with its 16 stacks, at any page: at most four blocks, 6 here for headroom; `init` checks).
+/// 4 KiB tables for the 2 MiB blocks the kernel image lies in (about 4.5 MiB with the boot core's stack, at any page: at most three blocks, 6 here for headroom; `init` checks).
 const KERNEL_L3_N: usize = 6;
 static KERNEL_L3: Global<[Table; KERNEL_L3_N]> = Global::new([const { Table([0; 512]) }; KERNEL_L3_N]);
 
-/// Per core: 64 KiB of kernel stack and an unmapped guard below it (boot.S and linker.ld use the same numbers).
+/// Per core: 64 KiB of kernel stack and an unmapped guard below it, and 16 KiB for the emergency stack (a stack overflow is reported on it). The boot core's
+/// stack and guard are at the end of the image (linker.ld, boot.S use the same numbers); the other cores' are made from RAM in `smp.rs`.
 pub const KSTACK_SIZE: usize = 0x10000;
 pub const KSTACK_GUARD: usize = 0x4000;
+pub const KSTACK_EMERGENCY: usize = 0x4000;
 pub const KSTACK_STRIDE: usize = KSTACK_SIZE + KSTACK_GUARD;
 
 extern "C" {
@@ -73,10 +75,50 @@ extern "C" {
 pub fn kstack_guard_hit(addr: u64) -> Option<usize> {
     // SAFETY: `__stack_top` is a linker symbol; only its address is taken, it is never read.
     let top = unsafe { &__stack_top as *const u8 as usize };
-    (0..crate::smp::MAX_CPUS).find(|&n| {
-        let t = top - n * KSTACK_STRIDE;
-        (t - KSTACK_STRIDE..t - KSTACK_SIZE).contains(&(addr as usize))
+    let a = addr as usize;
+    if (top - KSTACK_STRIDE..top - KSTACK_SIZE).contains(&a) {
+        return Some(0);
+    }
+    (1..crate::smp::MAX_CPUS).find(|&n| {
+        let g = crate::smp::GUARD_START[n].load(core::sync::atomic::Ordering::Relaxed);
+        g != 0 && (g..g + KSTACK_GUARD).contains(&a)
     })
+}
+
+/// Take pages out of the kernel's identity map (a stack guard made from RAM): a 2 MiB block that holds them is first made a table of 4 KiB pages with the same
+/// mapping. Boot core, before the other cores run (so that nobody uses a block while it is being replaced). `false` if the pages are not identity-mapped RAM.
+pub fn unmap_kernel_pages(start: usize, bytes: usize) -> bool {
+    let gib = crate::platform::RAM_BASE & !0x3FFF_FFFF;
+    if start < crate::platform::RAM_BASE || start + bytes > crate::frame::phys::ID_END || start % mem::PAGE != 0 || bytes % mem::PAGE != 0 {
+        return false;
+    }
+    let mut l2g = KERNEL_L2.get();
+    let l2 = &mut l2g.0;
+    // First every 2 MiB block the pages lie in becomes a table (nothing is unmapped yet, so a failure here leaves the map as it was), then the pages go.
+    for page in (start..start + bytes).step_by(mem::PAGE) {
+        let bi = (page - gib) >> 21;
+        if bi >= 512 || l2[bi] & 0b11 == 0 {
+            return false; // (not mapped at all)
+        }
+        if l2[bi] & 0b11 == 0b01 {
+            // a block: the same mapping in 4 KiB pages (break before make: empty the entry and flush before the table goes in)
+            let Some(f) = mem::alloc_kind(mem::OWNER_KERNEL, mem::FKind::Pinned) else { return false };
+            let attrs = l2[bi] & !ADDR_MASK & !0b11;
+            let base = gib + (bi << 21);
+            for (i, e) in table(f).iter_mut().enumerate() {
+                *e = (base + i * mem::PAGE) as u64 | 0b11 | attrs;
+            }
+            l2[bi] = 0;
+            flush_tlb();
+            l2[bi] = f as u64 | VALID_TABLE;
+        }
+    }
+    for page in (start..start + bytes).step_by(mem::PAGE) {
+        let bi = (page - gib) >> 21;
+        table((l2[bi] & ADDR_MASK) as usize)[(page >> 12) & 511] = 0;
+    }
+    flush_tlb();
+    true
 }
 
 /// `ram` is the size of RAM in bytes (a multiple of 2 MiB where it reaches past the identity window).
@@ -113,10 +155,7 @@ pub fn init(ram: usize) {
         let base = gib + (block << 21);
         for (p, e) in l3.iter_mut().enumerate() {
             let pa = base + p * mem::PAGE;
-            let guard = (0..crate::smp::MAX_CPUS).any(|n| {
-                let t = top - n * KSTACK_STRIDE;
-                (t - KSTACK_STRIDE..t - KSTACK_SIZE).contains(&pa)
-            });
+            let guard = (top - KSTACK_STRIDE..top - KSTACK_SIZE).contains(&pa); // (the boot core's; the others' are made later, in `unmap_kernel_pages`)
             // (pages of the block outside the image are ordinary RAM: read + write, never executable)
             let perm = if (start..text_end).contains(&pa) {
                 AP_RO | UXN // code

@@ -18,15 +18,22 @@ fn call(func: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     r
 }
 
+impl Psci {
+    /// Is there a core `core`? (PSCI AFFINITY_INFO answers INVALID_PARAMETERS, -2, for a core that does not exist.)
+    pub fn core_exists(core: usize) -> bool {
+        call(0xC400_0004, crate::platform::cpu_mpidr(core), 0, 0) >= 0
+    }
+}
+
 impl PowerControl for Psci {
     fn power(reset: bool) {
         call(if reset { 0x8400_0009 } else { 0x8400_0008 }, 0, 0, 0); // SYSTEM_RESET / SYSTEM_OFF
     }
 
     /// # Safety
-    /// As `PowerControl::cpu_on`: `entry` must be the secondary core's entry point, since the core will run there with `core` in x0.
-    unsafe fn cpu_on(core: usize, entry: u64) -> i64 {
-        // the target is the core's MPIDR affinity (the tree's `reg`); the context id is the core's number, which `_secondary_start` finds in x0
-        call(0xC400_0003, crate::platform::cpu_mpidr(core), entry, core as u64)
+    /// As `PowerControl::cpu_on`: `entry` must be the secondary core's entry point, since the core will run there with `context` in x0.
+    unsafe fn cpu_on(core: usize, entry: u64, context: u64) -> i64 {
+        // the target is the core's MPIDR affinity (the tree's `reg`); the context id is what `_secondary_start` finds in x0 (its stack and its number)
+        call(0xC400_0003, crate::platform::cpu_mpidr(core), entry, context)
     }
 }

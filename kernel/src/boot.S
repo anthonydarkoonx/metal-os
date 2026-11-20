@@ -158,7 +158,7 @@ park:
     wfe
     b       park
 
-// Secondary core entry (PSCI CPU_ON): x0 = core id (context id), MMU off.
+// Secondary core entry (PSCI CPU_ON): x0 = the context id: the core's stack top (made from RAM by smp.rs) | the core's number, MMU off.
 .global _secondary_start
 _secondary_start:
     mrs     x9, CurrentEL
@@ -183,13 +183,11 @@ _secondary_start:
     msr     elr_el2, x9
     eret
 2:
-    adrp    x9, __stack_top
-    add     x9, x9, :lo12:__stack_top
-    mov     x10, #0x4000            // per core: 64 KiB of stack and the 16 KiB guard below it (0x14000)
-    movk    x10, #1, lsl #16
-    mul     x10, x0, x10
-    sub     x9, x9, x10             // this core's stack top
+    // x0 = the context id `smp.rs` gave PSCI: the core's stack top (page aligned, in RAM it was made from) with the core number in the low 12 bits
+    and     x10, x0, #0xfff
+    bic     x9, x0, #0xfff
     mov     sp, x9
+    mov     x0, x10
     mov     x9, #(1 << 20)          // (as on the boot core)
     msr     cpacr_el1, x9
     adrp    x9, vectors
@@ -302,11 +300,14 @@ cur_sync:
     // report it from a stack of its own (SP_EL0, which is not needed any more: nothing returns from here).
     msr     spsel, #0
     mrs     x17, tpidr_el1
-    adrp    x16, emergency_stacks
+    adrp    x16, emergency_stacks   // the boot core's is in the image (16 KiB) ...
     add     x16, x16, :lo12:emergency_stacks
-    add     x17, x17, #1
-    add     x16, x16, x17, lsl #14  // top of this core's 16 KiB
-    mov     sp, x16
+    add     x16, x16, #16384
+    cbz     x17, 4f
+    adrp    x16, CORE_EMERG_TOP     // ... the others' were made from RAM with their stacks (smp.rs)
+    add     x16, x16, :lo12:CORE_EMERG_TOP
+    ldr     x16, [x16, x17, lsl #3]
+4:  mov     sp, x16
     SAVE    0
     mov     x0, sp
     bl      kernel_sync_panic
@@ -335,13 +336,13 @@ bad_entry:
 .global enter_user
 enter_user:
     mrs     x9, tpidr_el1           // this core's number (set at bring-up)
-    adrp    x10, __stack_top
+    adrp    x10, __stack_top        // the boot core's stack is in the image ...
     add     x10, x10, :lo12:__stack_top
-    mov     x11, #0x4000
-    movk    x11, #1, lsl #16
-    mul     x9, x9, x11
-    sub     x10, x10, x9            // this core's stack top
-    mov     sp, x10
+    cbz     x9, 3f
+    adrp    x10, CORE_STACK_TOP     // ... the others' were made from RAM (smp.rs)
+    add     x10, x10, :lo12:CORE_STACK_TOP
+    ldr     x10, [x10, x9, lsl #3]
+3:  mov     sp, x10
     sub     sp, sp, #272
     mov     x10, sp
     mov     x11, #17
@@ -355,4 +356,4 @@ enter_user:
 .balign 16
 .global emergency_stacks
 emergency_stacks:
-    .space  16 * 16384
+    .space  16384

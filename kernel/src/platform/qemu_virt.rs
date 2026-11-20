@@ -435,13 +435,18 @@ pub fn psci_power(reset: bool) {
     Power::power(reset)
 }
 
-/// PSCI CPU_ON for `core`: it starts at `entry` with `core` as its context id. Returns the PSCI status.
+/// PSCI CPU_ON for `core`: it starts at `entry` with `context` as its context id. Returns the PSCI status.
 ///
 /// # Safety
 /// `entry` must be the secondary core's entry point.
-pub unsafe fn psci_cpu_on(core: usize, entry: u64) -> i64 {
+pub unsafe fn psci_cpu_on(core: usize, entry: u64, context: u64) -> i64 {
     // SAFETY: the caller's contract (`entry` is the secondary core's entry point) is exactly `cpu_on`'s.
-    unsafe { Power::cpu_on(core, entry) }
+    unsafe { Power::cpu_on(core, entry, context) }
+}
+
+/// Whether the firmware knows a core `core` (for a machine whose device tree did not say how many there are).
+pub fn psci_core_exists(core: usize) -> bool {
+    Power::core_exists(core)
 }
 
 /// End the run with `code` where the machine can (QEMU: semihosting); returns if it cannot.

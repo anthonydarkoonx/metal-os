@@ -100,8 +100,8 @@ fn zram_check(codec: &str, mut z: Zram) {
 }
 
 /// Test aid (`opt/metal/stack-overflow=1`): use up the kernel stack, which must end in the stack-guard panic.
-/// (`opt/metal/stack-overflow-core1=1`: the same on core 1, where its stack lies lower and has a guard of its own.)
-pub static OVERFLOW_ON_CORE1: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// (`opt/metal/stack-overflow-core1=1`, or `opt/metal/stack-overflow-core=N`: the same on core N, whose stack was made from RAM and has a guard of its own.)
+pub static OVERFLOW_ON_CORE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
 
 #[inline(never)]
 pub fn overflow_stack(depth: u64) -> u64 {
@@ -148,7 +148,8 @@ extern "C" fn kmain(dtb: usize) -> ! {
     platform::entropy_report();
     platform::init_flags();
     rand::init(platform::flag(b"opt/metal/noaslr"));
-    OVERFLOW_ON_CORE1.store(platform::flag(b"opt/metal/stack-overflow-core1"), core::sync::atomic::Ordering::SeqCst);
+    let overflow_core = if platform::flag(b"opt/metal/stack-overflow-core1") { Some(1) } else { platform::number(b"opt/metal/stack-overflow-core").map(|n| n as usize) };
+    OVERFLOW_ON_CORE.store(overflow_core.unwrap_or(usize::MAX), core::sync::atomic::Ordering::SeqCst);
     if platform::flag(b"opt/metal/stack-overflow") {
         kprintln!("[kernel] stack-overflow test: recursing");
         kprintln!("[kernel] ... {}", overflow_stack(0));

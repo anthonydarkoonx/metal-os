@@ -56,7 +56,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: usb-test usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: elf-boot-test usb-test usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -471,9 +471,10 @@ stack-guard: kernel disk
 	@out=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 out1=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow-core1,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 outb=$$(timeout 60 $(QEMU) -fw_cfg name=opt/metal/stack-overflow-bigframe,string=1 2>&1 | grep -a "stack overflow\|PANIC"); \
-	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0 and core 1 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$outb =="; exit 1; }
+	 out31=$$(timeout 90 $(QEMU) -machine virt,gic-version=3,iommu=smmuv3 -smp 32 -fw_cfg name=opt/metal/stack-overflow-core,string=31 2>&1 | grep -a "stack overflow\|PANIC"); \
+	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$out31" | grep -q "kernel stack overflow on core 31 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0, core 1 and core 31 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$out31 / $$outb =="; exit 1; }
 
-test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard fuzz usb-test usb-test-hub usb-test-noncoherent
+test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-noncoherent
 
 # Licensing hygiene: the ZSTD constants must equal RFC 8878's tables (needs network once).
 provenance-check:
@@ -536,3 +537,7 @@ usb-test-noncoherent: kernel disk
 usb-test-hub: kernel disk
 	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' hub
 	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_HUB_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10 -fw_cfg name=opt/metal/dma-noncoherent,string=1' hub
+
+# The ELF file instead of the flat Image: QEMU passes no device tree, so the kernel asks the firmware how many cores there are (8 here).
+elf-boot-test: kernel disk
+	@python3 tools/elf-boot-test.py '$(QEMU)'

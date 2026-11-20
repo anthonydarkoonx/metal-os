@@ -8,11 +8,11 @@ use crate::sync::Slots;
 use crate::trap::TrapFrame;
 use crate::{gic, kprintln, mmu, sched, timer};
 use core::arch::asm;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
-/// The most cores the kernel runs (the tables sized by it are small; the stacks are static: 80 KiB a core in the image's .bss). The machine's
-/// own number comes from its device tree (`platform::cpu_count`).
-pub const MAX_CPUS: usize = 16;
+/// The most cores the kernel runs: the tables sized by it are small, and the stacks are made from RAM when a core starts (the boot core's is in the image).
+/// The machine's own number comes from its device tree (`platform::cpu_count`). Masks of cores are 32 bits wide.
+pub const MAX_CPUS: usize = 32;
 const SGI_WAKE: u32 = 0;
 
 /// Cores sleeping in `idle()`.
@@ -87,18 +87,68 @@ extern "C" {
 
 static BOOT_FRAMES: Slots<TrapFrame, MAX_CPUS> = Slots::new([TrapFrame::ZERO; MAX_CPUS]);
 
-/// PSCI CPU_ON (the platform knows the conduit and how a core is numbered): the core starts at `_secondary_start`, its number as the context id.
-fn psci_cpu_on(core: usize) -> i64 {
+/// The top of each core's kernel stack and of its emergency stack (the one a stack overflow is reported on): `boot.S` reads these with the MMU on, for
+/// every core but the boot core, whose two are in the image.
+#[no_mangle]
+pub static CORE_STACK_TOP: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+#[no_mangle]
+pub static CORE_EMERG_TOP: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+/// Where each core's stack guard starts (`crate::mmu::KSTACK_GUARD` bytes, unmapped); 0 for a core that has none yet.
+pub static GUARD_START: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
+
+/// Pages of a core's memory: its emergency stack, the guard, then the stack (which grows down towards the guard).
+const EMERG_PAGES: usize = crate::mmu::KSTACK_EMERGENCY / crate::mem::PAGE;
+const GUARD_PAGES: usize = crate::mmu::KSTACK_GUARD / crate::mem::PAGE;
+const STACK_PAGES: usize = crate::mmu::KSTACK_SIZE / crate::mem::PAGE;
+
+/// Make `core`'s stacks out of RAM (the guard unmapped): the stack top. `None` if there is no room.
+fn make_stacks(core: usize) -> Option<usize> {
+    let pages = EMERG_PAGES + GUARD_PAGES + STACK_PAGES;
+    let base = crate::mem::alloc_contig(pages, crate::mem::OWNER_KERNEL)?;
+    // (the boot core zeroed the pages with its caches on; the new core starts with its MMU off, writes straight to memory and reads through its cache after it is on:
+    // the zeros must be in memory and no copy of them left in this core's cache)
+    crate::cache::clean(base, pages * crate::mem::PAGE);
+    crate::cache::invalidate(base, pages * crate::mem::PAGE);
+    let guard = base + EMERG_PAGES * crate::mem::PAGE;
+    if !crate::mmu::unmap_kernel_pages(guard, crate::mmu::KSTACK_GUARD) {
+        for p in 0..pages {
+            crate::mem::free(base + p * crate::mem::PAGE);
+        }
+        return None;
+    }
+    let top = guard + crate::mmu::KSTACK_GUARD + crate::mmu::KSTACK_SIZE;
+    CORE_STACK_TOP[core].store(top, Ordering::Relaxed);
+    CORE_EMERG_TOP[core].store(guard, Ordering::Relaxed);
+    GUARD_START[core].store(guard, Ordering::Relaxed);
+    Some(top)
+}
+
+/// PSCI CPU_ON (the platform knows the conduit and how a core is numbered): the core starts at `_secondary_start` with its stack top and number as the context id.
+fn psci_cpu_on(core: usize, stack_top: usize) -> i64 {
     // SAFETY: `_secondary_start` is the secondary cores' entry point.
-    unsafe { crate::platform::psci_cpu_on(core, _secondary_start as *const () as usize as u64) }
+    unsafe { crate::platform::psci_cpu_on(core, _secondary_start as *const () as usize as u64, (stack_top | core) as u64) }
 }
 
 /// Boot core: power up whatever other cores exist.
 pub fn start_secondaries() -> usize {
+    // (the device tree says how many cores there are; without one the firmware is asked about each in turn)
+    let want = crate::platform::cpu_count().unwrap_or_else(|| (1..MAX_CPUS).find(|&c| !crate::platform::psci_core_exists(c)).unwrap_or(MAX_CPUS)).min(MAX_CPUS);
+    // Every core's stacks first, while this is the only core running: making a stack guard can replace a 2 MiB block of the identity map (`mmu::unmap_kernel_pages`).
+    let mut tops = [0usize; MAX_CPUS];
+    let mut cores = want;
+    for core in 1..want {
+        match make_stacks(core) {
+            Some(t) => tops[core] = t,
+            None => {
+                kprintln!("[smp] no memory for core {core}'s stack");
+                cores = core;
+                break;
+            }
+        }
+    }
     let mut started = 0;
-    // (the device tree says how many cores there are; without one, ask until the firmware says there is no such core)
-    for core in 1..crate::platform::cpu_count().unwrap_or(MAX_CPUS) {
-        match psci_cpu_on(core) {
+    for core in 1..cores {
+        match psci_cpu_on(core, tops[core]) {
             0 => started += 1,
             -2 => break, // INVALID_PARAMETERS: no such core
             e => {
@@ -119,8 +169,8 @@ extern "C" fn secondary_main(core: usize) -> ! {
     mmu::enable_this_cpu();
     timer::init_core();
     ONLINE.fetch_or(1 << core, Ordering::Release);
-    if core == 1 && crate::OVERFLOW_ON_CORE1.load(Ordering::SeqCst) {
-        crate::kprintln!("[kernel] stack-overflow test on core 1: recursing");
+    if core == crate::OVERFLOW_ON_CORE.load(Ordering::SeqCst) {
+        crate::kprintln!("[kernel] stack-overflow test on core {core}: recursing");
         crate::kprintln!("[kernel] ... {}", crate::overflow_stack(0));
     }
     sched::set_current(core, usize::MAX);

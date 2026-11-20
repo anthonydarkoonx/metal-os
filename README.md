@@ -21,7 +21,7 @@ ported from Linux and U-Boot, is a separate GPL-2.0-only repository: [metal-os-r
 ## Layout
 | path | what |
 |---|---|
-| `kernel/` | boot, MMU, frame allocator, device-tree reader, GICv2/GICv3 + timer, SMP (up to 16 cores), scheduler, capabilities, IPC, async rings, syscalls, PCIe enumeration, SMMUv3 IOMMU |
+| `kernel/` | boot, MMU, frame allocator, device-tree reader, GICv2/GICv3 + timer, SMP (up to 32 cores), scheduler, capabilities, IPC, async rings, syscalls, PCIe enumeration, SMMUv3 IOMMU |
 | `user/` | one userspace image, role chosen at start: test conductor, IPC service, crashy demo driver, CPU-hog worker, virtio-blk driver, virtio-gpu display driver, virtio-input keyboard driver, screen task + shell, EROFS server, LFS server, VFS server, `prog`; per-task heap, ring library |
 | `tools/` | host tools: EROFS image builder (fallback), disk assembler (uses `mkfs.erofs` when present), post-run disk checker |
 | `libs/metal-lz4` | LZ4 block compress/decompress (interop-checked against the `lz4` CLI) |
@@ -75,7 +75,7 @@ retried), verifies every page afterwards, then repeats with synchronous compacti
 The number of task slots is chosen at boot (`task::tasks_for`): one per MiB of RAM, between 64 and 1024, or what the fw_cfg file `opt/metal/max-tasks` says. All per-task state (task records, saved registers, scheduler slots, spawn bookkeeping) is carved out of RAM at that size (`kernel/src/table.rs`), and so are the endpoint table (the 22 boot-time endpoints and `MAX_OWNED_EPS` = 4 for every task slot: 4118 at 1024 slots) and the memory-object table (64 boot-time entries and 8 for every slot, at least 192). The capability node pool holds 8192 nodes. Endpoint and object ids are 16 bits. `make scale` starts programs until all 997 free slots of a 1024-slot table are used (each holding 4 endpoints and 2 shared-memory objects), ends them together and checks that every frame, node and slot comes back.
 
 ## Scheduling, SMP and locking
-Cores come up through PSCI `CPU_ON` (up to 16; how many, and their MPIDRs, come from the device tree), each with its own stack, MMU setup and timer. There is
+Cores come up through PSCI `CPU_ON` (up to 32; how many, and their MPIDRs, come from the device tree), each with its own stack (made from RAM, with an unmapped guard below it), MMU setup and timer. There is
 **no global kernel lock**: kernel code on different cores runs in parallel.
 
 *Locks.* A small set of spinlocks, each with a *rank*; a core may only acquire a lock whose rank exceeds

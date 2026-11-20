@@ -41,11 +41,11 @@ pub trait IrqController {
 pub trait PowerControl {
     /// Switch the machine off (`reset` false) or restart it. Returns only if the firmware refused.
     fn power(reset: bool);
-    /// Start `core` at `entry` with `core` as its context id; the status the firmware returned (0 = started).
+    /// Start `core` at `entry` with `context` as its context id (the core's x0 at `entry`); the status the firmware returned (0 = started).
     ///
     /// # Safety
     /// `entry` must be the secondary core's entry point.
-    unsafe fn cpu_on(core: usize, entry: u64) -> i64;
+    unsafe fn cpu_on(core: usize, entry: u64, context: u64) -> i64;
 }
 
 /// The wall clock, if the machine has one.

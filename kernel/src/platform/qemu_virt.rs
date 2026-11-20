@@ -135,7 +135,10 @@ pub fn init_machine() {
     MPIDRS[0].store(boot, Ordering::Relaxed);
     CAPACITY[0].store(0, Ordering::Relaxed);
     NCPUS.store(0, Ordering::Relaxed);
-    let Some(m) = read_machine() else { return };
+    let Some(m) = read_machine() else {
+        probe_gic();
+        return;
+    };
     match m.gic {
         Some(Gic::V2 { dist, cpu }) => {
             gicv2::GICD_BASE.store(dist as usize, Ordering::Relaxed);
@@ -147,7 +150,7 @@ pub fn init_machine() {
             gicv3::GICR.store(redist as usize, Ordering::Relaxed);
             gicv3::GICR_SIZE.store(redist_size as usize, Ordering::Relaxed);
         }
-        None => {}
+        None => probe_gic(), // (a tree that does not describe the controller)
     }
     CONDUIT_SMC.store((m.conduit == Some(Conduit::Smc)) as u8, Ordering::Relaxed);
     // the cores: this one first (it is core 0 whatever its place in the tree), then the rest in tree order
@@ -167,11 +170,24 @@ pub fn init_machine() {
     NCPUS.store(if m.ncpus == 0 || !found_boot { 0 } else { n }, Ordering::Relaxed);
 }
 
+/// No tree (or none that names the interrupt controller): ask the controller itself. Both versions have the distributor at the same place on this machine.
+/// A GICv2's ID registers are in the last words of its 4 KiB (GICD_ICPIDR2 at 0xFE8, architecture revision in bits 7:4); a GICv3's are in the last words of
+/// 64 KiB (GICD_PIDR2 at 0xFFE8), and a GICv2 has nothing there (reading it is a bus error), so the v2 place is asked first.
+fn probe_gic() {
+    let base = gicv2::GICD_BASE.load(Ordering::Relaxed);
+    // SAFETY: both are read-only ID registers of the distributor, inside the device block `map_devices` maps; aligned volatile reads. The second is read
+    // only when the first does not say GICv2: then the distributor is a GICv3's, whose 64 KiB frame has the register.
+    let rev = |off: usize| unsafe { read_volatile((base + off) as *const u32) } >> 4 & 0xF;
+    if !matches!(rev(0xFE8), 1 | 2) && rev(0xFFE8) >= 3 {
+        GIC_VERSION.store(3, Ordering::Relaxed);
+    }
+}
+
 /// Without a tree: the cores the firmware started are the machine's cores (called once, after `start_secondaries`).
 pub fn set_cpu_count_if_unknown(n: usize) {
     if NCPUS.load(Ordering::Relaxed) == 0 {
         for i in 1..n.min(crate::smp::MAX_CPUS) {
-            MPIDRS[i].store(i as u64, Ordering::Relaxed); // (what `cpu_mpidr` answered for them while the count was unknown)
+            MPIDRS[i].store(guess_mpidr(i), Ordering::Relaxed); // (what `cpu_mpidr` answered for them while the count was unknown)
         }
         NCPUS.store(n.min(crate::smp::MAX_CPUS), Ordering::Relaxed);
     }
@@ -182,10 +198,15 @@ pub fn cpu_count() -> Option<usize> {
     Some(NCPUS.load(Ordering::Relaxed)).filter(|&n| n != 0)
 }
 
-/// Core `core`'s MPIDR affinity (the number PSCI and the interrupt controller name it by). Without a tree a core's number is its Aff0.
+/// QEMU's `virt` numbers cores 16 to a cluster (Aff0 = core % 16, Aff1 = core / 16), which is all that matters to a machine without a tree.
+fn guess_mpidr(core: usize) -> u64 {
+    ((core % 16) as u64) | ((core / 16) as u64) << 8
+}
+
+/// Core `core`'s MPIDR affinity (the number PSCI and the interrupt controller name it by). Without a tree it is guessed from the core's number (`guess_mpidr`).
 pub fn cpu_mpidr(core: usize) -> u64 {
     if NCPUS.load(Ordering::Relaxed) == 0 && core != 0 {
-        return core as u64;
+        return guess_mpidr(core);
     }
     MPIDRS[core].load(Ordering::Relaxed)
 }

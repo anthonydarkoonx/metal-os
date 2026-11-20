@@ -544,6 +544,7 @@ usb-test-hub: kernel disk
 usb-test-many: kernel disk
 	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_MANY_INPUT),$(QEMU)) -fw_cfg name=opt/metal/only,string=10' many
 
-# The ELF file instead of the flat Image: QEMU passes no device tree, so the kernel asks the firmware how many cores there are (8 here).
+# The ELF file instead of the flat Image: QEMU passes no device tree, so the kernel asks the firmware how many cores there are and the controller which GIC it is (GICv2 with 8 cores, GICv3 with 32).
 elf-boot-test: kernel disk
-	@python3 tools/elf-boot-test.py '$(QEMU)'
+	@python3 tools/elf-boot-test.py '$(QEMU)' 2
+	@python3 tools/elf-boot-test.py '$(QEMU)' 3

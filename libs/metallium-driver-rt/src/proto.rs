@@ -32,6 +32,29 @@ pub mod gpu {
     pub const GPU_FLUSH2: u64 = 34;
 }
 
+/// The data volume's lock (the data store server, role 6; the greeter and the other system tasks that hold its endpoint send these). Nothing else about the
+/// volume can be asked while it is locked: every file call is answered with `LOCKED`.
+pub mod volume {
+    /// Ask how the volume is: reply = [state, flags, 0]. `state`: see `state`. `flags`: bit 0 a passphrase opens it, bit 1 the machine's own secret opens it.
+    pub const LFS_STATUS: u64 = 120;
+    /// Unlock with a passphrase, sent in chunks of 16 bytes: `w[0]` = `LFS_UNLOCK | total length << 8 | offset << 24`, `w[1]`, `w[2]` = the 16 bytes at `offset`
+    /// (zero padded). Reply `[result, 0, 0]`: 0 unlocked, `MORE` send the next chunk, 1 wrong passphrase, 2 not locked, 5 malformed. At most 128 bytes.
+    pub const LFS_UNLOCK: u64 = 121;
+    /// Set (or change) the passphrase of an unlocked encrypted volume, in the same chunks. Reply 0 done, `MORE`, 2 the volume is not encrypted and unlocked, 5 malformed.
+    pub const LFS_SET_PASSPHRASE: u64 = 122;
+    /// Reply of a file call while the volume is locked or damaged.
+    pub const LOCKED: u64 = 10;
+    pub const MORE: u64 = 4;
+    pub mod state {
+        /// Not encrypted (a volume made before encryption existed, or by a machine that has no secret).
+        pub const PLAIN: u64 = 0;
+        pub const LOCKED: u64 = 1;
+        pub const UNLOCKED: u64 = 2;
+        /// Encrypted, but the store could not be read (a damaged volume is never formatted over).
+        pub const DAMAGED: u64 = 3;
+    }
+}
+
 /// The input driver (role 14): keyboard and pointer.
 pub mod input {
     /// Ask for pending characters: reply = [count, bytes 0..8 packed little-endian, bytes 8..16].

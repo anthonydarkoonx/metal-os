@@ -39,6 +39,8 @@ pub const HEAP_GROW: u64 = 15;
 pub const SYSINFO: u64 = 21;
 pub const CLOCK: u64 = 34;
 pub const GETRANDOM: u64 = 43;
+/// The machine's own secret (only the data store server may ask): 32 bytes in x1..x4.
+pub const DEVICE_SECRET: u64 = 46;
 /// Sleep for a number of microseconds, not rounded up to the scheduler tick.
 pub const SLEEP_US: u64 = 44;
 /// Set the wall clock to a Unix time in nanoseconds; only netd may.

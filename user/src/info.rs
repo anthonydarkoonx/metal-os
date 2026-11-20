@@ -76,6 +76,7 @@ pub fn info_task() -> ! {
         exit(1)
     }
     let fb = va(FB_VA) as *mut u32;
+    crate::greeter::unlock_screen(fb); // (an encrypted, locked data volume: ask for the passphrase before anything else)
     println!("[shell] waiting for the display tests to finish");
     loop {
         let m = recv(0);

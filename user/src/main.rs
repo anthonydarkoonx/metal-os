@@ -41,6 +41,7 @@ mod programs;
 mod info;
 mod kbd;
 mod xhci;
+mod greeter;
 mod logo;
 mod netd;
 mod netdrv;
@@ -116,6 +117,10 @@ fn client() -> ! {
         }
         9 => {
             programs::scale_tests(); // make scale: every slot of a table of 1024 tasks
+            exit(0)
+        }
+        11 => {
+            vfs::volume_test(); // make volume-test: the data volume's lock
             exit(0)
         }
         10 => {

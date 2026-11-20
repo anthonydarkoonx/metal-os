@@ -1,0 +1,121 @@
+//! The unlock screen: while the data volume is encrypted and locked the screen task shows this before anything else (and before the file system serves a byte
+//! of `/data`), reads the passphrase from the keyboard and sends it to the data store (`proto::volume`). A greeter of its own (a separate repository linked in
+//! with `GREETER=<path>`, docs/GREETER-INTERFACE.md) takes the place of this one; this is what a machine without one shows.
+use crate::font::{draw_text, fill_rect};
+use crate::gpu::{H, W};
+use crate::proto::gpu::GPU_FLUSH2;
+use crate::proto::input::{K_BACKSPACE, KBD_POLL};
+use crate::proto::volume::{state, LFS_STATUS, LFS_UNLOCK, MORE};
+use crate::*;
+
+/// The screen task's capability slots (`kernel/src/task.rs`): the display driver, the keyboard driver, the data store's endpoint.
+const SL_GPU: u64 = 1;
+const SL_KBD: u64 = 4;
+const SL_STORE: u64 = 30;
+
+/// How the volume is (`state`, flags), or `None` if the store cannot be asked.
+pub fn volume_status() -> Option<(u64, u64)> {
+    let (st, r) = call(SL_STORE, [LFS_STATUS, 0, 0]);
+    (st == 0).then_some((r[0], r[1]))
+}
+
+/// Send a passphrase in chunks of 16 bytes; the store's answer (0 unlocked, 1 wrong, ...).
+pub fn send_passphrase(word: &[u8]) -> u64 {
+    let mut last = 5;
+    for off in (0..word.len()).step_by(16) {
+        let mut chunk = [0u8; 16];
+        let n = (word.len() - off).min(16);
+        chunk[..n].copy_from_slice(&word[off..off + n]);
+        let w1 = u64::from_le_bytes(chunk[..8].try_into().unwrap());
+        let w2 = u64::from_le_bytes(chunk[8..].try_into().unwrap());
+        let (st, r) = call(SL_STORE, [LFS_UNLOCK | (word.len() as u64) << 8 | (off as u64) << 24, w1, w2]);
+        last = if st == 0 { r[0] } else { 100 };
+        if last != MORE {
+            break;
+        }
+    }
+    last
+}
+
+/// Draw the prompt: centred lines on a plain background.
+fn draw(fb: &mut [u32], typed: usize, message: &str) {
+    fill_rect(fb, W, 0, 0, W, H, 0x101820);
+    let scale = 3;
+    let line = |fb: &mut [u32], y: usize, color: u32, text: &str| {
+        let w = text.len() * 6 * scale;
+        draw_text(fb, W, W.saturating_sub(w) / 2, y, scale, color, text);
+    };
+    line(fb, H / 2 - 120, 0xE6EDF3, "Metallium-OS");
+    line(fb, H / 2 - 60, 0x8FA3B5, "The data volume is encrypted.");
+    let dots: alloc::string::String = core::iter::repeat('*').take(typed.min(40)).collect();
+    line(fb, H / 2, 0xE6EDF3, &alloc::format!("Passphrase: {dots}_"));
+    if !message.is_empty() {
+        line(fb, H / 2 + 70, 0xFF7B72, message);
+    }
+}
+
+fn present() {
+    let _ = call(SL_GPU, [GPU_FLUSH2, (W as u64) << 32 | (H as u64) << 48, 0]);
+}
+
+/// Returns at once unless the volume is locked; then asks for the passphrase until it opens. `fb` is the W x H scanout buffer.
+pub fn unlock_screen(fb: *mut u32) {
+    if volume_status().map_or(true, |(s, _)| s != state::LOCKED) {
+        return;
+    }
+    #[cfg(greeter)]
+    {
+        println!("[greeter] handing the screen to the greeter");
+        metallium_greeter_boot::metallium_greeter_run(SL_GPU, SL_KBD, SL_STORE, 2, 0xBC00_0000);
+        if volume_status().map_or(true, |(s, _)| s != state::LOCKED) {
+            return;
+        }
+        println!("[greeter] the greeter returned with the volume still locked: the built-in prompt follows");
+    }
+    // SAFETY: `fb` is the `W * H` scanout buffer the screen task mapped.
+    let fb = unsafe { core::slice::from_raw_parts_mut(fb, W * H) };
+    println!("[greeter] the data volume is locked: asking for the passphrase");
+    let mut word = alloc::vec::Vec::<u8>::new();
+    let mut message = "";
+    let mut shown = (usize::MAX, "x");
+    loop {
+        match volume_status() {
+            Some((s, _)) if s == state::LOCKED => {}
+            _ => break, // (opened, by someone else or by us)
+        }
+        if shown != (word.len(), message) {
+            draw(fb, word.len(), message);
+            present();
+            shown = (word.len(), message);
+        }
+        let (st, r) = call(SL_KBD, [KBD_POLL, 0, 0]);
+        let n = if st == 0 { r[0].min(16) } else { 0 };
+        if n == 0 {
+            sleep(1);
+            continue;
+        }
+        for i in 0..n {
+            let k = (r[1 + i as usize / 8] >> (8 * (i % 8))) as u8;
+            match k {
+                b'\r' | b'\n' => {
+                    let result = send_passphrase(&word);
+                    word.iter_mut().for_each(|b| *b = 0);
+                    word.clear();
+                    message = if result == 0 { "" } else { "Wrong passphrase" };
+                }
+                K_BACKSPACE | 0x7f => {
+                    word.pop();
+                    message = "";
+                }
+                c if (0x20..0x7f).contains(&c) && word.len() < 120 => {
+                    word.push(c);
+                    message = "";
+                }
+                _ => {}
+            }
+        }
+    }
+    fill_rect(fb, W, 0, 0, W, H, 0x101820);
+    present();
+    println!("[greeter] unlocked");
+}

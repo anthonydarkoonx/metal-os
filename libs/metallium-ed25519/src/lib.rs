@@ -138,6 +138,7 @@ fn compress(h: &mut [u64; 8], block: &[u8; 128]) {
 }
 
 /// Incremental SHA-512.
+#[derive(Clone)]
 pub struct Sha512 {
     h: [u64; 8],
     buf: [u8; 128],

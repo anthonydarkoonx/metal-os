@@ -922,6 +922,19 @@ pub fn vfs_server() -> ! {
             exit(1);
         }
     }
+    // an encrypted data volume waits for its key (the greeter asks the user for the passphrase): nothing is read from it, and so nothing is served, until it is open
+    let mut told = false;
+    loop {
+        let (st, r) = call(SL_LFS_EP, [proto::volume::LFS_STATUS, 0, 0]);
+        if st != 0 || r[0] != proto::volume::state::LOCKED {
+            break;
+        }
+        if !told {
+            println!("[vfs] /data is locked: waiting for the volume to be unlocked");
+            told = true;
+        }
+        sleep(10);
+    }
     let mut ds = Datafs::load();
     println!("[vfs] up: /system (EROFS, read-only), /data (log-structured, {} entries)", ds.ents.iter().filter(|e| e.ino != 0).count());
     let mut fds: Vec<Vec<Fd>> = (0..slots).map(|_| vec![Fd::Free; FDS]).collect();
@@ -1743,4 +1756,63 @@ pub fn vfs_tests() {
     let log = v.read_file("/data/program.log").unwrap_or_default();
     println!("[client] TEST VFS program task's files are visible to other tasks ({} bytes): {}", log.len(),
         verdict(seen && log == b"line 0\nline 1\nline 2\nline 3\n"));
+}
+
+/// `make volume-test` (`opt/metallium/only=11`): the conductor drives the data volume's lock the way a greeter does and keeps a marker file on it, so that a host script
+/// can boot one disk several times (with and without the machine's secret) and check what is on the disk and what can be read back. Prints `[vol] ...` lines.
+pub fn volume_test() {
+    use proto::volume::*;
+    const PHRASE: &[u8] = b"hunter2-correct horse";
+    const MARKER: &[u8] = b"TOP-SECRET-PAYLOAD-0123456789-metallium";
+    fn send(op: u64, word: &[u8]) -> u64 {
+        let mut last = 5;
+        for off in (0..word.len()).step_by(16) {
+            let mut chunk = [0u8; 16];
+            let n = (word.len() - off).min(16);
+            chunk[..n].copy_from_slice(&word[off..off + n]);
+            let w1 = u64::from_le_bytes(chunk[..8].try_into().unwrap());
+            let w2 = u64::from_le_bytes(chunk[8..].try_into().unwrap());
+            let (st, r) = call(7, [op | (word.len() as u64) << 8 | (off as u64) << 24, w1, w2]);
+            last = if st == 0 { r[0] } else { 100 };
+            if last != MORE {
+                break;
+            }
+        }
+        last
+    }
+    let (_, r) = call(7, [LFS_STATUS, 0, 0]);
+    println!("[vol] state {} flags {}", r[0], r[1]);
+    if r[0] == state::LOCKED {
+        println!("[vol] wrong passphrase: {}", send(LFS_UNLOCK, b"not the passphrase"));
+        println!("[vol] wrong long passphrase: {}", send(LFS_UNLOCK, &[b'x'; 100]));
+        println!("[vol] unlock: {}", send(LFS_UNLOCK, PHRASE));
+        let (_, r) = call(7, [LFS_STATUS, 0, 0]);
+        println!("[vol] state after unlock {} flags {}", r[0], r[1]);
+    }
+    let (_, r) = call(7, [LFS_STATUS, 0, 0]);
+    if r[0] != state::UNLOCKED && r[0] != state::PLAIN {
+        println!("[vol] volume stays shut (state {})", r[0]);
+        return;
+    }
+    let flags = r[1];
+    let m = mem_map(10, C_VFS_SHM, true);
+    if m != 0 && m != E_INVAL {
+        println!("[vol] cannot map the VFS page");
+        return;
+    }
+    let v = Vfs::new(9, C_VFS_SHM);
+    match v.read_file("/data/secret.txt") {
+        Ok(b) if b == MARKER => println!("[vol] marker read back: OK"),
+        Ok(_) => println!("[vol] marker read back: WRONG CONTENT"),
+        Err(_) => {
+            let w = v.write_file("/data/secret.txt", MARKER);
+            let (_, _) = call(9, [59, 0, 0]); // V_SYNC
+            println!("[vol] marker written: {}", if w.is_ok() { "OK" } else { "FAILED" });
+        }
+    }
+    if r[0] == state::UNLOCKED && flags & 1 == 0 {
+        println!("[vol] set passphrase: {}", send(LFS_SET_PASSPHRASE, PHRASE));
+    }
+    // a file call while open must still work after all this
+    println!("[vol] done");
 }

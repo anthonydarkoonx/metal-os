@@ -3,11 +3,30 @@
 version = 4
 
 [[package]]
+name = "metallium-aead"
+version = "0.1.0"
+dependencies = [
+ "metallium-rand",
+]
+
+[[package]]
 name = "metallium-compact"
 version = "0.1.0"
 
 [[package]]
+name = "metallium-crypt"
+version = "0.1.0"
+dependencies = [
+ "metallium-aead",
+ "metallium-ed25519",
+]
+
+[[package]]
 name = "metallium-driver-rt"
+version = "0.1.0"
+
+[[package]]
+name = "metallium-ed25519"
 version = "0.1.0"
 
 [[package]]
@@ -47,6 +66,10 @@ name = "metallium-net"
 version = "0.1.0"
 
 [[package]]
+name = "metallium-rand"
+version = "0.1.0"
+
+[[package]]
 name = "metallium-usb"
 version = "0.1.0"
 
@@ -55,6 +78,7 @@ name = "metallium-user"
 version = "0.1.0"
 dependencies = [
  "metallium-compact",
+ "metallium-crypt",
  "metallium-driver-rt",
  "metallium-edit",
  "metallium-erofs",

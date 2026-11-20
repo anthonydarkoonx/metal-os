@@ -15,6 +15,13 @@ for s in range(100, 108):
 if struct.unpack_from("<I", sec(1024 + 2), 0)[0] != 0xE0F5E1E2:  # superblock at byte 1024
     sys.exit("disk check FAILED: system partition clobbered")
 LFS = 13312
+if sec(LFS, 8)[:8] == b"MTLMVOL1":
+    # an encrypted volume: its checkpoints are ciphertext; what can be checked from outside is that the header is there and nothing readable is on the volume
+    body = sec(LFS + 8, 9 * 8)
+    if b"MTLMCKPT" in body or struct.pack("<I", 0x4D434B50) in body[:4]:
+        sys.exit("disk check FAILED: a plain checkpoint on an encrypted volume")
+    print("host-side disk check: scratch data and EROFS partition intact; the data partition is an encrypted volume (header present, first store blocks are not plain checkpoints)")
+    sys.exit(0)
 seqs = []
 for slot in (0, 1):
     f.seek(LFS * 512 + slot * 4096)

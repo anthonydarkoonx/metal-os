@@ -423,6 +423,9 @@ fn boot_caps(t: &mut Task, tid: usize, role: u8) {
             install(t, tid, 4, Kind::Endpoint, ipc::EP_KBD, R_SEND);
             install(t, tid, 5, Kind::Endpoint, ipc::EP_VFS, R_SEND);
             install(t, tid, 6, Kind::Memory, obj::OBJ_SHM_VFS_SHELL, R_MAP | R_WRITE);
+            // the right to unlock the encrypted data volume (the greeter asks for the passphrase and sends it here; the store accepts only the lock's calls from a task that
+            // has no file page of its own, so this is no access to the files)
+            install(t, tid, 30, Kind::Endpoint, ipc::EP_LFS, R_SEND);
             // the shell starts programs, with file access and a standard-output endpoint it creates itself
             install(t, tid, 8, Kind::Spawn, 0, R_SPAWN | R_SPAWN_FS | R_SPAWN_NET | R_GRANT); // (grant: the console hands them on to the programs that start programs)
             install(t, tid, 9, Kind::Factory, 0, R_EP_CREATE | R_GRANT);

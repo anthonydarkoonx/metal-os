@@ -9,6 +9,7 @@ license = "Apache-2.0 OR MIT"
 [dependencies]
 metallium-erofs = { path = "../libs/metallium-erofs" }
 metallium-lfs = { path = "../libs/metallium-lfs" }
+metallium-crypt = { path = "../libs/metallium-crypt" }
 metallium-loader = { path = "../libs/metallium-loader" }
 metallium-net = { path = "../libs/metallium-net" }
 metallium-gfx = { path = "../libs/metallium-gfx" }
@@ -35,7 +36,7 @@ panic = "abort"
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # `desktop` is set by the Makefile when the image is built with a desktop (DESKTOP=<path>)
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(desktop)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(desktop)', 'cfg(greeter)'] }
 
 [lints.clippy]
 undocumented_unsafe_blocks = "deny"

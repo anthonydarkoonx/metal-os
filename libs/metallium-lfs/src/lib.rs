@@ -153,7 +153,11 @@ impl<D: BlockDev> Lfs<D> {
         let mut best: Option<(u64, [u8; BS])> = None;
         for slot in 0..2 {
             let mut b = [0u8; BS];
-            dev.read(slot, &mut b)?;
+            match dev.read(slot, &mut b) {
+                Ok(()) => {}
+                Err(Error::Corrupt) => continue, // (a torn or blank block of an encrypted volume: the other checkpoint may be good)
+                Err(e) => return Err(e),
+            }
             if rd32(&b, 0) == CP_MAGIC && sealed_ok(&b) {
                 let seq = rd64(&b, 4);
                 if best.as_ref().map_or(true, |(s, _)| seq > *s) {

@@ -34,6 +34,7 @@ const LFS_FAIL_GET: u64 = 46; // test hook: the next LFS_GET reports an I/O erro
 /// nothing synced) if this is not that instance: a client that staged blocks with a predecessor must not be told
 /// they are durable because the successor had nothing to sync.
 const LFS_EPOCH: u64 = 47;
+use metallium_driver_rt::proto::volume::{state, LFS_SET_PASSPHRASE, LFS_STATUS, LFS_UNLOCK, LOCKED, MORE};
 const DATA_OFF: usize = 256;
 
 const SERVER_BUF_VA: usize = 0x8022_0000;
@@ -57,8 +58,15 @@ impl BlkDev {
         if blk >= self.blocks {
             return Err(());
         }
+        self.xfer_at(op, blk * 8, 8)
+    }
+    /// `count` sectors from sector `sector` of this partition, through the driver's buffer (at its start).
+    fn xfer_at(&self, op: u64, sector: u64, count: u64) -> Result<(), ()> {
+        if sector + count > self.blocks * 8 {
+            return Err(());
+        }
         for _ in 0..8 {
-            let (st, r) = call(self.ep, [op, self.base + blk * 8, 8]);
+            let (st, r) = call(self.ep, [op, self.base + sector, count]);
             if st == E_DEAD {
                 sleep(2);
                 continue;
@@ -66,6 +74,18 @@ impl BlkDev {
             return if st == 0 && r[0] == 0 { Ok(()) } else { Err(()) };
         }
         Err(())
+    }
+    /// 4096 bytes at sector `sector` (not a multiple of 8: the encrypted volume's blocks are 9 sectors apart).
+    fn read_block_at(&self, sector: u64, out: &mut [u8; 4096]) -> Result<(), ()> {
+        self.xfer_at(BLK_READ, sector, 8)?;
+        // SAFETY: as in `read_block`.
+        unsafe { core::ptr::copy_nonoverlapping(self.buf as *const u8, out.as_mut_ptr(), 4096) };
+        Ok(())
+    }
+    fn write_block_at(&self, sector: u64, data: &[u8; 4096]) -> Result<(), ()> {
+        // SAFETY: as in `write_block`.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), self.buf as *mut u8, 4096) };
+        self.xfer_at(BLK_WRITE, sector, 8)
     }
     fn read_block(&self, blk: u64, out: &mut [u8; 4096]) -> Result<(), ()> {
         self.xfer(BLK_READ, blk)?;
@@ -90,6 +110,191 @@ impl metallium_lfs::BlockDev for BlkDev {
     fn write(&mut self, blk: u64, buf: &[u8; 4096]) -> Result<(), metallium_lfs::Error> {
         self.write_block(blk, buf).map_err(|_| metallium_lfs::Error::Io)
     }
+}
+
+// ---------------------------------------------------------------------------
+// the encrypted data volume
+// ---------------------------------------------------------------------------
+// Layout of an encrypted volume (sectors of the data partition): the volume header (`metallium-crypt`, one 4 KiB block: key slots) at 0..8; then every block of
+// the store takes 9 sectors: its 4096 bytes of ciphertext and, in a sector of its own, the nonce and tag. The store above sees plain 4 KiB blocks.
+const HEADER_SECTORS: u64 = 8;
+const PBKDF2_ITERATIONS: u32 = 100_000;
+
+fn random_bytes(out: &mut [u8]) -> bool {
+    let mut at = 0;
+    while at < out.len() {
+        let r = svc(GETRANDOM, 0, 0, 0, 0, 0);
+        if r[0] as i64 != 0 {
+            return false;
+        }
+        for w in &r[1..6] {
+            for b in w.to_le_bytes() {
+                if at < out.len() {
+                    out[at] = b;
+                    at += 1;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// The machine's own secret, if it has one and this task may ask.
+fn device_secret() -> Option<[u8; 32]> {
+    let r = svc(DEVICE_SECRET, 0, 0, 0, 0, 0);
+    if r[0] as i64 != 0 {
+        return None;
+    }
+    let mut s = [0u8; 32];
+    for i in 0..4 {
+        s[i * 8..i * 8 + 8].copy_from_slice(&r[i + 1].to_le_bytes());
+    }
+    Some(s)
+}
+
+#[derive(Clone, Copy)]
+struct EncDev {
+    raw: BlkDev,
+    key: [u8; 32],
+    id: [u8; 16],
+}
+
+impl EncDev {
+    fn first(&self, blk: u64) -> u64 {
+        HEADER_SECTORS + 9 * blk
+    }
+}
+
+impl metallium_lfs::BlockDev for EncDev {
+    fn blocks(&self) -> u64 {
+        (self.raw.blocks * 8).saturating_sub(HEADER_SECTORS) / 9
+    }
+    fn read(&self, blk: u64, out: &mut [u8; 4096]) -> Result<(), metallium_lfs::Error> {
+        use metallium_lfs::Error;
+        if blk >= self.blocks() {
+            return Err(Error::Io);
+        }
+        let at = self.first(blk);
+        let mut meta = [0u8; metallium_crypt::META_LEN];
+        self.raw.xfer_at(BLK_READ, at + 8, 1).map_err(|_| Error::Io)?;
+        // SAFETY: `raw.buf` is this server's mapped 4096-byte driver buffer; the one-sector transfer has finished and wrote the first 512 bytes.
+        unsafe { core::ptr::copy_nonoverlapping(self.raw.buf as *const u8, meta.as_mut_ptr(), meta.len()) };
+        self.raw.read_block_at(at, out).map_err(|_| Error::Io)?;
+        // (a block that was never written, or was torn, or was changed, does not open: the store above treats that as a block that is not valid)
+        if metallium_crypt::open_block(&self.key, &self.id, blk, &meta, out) {
+            Ok(())
+        } else {
+            out.fill(0);
+            Err(Error::Corrupt)
+        }
+    }
+    fn write(&mut self, blk: u64, buf: &[u8; 4096]) -> Result<(), metallium_lfs::Error> {
+        use metallium_lfs::Error;
+        if blk >= self.blocks() {
+            return Err(Error::Io);
+        }
+        let mut nonce = [0u8; 12];
+        if !random_bytes(&mut nonce) {
+            return Err(Error::Io); // (no secure random numbers: nothing is written that could repeat a nonce)
+        }
+        let mut data = *buf;
+        let meta = metallium_crypt::seal_block(&self.key, &self.id, blk, nonce, &mut data);
+        let at = self.first(blk);
+        self.raw.write_block_at(at, &data).map_err(|_| Error::Io)?;
+        // SAFETY: as above: the driver's buffer; the sector is written with the metadata first and zeros after it.
+        unsafe {
+            core::ptr::write_bytes(self.raw.buf as *mut u8, 0, 512);
+            core::ptr::copy_nonoverlapping(meta.as_ptr(), self.raw.buf as *mut u8, meta.len());
+        }
+        self.raw.xfer_at(BLK_WRITE, at + 8, 1).map_err(|_| Error::Io)
+    }
+}
+
+/// The store's device: the partition as it is, or the encrypted view of it.
+#[derive(Clone, Copy)]
+enum VolDev {
+    Plain(BlkDev),
+    Enc(EncDev),
+}
+
+impl metallium_lfs::BlockDev for VolDev {
+    fn blocks(&self) -> u64 {
+        match self {
+            VolDev::Plain(d) => d.blocks(),
+            VolDev::Enc(d) => d.blocks(),
+        }
+    }
+    fn read(&self, blk: u64, buf: &mut [u8; 4096]) -> Result<(), metallium_lfs::Error> {
+        match self {
+            VolDev::Plain(d) => d.read(blk, buf),
+            VolDev::Enc(d) => d.read(blk, buf),
+        }
+    }
+    fn write(&mut self, blk: u64, buf: &[u8; 4096]) -> Result<(), metallium_lfs::Error> {
+        match self {
+            VolDev::Plain(d) => d.write(blk, buf),
+            VolDev::Enc(d) => d.write(blk, buf),
+        }
+    }
+}
+
+type Store = metallium_lfs::Lfs<VolDev>;
+
+/// What the data volume is right now.
+enum Vol {
+    /// Not encrypted.
+    Plain(Store),
+    /// Encrypted and locked: the header, and what has been typed so far.
+    Locked { header: Box<[u8; metallium_crypt::HEADER_LEN]> },
+    /// Encrypted and open.
+    Open { fs: Store, header: Box<[u8; metallium_crypt::HEADER_LEN]>, key: [u8; 32] },
+    /// Encrypted, but the store does not read: it is never formatted over.
+    Damaged,
+}
+
+impl Vol {
+    fn store(&mut self) -> Option<&mut Store> {
+        match self {
+            Vol::Plain(fs) | Vol::Open { fs, .. } => Some(fs),
+            _ => None,
+        }
+    }
+}
+
+/// Make an encrypted volume on a blank partition: a fresh key, the header with one slot for the machine's secret, and an empty store.
+fn create_encrypted(raw: BlkDev, secret: &[u8; 32]) -> Option<Vol> {
+    let (mut id, mut key, mut salt, mut nonce) = ([0u8; 16], [0u8; 32], [0u8; 32], [0u8; 12]);
+    if !(random_bytes(&mut id) && random_bytes(&mut key) && random_bytes(&mut salt) && random_bytes(&mut nonce)) {
+        return None;
+    }
+    let mut header = Box::new(metallium_crypt::new_header(id));
+    metallium_crypt::set_slot(&mut header, 0, metallium_crypt::Kind::Device, secret, 1, salt, nonce, &key);
+    // the store first, then the header that makes the volume exist: a crash in between leaves a blank partition, not half a volume
+    let dev = VolDev::Enc(EncDev { raw, key, id });
+    let fs = metallium_lfs::Lfs::format(dev).ok()?;
+    raw.write_block(0, &header).ok()?;
+    Some(Vol::Open { fs, header, key })
+}
+
+/// Mount an encrypted volume whose key is known.
+fn open_encrypted(raw: BlkDev, header: Box<[u8; metallium_crypt::HEADER_LEN]>, key: [u8; 32]) -> Vol {
+    let dev = VolDev::Enc(EncDev { raw, key, id: metallium_crypt::volume_id(&header) });
+    match metallium_lfs::Lfs::mount(dev) {
+        Ok(fs) => Vol::Open { fs, header, key },
+        Err(_) => Vol::Damaged,
+    }
+}
+
+fn flags_of(header: &[u8; metallium_crypt::HEADER_LEN]) -> u64 {
+    let mut f = 0;
+    for i in 0..metallium_crypt::SLOTS {
+        match metallium_crypt::slot_kind(header, i) {
+            Some(metallium_crypt::Kind::Passphrase) => f |= 1,
+            Some(metallium_crypt::Kind::Device) => f |= 2,
+            None => {}
+        }
+    }
+    f
 }
 
 /// EROFS byte source with a one-block cache.
@@ -214,29 +419,70 @@ pub fn lfs_server() -> ! {
         (0, r) if r[0] >= LFS_BASE + 4096 => r[0] - LFS_BASE,
         _ => LFS_SECTORS,
     };
-    let dev = BlkDev { ep: 1, buf: va(SERVER_BUF_VA), base: LFS_BASE, blocks: sectors / 8 };
+    let raw = BlkDev { ep: 1, buf: va(SERVER_BUF_VA), base: LFS_BASE, blocks: sectors / 8 };
     println!("[lfs] data partition: {} KiB", sectors / 2);
-    let mut fs = match metallium_lfs::Lfs::mount(dev) {
-        Ok(fs) => {
-            println!("[lfs] mounted existing store: {} blocks live", fs.len());
-            fs
+    let secret = device_secret();
+    let mut header0 = Box::new([0u8; metallium_crypt::HEADER_LEN]);
+    let encrypted = raw.read_block(0, &mut header0).is_ok() && metallium_crypt::is_header(&header0[..]);
+    let mut vol = if encrypted {
+        // an encrypted volume: the machine's own secret opens it if it can; otherwise it waits for a passphrase (`LFS_UNLOCK`)
+        match secret.and_then(|s| metallium_crypt::unlock(&header0, metallium_crypt::Kind::Device, &s)) {
+            Some(key) => {
+                println!("[lfs] encrypted volume opened with the machine's secret");
+                open_encrypted(raw, header0, key)
+            }
+            None => {
+                println!("[lfs] encrypted volume: locked, waiting for a passphrase");
+                Vol::Locked { header: header0 }
+            }
         }
-        Err(_) => match metallium_lfs::Lfs::format(dev) {
+    } else {
+        match metallium_lfs::Lfs::mount(VolDev::Plain(raw)) {
             Ok(fs) => {
-                println!("[lfs] no valid checkpoint: formatted fresh store");
-                fs
+                println!("[lfs] mounted existing store: {} blocks live (not encrypted)", fs.len());
+                Vol::Plain(fs)
             }
-            Err(e) => {
-                println!("[lfs] format failed: {e:?}");
-                exit(1)
+            Err(_) => {
+                // a blank partition: a machine with a secret of its own gets an encrypted volume (by default), any other a plain one as before
+                match secret.and_then(|s| create_encrypted(raw, &s)) {
+                    Some(v) => {
+                        println!("[lfs] no valid store: made an encrypted volume (machine secret)");
+                        v
+                    }
+                    None => match metallium_lfs::Lfs::format(VolDev::Plain(raw)) {
+                        Ok(fs) => {
+                            println!("[lfs] no valid checkpoint: formatted fresh store");
+                            Vol::Plain(fs)
+                        }
+                        Err(e) => {
+                            println!("[lfs] format failed: {e:?}");
+                            exit(1)
+                        }
+                    },
+                }
             }
-        },
+        }
     };
+    if let Vol::Open { fs, .. } = &vol {
+        println!("[lfs] encrypted store: {} blocks live", fs.len());
+    }
+    let mut pass = [0u8; 128];
+    let mut pass_len = 0usize;
     let mut tmp = Box::new([0u8; 4096]);
     let mut fail_get = false;
     let epoch = ticks() + 1;
     loop {
         let m = recv(0);
+        // the lock's own calls (any holder of the endpoint; nothing here touches the files)
+        let op = m.w[0] & 0xFF;
+        if matches!(op, LFS_STATUS | LFS_UNLOCK | LFS_SET_PASSPHRASE) {
+            reply(volume_call(&mut vol, raw, op, &m, &mut pass, &mut pass_len));
+            continue;
+        }
+        let Some(fs) = vol.store() else {
+            reply([LOCKED, 0, 0]);
+            continue;
+        };
         let key = m.w[1];
         let Some(sh) = shm_for(m.sender) else {
             reply([9, 0, 0]);
@@ -294,6 +540,80 @@ pub fn lfs_server() -> ! {
             }
         }
     }
+}
+
+/// The lock's calls: status, unlock with a passphrase, set a passphrase. The passphrase comes in 16-byte chunks (`proto::volume`).
+fn volume_call(vol: &mut Vol, raw: BlkDev, op: u64, m: &Msg, pass: &mut [u8; 128], pass_len: &mut usize) -> [u64; 3] {
+    if op == LFS_STATUS {
+        return match vol {
+            Vol::Plain(_) => [state::PLAIN, 0, 0],
+            Vol::Locked { header } => [state::LOCKED, flags_of(header), 0],
+            Vol::Open { header, .. } => [state::UNLOCKED, flags_of(header), 0],
+            Vol::Damaged => [state::DAMAGED, 0, 0],
+        };
+    }
+    // chunks of a passphrase
+    let (total, offset) = (((m.w[0] >> 8) & 0xFFFF) as usize, ((m.w[0] >> 24) & 0xFFFF) as usize);
+    let usable = match (op, &*vol) {
+        (LFS_UNLOCK, Vol::Locked { .. }) => true,
+        (LFS_SET_PASSPHRASE, Vol::Open { .. }) => true,
+        _ => false,
+    };
+    if !usable {
+        *pass_len = 0;
+        pass.fill(0);
+        return [2, 0, 0];
+    }
+    if offset == 0 {
+        *pass_len = 0; // (a new passphrase starts: whatever an earlier, unfinished one left is dropped)
+    }
+    if total == 0 || total > pass.len() || offset % 16 != 0 || offset >= total || offset != *pass_len {
+        *pass_len = 0;
+        pass.fill(0);
+        return [5, 0, 0];
+    }
+    let mut chunk = [0u8; 16];
+    chunk[..8].copy_from_slice(&m.w[1].to_le_bytes());
+    chunk[8..].copy_from_slice(&m.w[2].to_le_bytes());
+    let n = (total - offset).min(16);
+    pass[offset..offset + n].copy_from_slice(&chunk[..n]);
+    *pass_len = offset + n;
+    if *pass_len < total {
+        return [MORE, 0, 0];
+    }
+    let word: alloc::vec::Vec<u8> = pass[..total].to_vec();
+    pass.fill(0);
+    *pass_len = 0;
+    let result = if op == LFS_UNLOCK {
+        let Vol::Locked { header } = vol else { return [2, 0, 0] };
+        match metallium_crypt::unlock(header, metallium_crypt::Kind::Passphrase, &word) {
+            Some(key) => {
+                let header = core::mem::replace(header, Box::new([0u8; metallium_crypt::HEADER_LEN]));
+                *vol = open_encrypted(raw, header, key);
+                println!("[lfs] volume unlocked");
+                0
+            }
+            None => 1,
+        }
+    } else {
+        let Vol::Open { header, key, .. } = vol else { return [2, 0, 0] };
+        let (mut salt, mut nonce) = ([0u8; 32], [0u8; 12]);
+        if !(random_bytes(&mut salt) && random_bytes(&mut nonce)) {
+            return [5, 0, 0];
+        }
+        // the slot that already holds a passphrase, else the first empty one
+        let slot = (0..metallium_crypt::SLOTS)
+            .find(|&i| metallium_crypt::slot_kind(header, i) == Some(metallium_crypt::Kind::Passphrase))
+            .or_else(|| (0..metallium_crypt::SLOTS).find(|&i| metallium_crypt::slot_kind(header, i).is_none()));
+        match slot {
+            Some(i) => {
+                metallium_crypt::set_slot(header, i, metallium_crypt::Kind::Passphrase, &word, PBKDF2_ITERATIONS, salt, nonce, key);
+                if raw.write_block(0, header).is_ok() { 0 } else { 5 }
+            }
+            None => 5,
+        }
+    };
+    [result, 0, 0]
 }
 
 // ---------------------------------------------------------------------------

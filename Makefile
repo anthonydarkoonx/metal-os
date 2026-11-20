@@ -37,8 +37,10 @@ QEMU_DEV := -drive if=none,id=d0,file=$(DISK),format=raw -device virtio-blk-pci,
             -device virtio-rng-pci,disable-legacy=on,iommu_platform=on
 # (a fresh 32 random bytes for every make run: the kernel mixes them into its layout generator, see kernel/src/rand.rs)
 SEED_FILE := $(shell head -c 32 /dev/urandom > build-seed.bin && echo build-seed.bin)
+# (more QEMU options for a run, e.g. `make qemu-test QEMU_EXTRA='-fw_cfg name=opt/metallium/device-secret,file=build-device-secret.bin'`)
+QEMU_EXTRA ?=
 QEMU     := qemu-system-aarch64 -fw_cfg name=opt/metallium/seed,file=$(SEED_FILE) -machine virt,gic-version=$(GIC),iommu=smmuv3 -cpu max -smp $(SMP) -m $(RAM_MIB)M -fw_cfg name=opt/metallium/ram-bytes,string=$(shell echo $$(( $(RAM_MIB) * 1048576 ))) \
-            -nographic -semihosting $(QEMU_DEV) -kernel $(KERNEL_BIN)
+            -nographic -semihosting $(QEMU_DEV) $(QEMU_EXTRA) -kernel $(KERNEL_BIN)
 
 # The command line the tests use (for the scripts in tools/ that start the guest themselves)
 print-qemu:
@@ -58,7 +60,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -71,7 +73,7 @@ DESKTOP_DIR := $(abspath $(DESKTOP))
 DESKTOP_OUT := $(DESKTOP_DIR)/target-metallium-os/$(TARGET)/release
 DESKTOP_REPO := "https://github.com/anthonydarkoonx/metallium-os"
 # (the desktop's dependencies sit in `deps/` or, with newer cargo, in `build/<crate>/<hash>/out/`: every such directory is searched)
-USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic --cfg desktop --extern metallium_desktop_boot=$(DESKTOP_OUT)/libmetallium_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)"
+DESKTOP_FLAGS := --cfg desktop --extern metallium_desktop_boot=$(DESKTOP_OUT)/libmetallium_desktop_boot.rlib $$(for d in $(DESKTOP_OUT)/deps $(DESKTOP_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)
 # The desktop's programs: its `os/` workspace builds them as position-independent programs; they are signed and put in the system image by
 # tools/mkmap.py (METALLIUM_EXTRA_PACKAGES) and installed by default through `/etc/program-defaults`.
 DESKTOP_PKG := $(DESKTOP_DIR)/target-metallium-os/pkg
@@ -97,6 +99,26 @@ desktop-lib:
 	  --config 'patch.$(DESKTOP_REPO).metallium-gfx.path="$(CURDIR)/libs/metallium-gfx"'; rc=$$?; \
 	  mv $(DESKTOP_DIR)/Cargo.lock.metallium-os-bak $(DESKTOP_DIR)/Cargo.lock; exit $$rc
 user: desktop-lib
+endif
+
+# A greeter can take over the screen while the encrypted data volume is locked (docs/GREETER-INTERFACE.md): `make run-window GREETER=../greeter` builds that
+# repository's `metallium-greeter-boot` crate and links it into the screen task. Without GREETER the built-in text prompt asks for the passphrase.
+GREETER ?=
+ifneq ($(GREETER),)
+GREETER_DIR := $(abspath $(GREETER))
+GREETER_OUT := $(GREETER_DIR)/target-metallium-os/$(TARGET)/release
+GREETER_REPO := "https://github.com/anthonydarkoonx/metallium-os"
+GREETER_FLAGS := --cfg greeter --extern metallium_greeter_boot=$(GREETER_OUT)/libmetallium_greeter_boot.rlib $$(for d in $(GREETER_OUT)/deps $(GREETER_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)
+greeter-lib:
+	cp -f $(GREETER_DIR)/Cargo.lock $(GREETER_DIR)/Cargo.lock.metallium-os-bak 2>/dev/null || true
+	cd $(GREETER_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metallium-greeter-boot --target-dir target-metallium-os --config 'profile.release.lto="fat"' \
+	  --config 'patch.$(GREETER_REPO).metallium-driver-rt.path="$(CURDIR)/libs/metallium-driver-rt"' \
+	  --config 'patch.$(GREETER_REPO).metallium-gfx.path="$(CURDIR)/libs/metallium-gfx"'; rc=$$?; \
+	  if [ -f $(GREETER_DIR)/Cargo.lock.metallium-os-bak ]; then mv $(GREETER_DIR)/Cargo.lock.metallium-os-bak $(GREETER_DIR)/Cargo.lock; fi; exit $$rc
+user: greeter-lib
+endif
+ifneq ($(DESKTOP)$(GREETER),)
+USER_RUSTFLAGS := RUSTFLAGS="-C relocation-model=pic $(DESKTOP_FLAGS) $(GREETER_FLAGS)"
 endif
 
 user:
@@ -476,7 +498,7 @@ stack-guard: kernel disk
 	 out31=$$(timeout 90 $(QEMU) -machine virt,gic-version=3,iommu=smmuv3 -smp 32 -fw_cfg name=opt/metallium/stack-overflow-core,string=31 2>&1 | grep -a "stack overflow\|PANIC"); \
 	 echo "$$out" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "$$out1" | grep -q "kernel stack overflow on core 1 (guard page hit" && echo "$$out31" | grep -q "kernel stack overflow on core 31 (guard page hit" && echo "$$outb" | grep -q "kernel stack overflow on core 0 (guard page hit" && echo "== STACK GUARD: ALL PASS (core 0, core 1 and core 31 report the overflow, a frame bigger than the guard too) ==" || { echo "== STACK GUARD: FAILED: $$out / $$out1 / $$out31 / $$outb =="; exit 1; }
 
-test: host-test erofs-check map-check qemu-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-many usb-test-noncoherent
+test: host-test erofs-check map-check qemu-test qemu-test-encrypted volume-test qemu-test-up qemu-test-noncoherent aslr-replay entropy kaslr service-maps stack-guard elf-boot-test fuzz usb-test usb-test-hub usb-test-many usb-test-noncoherent
 
 # Licensing hygiene: the ZSTD constants must equal RFC 8878's tables (needs network once).
 provenance-check:
@@ -543,6 +565,15 @@ usb-test-hub: kernel disk
 # ... and with ten devices (hub with seven keyboards)
 usb-test-many: kernel disk
 	@python3 tools/usb-test.py '$(subst $(QEMU_INPUT),$(QEMU_USB_MANY_INPUT),$(QEMU)) -fw_cfg name=opt/metallium/only,string=10' many
+
+# The whole integration suite with the data volume encrypted (a machine secret makes the blank disk an encrypted volume): file system, crash recovery, cleaning, everything
+qemu-test-encrypted: kernel disk
+	@head -c 32 /dev/urandom > build-device-secret.bin
+	@$(MAKE) --no-print-directory qemu-test QEMU_EXTRA='-fw_cfg name=opt/metallium/device-secret,file=build-device-secret.bin' 2>&1 | tee build-encrypted.log | grep -E "encrypted|INTEGRATION" ; grep -q "ALL PASS" build-encrypted.log && grep -q "made an encrypted volume" build-encrypted.log; rc=$$?; rm -f build-device-secret.bin; exit $$rc
+
+# The data volume's encryption end to end: one disk booted five times (see tools/volume-test.py)
+volume-test: kernel disk
+	@python3 tools/volume-test.py '$(QEMU)'
 
 # The ELF file instead of the flat Image: QEMU passes no device tree, so the kernel asks the firmware how many cores there are and the controller which GIC it is (GICv2 with 8 cores, GICv3 with 32).
 elf-boot-test: kernel disk

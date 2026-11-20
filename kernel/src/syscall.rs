@@ -90,6 +90,9 @@ pub const SLEEP_US: u64 = 44;
 /// SETTIME(unix_ns): set the wall clock (a machine without a battery-backed clock: the network service sets it from NTP). Only the network service
 /// (role 19) may; the value must lie between 2024 and 2100.
 pub const SETTIME: u64 = 45;
+/// DEVICE_SECRET() -> 0 and 32 bytes in x1..x4: a secret that belongs to this machine (a chip's unique value; QEMU: the fw_cfg file `opt/metallium/device-secret`), the
+/// one thing that opens an encrypted data volume without anyone typing a passphrase. Only the data store server (role 6) may ask (`E_PERM`); `E_NOSYS` if the machine has none.
+pub const DEVICE_SECRET: u64 = 46;
 pub const SC_RT_SET: u64 = 1;
 pub const SC_RT_WAIT: u64 = 2;
 pub const SC_RT_CLEAR: u64 = 3;
@@ -218,6 +221,21 @@ fn run(cur: usize) -> (u64, Out) {
             } else {
                 timer::set_wall(a1);
                 Out::Ret(0)
+            }
+        }
+        DEVICE_SECRET => {
+            const STORE_ROLE: u8 = 6;
+            if task::info(cur).role != STORE_ROLE {
+                Out::Ret(E_PERM)
+            } else if let Some(mut s) = crate::platform::device_secret() {
+                let mut f = frame(cur);
+                for i in 0..4 {
+                    f.x[i + 1] = u64::from_le_bytes(s[i * 8..i * 8 + 8].try_into().unwrap());
+                }
+                s.fill(0);
+                Out::Ret(0)
+            } else {
+                Out::Ret(E_NOSYS)
             }
         }
         GETRANDOM => {

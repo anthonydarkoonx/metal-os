@@ -452,6 +452,11 @@ driver: no interrupt, the shell asks for keys (`KBD_POLL`) and the driver drains
 presses with a US layout (Shift, Caps Lock, Ctrl, arrows) and returns up to 16 characters. A desktop asks for raw
 events instead (`INPUT_POLL`: keys, pointer position, buttons, wheel), or sleeps until there is one (`INPUT_WAIT`, up to a second at a time).
 
+*Encrypted data volume.* `/data` can be encrypted (`docs/ENCRYPTION.md`): a random volume key sealed under key slots (a passphrase, PBKDF2-HMAC-SHA512; and the machine's
+own secret, so nobody has to type anything), every 4 KiB block sealed with ChaCha20-Poly1305 under a fresh nonce with its position authenticated. A blank data partition on a
+machine that has a device secret becomes an encrypted volume by default; a locked volume holds the file server back and the screen task shows a greeter (the built-in prompt,
+or a separate repository's: `docs/GREETER-INTERFACE.md`). `make volume-test` and `make qemu-test-encrypted`.
+
 *USB input.* The same task also drives a USB controller (`user/src/xhci.rs`, xHCI; the parsing is in `libs/metallium-usb`): keyboards
 and pointers on root ports or behind hubs (up to three tiers, 16 devices at once), plugged and unplugged while the system runs,
 with key repeat (the device does not do it). The controller's interrupt wakes a waiting client when the machine has no virtio

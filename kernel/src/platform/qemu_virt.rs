@@ -183,6 +183,13 @@ fn probe_gic() {
     }
 }
 
+/// A secret that belongs to this machine, for the data store's encryption (`DEVICE_SECRET`): QEMU has none of its own, so a test supplies one in the fw_cfg file
+/// `opt/metallium/device-secret` (32 bytes). A board answers with a chip-unique value.
+pub fn device_secret() -> Option<[u8; 32]> {
+    let mut s = [0u8; 32];
+    (bytes(b"opt/metallium/device-secret", &mut s) == 32).then_some(s)
+}
+
 /// What the machine's display and storage are, for `fetch` (at most 16 bytes each).
 pub fn gpu_name() -> &'static str {
     "virtio-gpu"

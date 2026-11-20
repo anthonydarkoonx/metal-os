@@ -1,0 +1,13 @@
+[package]
+name = "metallium-crypt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Disk encryption pieces: HMAC-SHA512, PBKDF2, the volume header with key slots, and per-block sealing (no_std, no heap)"
+
+[dependencies]
+metallium-aead = { path = "../metallium-aead" }
+metallium-ed25519 = { path = "../metallium-ed25519" }
+
+[lints]
+workspace = true

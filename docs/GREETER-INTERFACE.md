@@ -36,3 +36,10 @@ with the volume still locked the built-in prompt takes over. A crate that has it
 
 A greeter is an ordinary part of the screen task: it must not write the passphrase anywhere, and should zero its copy after the last chunk. The file system does not
 start serving until the volume is open, so a greeter has no `/data` (or `/system`) to read: it draws what it has built in.
+
+## A greeter that exists
+[`metallium-greeter`](https://github.com/anthonydarkoonx/metallium-greeter) implements this contract: unlock, first-boot setup (the administrator and a recovery key shown once), login, recovery
+with the key. `make run-window GREETER=../metallium-greeter` links it in; `make greeter-test GREETER=../metallium-greeter` builds it with its `log-key` feature (the test reads the key from the
+console to type it back; never in a real image) and drives the screens through QEMU (`tools/greeter-test.py`: first boot, wrong and right passphrase, a second boot with the recovery).
+The screen task runs the greeter when the volume is locked or a session service answers (`sysinfo(2)[3] == 14` for now: the boot flow does not start `sessiond` yet, and the screen task's and the
+conductor's capability tables are full enough that the session-service endpoint, `EP_SESSIONS` (14), is installed only in the test modes 13 and 14).

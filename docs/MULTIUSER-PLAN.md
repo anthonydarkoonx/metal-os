@@ -102,5 +102,6 @@ Built and tested (phase 1, without the desktop and the encryption domains):
   files and its quota, its child programs are confined to the same home; no passphrase is on the disk in the clear. (A control without confinement fails eight of those checks.)
 **Phase 2 (2026-11-21):** per-user encryption domains and recovery keys are built (`docs/ENCRYPTION.md`, *Per-user encryption domains*): login unlocks the account's domain, logout locks it, the
 recovery key replaces a forgotten passphrase, and `make session-test` checks from the host that no user's file is on the disk in the clear.
+**Greeter (2026-11-21):** the greeter exists as its own repository (`metallium-greeter`) with the first-boot setup, login, recovery screens and `make greeter-test`; `sessiond` is not in the boot flow yet.
 Not built yet: the real session payload (a desktop and a program manager per session: phase 3), the greeter's login screen and the first-boot setup (recovery keys), per-user encryption
 (phase 2), the tty switch, roles beyond the administrator, per-user byte quotas, removing an account.

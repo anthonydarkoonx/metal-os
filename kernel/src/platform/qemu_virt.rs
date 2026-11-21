@@ -428,6 +428,21 @@ pub fn number(name: &[u8]) -> Option<u64> {
     buf[..size as usize].iter().try_fold(0u64, |v, &c| if c.is_ascii_digit() { v.checked_mul(10)?.checked_add((c - b'0') as u64) } else { None })
 }
 
+/// Ranges inside the RAM span (`ram_size` from `RAM_BASE`) that are not RAM: `ram_hole(0)`, `ram_hole(1)` ... until `None`. The allocator never hands their frames out, the kernel does not map
+/// them and a physical access into one panics. QEMU's RAM has none; a test makes one (`opt/metallium/ram-hole-start` and `-size`, bytes) to check the code that skips holes. (Read with
+/// the MMU off, like `ram_size`: no atomics, no locks.)
+pub fn ram_hole(i: usize) -> Option<(usize, usize)> {
+    if i != 0 {
+        return None;
+    }
+    let (start, size) = (number(b"opt/metallium/ram-hole-start")?, number(b"opt/metallium/ram-hole-size")?);
+    (size != 0).then_some((start as usize, (start + size) as usize))
+}
+
+/// The highest physical address a device that does DMA with 32-bit addresses can reach plus one: memory for such buffers is taken from below it (the allocator hands out unmovable frames from
+/// the bottom of RAM; `obj::set` checks the buffers it makes). No limit on QEMU.
+pub const DMA_LIMIT: usize = usize::MAX;
+
 static ONLY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 pub fn only() -> u64 {

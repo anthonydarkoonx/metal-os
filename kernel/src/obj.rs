@@ -120,6 +120,8 @@ pub fn get(i: u16) -> Option<MemObj> {
 }
 
 pub(crate) fn set(i: u16, kind: ObjKind, pa: usize, pages: usize, aux: usize) {
+    // (a DMA buffer must lie where the device can address it: platforms whose devices use 32-bit addresses set `DMA_LIMIT`; the allocator hands unmovable frames out from the bottom of RAM)
+    assert!(kind != ObjKind::Dma || pa.saturating_add(pages * mem::PAGE) <= crate::platform::DMA_LIMIT, "a DMA object lies above the platform's DMA limit");
     OBJS.lock(R_OBJ)[i as usize] = MemObj { kind, pa, pages, aux, root: 0, list: 0, owner: NO_OWNER };
 }
 

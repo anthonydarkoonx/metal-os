@@ -979,7 +979,7 @@ pub fn tests() {
     let mut last = 0;
     let total = sysinfo_at(18, 0)[1] as usize; // (a quarter of the task slots, 8 at least)
     for _ in 0..=total {
-        let t = Req::new().fs().go(&sleeper);
+        let t = Req::new().fs().heap(2).go(&sleeper); // (a small heap: with the default 256 pages the conductor's page budget would end the run long before 255 programs)
         if t < 0 {
             last = t;
             break;
@@ -1099,8 +1099,9 @@ pub fn tests() {
     // ---- running out of slots --------------------------------------------------------------------------------------------
     let mut kids: Vec<i64> = Vec::new();
     let mut last = 0;
-    for _ in 0..60 {
-        let t = Req::new().arg(0).go(&sleeper);
+    // (as many tries as there are task slots, each with a small heap: the table must fill before the conductor's page budget does, whatever size the table is)
+    for _ in 0..sysinfo_at(18, 0)[2] as usize {
+        let t = Req::new().arg(0).heap(2).go(&sleeper);
         if t < 0 {
             last = t;
             break;

@@ -200,6 +200,7 @@ impl Frames for MemState {
 pub fn init(ram_size: usize, kernel: core::ops::Range<usize>) {
     let mut m = lock();
     let n = ram_size / PAGE;
+    crate::frame::phys::load_holes();
     crate::frame::phys::set_ram_size(n * PAGE);
     // the tables take the last frames of RAM (`kaslr` keeps the kernel image clear of them)
     let meta = n - meta_bytes(n) / PAGE;
@@ -210,7 +211,8 @@ pub fn init(ram_size: usize, kernel: core::ops::Range<usize>) {
     let (k0, k1) = ((kernel.start - RAM_BASE) / PAGE, (kernel.end - RAM_BASE).div_ceil(PAGE));
     let mut free = 0;
     for i in 0..n {
-        let kernel = i < low || i >= meta || (k0..k1).contains(&i);
+        let hole = crate::frame::phys::overlaps_hole(RAM_BASE + i * PAGE, RAM_BASE + (i + 1) * PAGE);
+        let kernel = i < low || i >= meta || (k0..k1).contains(&i) || hole;
         m.link(i, if kernel { OWNER_KERNEL } else { OWNER_FREE });
         m.kind[i] = if kernel { FKind::Kernel } else { FKind::Free };
         free += !kernel as usize;

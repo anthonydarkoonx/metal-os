@@ -172,19 +172,29 @@ pub fn init(ram: usize) {
     enable_this_cpu();
 }
 
-/// The direct map: RAM from the end of the identity window to the end of RAM, read + write, never executable, global.
+/// The direct map: RAM from the end of the identity window to the end of RAM, read + write, never executable, global. Ranges that are not RAM (`platform::ram_hole`) are not mapped
+/// (a device window must not be mapped as cacheable memory: a speculative read of a register can have side effects). One 1 GiB block per GiB of RAM; a GiB that holds a hole is
+/// mapped in 2 MiB blocks (only one GiB may be mapped that way: one second-level table).
 fn build_direct_map(l1: &mut [u64; 512], l2: &mut [u64; 512], ram: usize) {
     use crate::frame::phys::{GIB, ID_END};
+    // (the MMU is off here: ask the platform directly, no cached state)
+    let overlaps_hole = |start: usize, end: usize| (0..).map_while(crate::platform::ram_hole).any(|(h0, h1)| start < h1 && end > h0);
     let normal = ATTR_NORMAL | SH_INNER | AF | UXN | PXN;
     let end = crate::platform::RAM_BASE + ram;
     let mut gib = ID_END;
+    let mut split = false;
     while gib < end {
-        let left = end - gib;
-        if left >= GIB {
+        let last = gib + GIB;
+        if !overlaps_hole(gib, last.min(end)) && last <= end {
             l1[gib >> 30] = gib as u64 | VALID_BLOCK | normal;
+        } else if overlaps_hole(gib, last.min(end)) && (0..).map_while(crate::platform::ram_hole).any(|(h0, h1)| h0 <= gib && h1 >= last.min(end)) {
+            // (wholly a hole: nothing is mapped)
         } else {
-            for (i, e) in l2.iter_mut().enumerate().take(left.div_ceil(2 << 20)) {
-                *e = (gib + i * (2 << 20)) as u64 | VALID_BLOCK | normal;
+            assert!(!split, "the direct map: more than one GiB of RAM that is split by a hole or ends short of a whole GiB");
+            split = true;
+            for (i, e) in l2.iter_mut().enumerate() {
+                let pa = gib + i * (2 << 20);
+                *e = if pa + (2 << 20) <= end && !overlaps_hole(pa, pa + (2 << 20)) { pa as u64 | VALID_BLOCK | normal } else { 0 };
             }
             l1[gib >> 30] = l2.as_ptr() as u64 | VALID_TABLE;
         }
@@ -668,6 +678,7 @@ pub fn flush_tlb() {
 /// Make freshly written code visible to instruction fetch.
 pub fn sync_icache(pa: usize, len: usize) {
     let step = crate::cache::line();
+    let pa = crate::frame::phys::cache_va(pa); // (a page above the identity window is reached through the direct map: the instruction takes a virtual address)
     let mut a = pa & !(step - 1);
     while a < pa + len {
         // SAFETY: `dc cvau` cleans one line inside `pa..pa+len` (RAM the caller just wrote); it only writes back, never alters data.

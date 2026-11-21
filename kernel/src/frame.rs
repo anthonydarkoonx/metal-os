@@ -39,13 +39,40 @@ pub mod phys {
         if pa < ID_END { pa } else { DIRECT_BASE + pa }
     }
 
+    /// The address the CPU must use to maintain the caches for `addr`: a physical address of RAM above the identity window is reached through the direct map, so its virtual address
+    /// is `DIRECT_BASE + addr`; everything else (the identity window, a device, an address that already is a virtual one) is returned as it is. (A cache-maintenance instruction takes a
+    /// virtual address and faults on real cores if it is unmapped; an emulator may not notice.)
+    pub fn cache_va(addr: usize) -> usize {
+        if addr >= ID_END && addr < RAM_END.load(Ordering::Relaxed) { DIRECT_BASE + addr } else { addr }
+    }
+
     /// Record how much RAM there is (once, from `mem::init`).
     pub fn set_ram_size(bytes: usize) {
         RAM_END.store(RAM_BASE + bytes, Ordering::Relaxed);
     }
 
     fn in_ram(pa: usize, len: usize, align: usize) -> bool {
-        pa % align == 0 && pa >= RAM_BASE && pa.checked_add(len).is_some_and(|end| end <= RAM_END.load(Ordering::Relaxed))
+        pa % align == 0 && pa >= RAM_BASE && pa.checked_add(len).is_some_and(|end| end <= RAM_END.load(Ordering::Relaxed) && !overlaps_hole(pa, end))
+    }
+
+    /// The holes of the RAM span (`platform::ram_hole`), read once by `load_holes` (asking the platform each time would parse a device tree on every access).
+    static HOLES: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+    static NHOLES: AtomicUsize = AtomicUsize::new(0);
+
+    /// Read the platform's holes (at most four); from `mem::init`, before any frame is touched.
+    pub fn load_holes() {
+        let mut n = 0;
+        for (a, b) in (0..).map_while(crate::platform::ram_hole).take(4) {
+            HOLES[2 * n].store(a, Ordering::Relaxed);
+            HOLES[2 * n + 1].store(b, Ordering::Relaxed);
+            n += 1;
+        }
+        NHOLES.store(n, Ordering::Release);
+    }
+
+    /// Does `start..end` touch a range of the RAM span that is not RAM?
+    pub fn overlaps_hole(start: usize, end: usize) -> bool {
+        (0..NHOLES.load(Ordering::Acquire)).any(|i| start < HOLES[2 * i + 1].load(Ordering::Relaxed) && end > HOLES[2 * i].load(Ordering::Relaxed))
     }
 
     /// The allocator's per-frame tables (see `meta_tables`).

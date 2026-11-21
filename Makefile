@@ -60,7 +60,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: greeter-test session-test-encrypted session-test table-test greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: bigram-test greeter-test session-test-encrypted session-test table-test greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -592,6 +592,13 @@ greeter-test:
 	@test -n "$(GREETER)" || { echo "greeter-test needs GREETER=<the greeter repository>"; exit 1; }
 	@$(MAKE) --no-print-directory user kernel disk GREETER=$(GREETER) GREETER_FEATURES=log-key
 	@python3 tools/greeter-test.py '$(QEMU)'
+
+# Big RAM with a hole (a stand-in for a board with two banks): 6 GiB with the 1 GiB from 3 GiB to 4 GiB not RAM. The kernel must count only real RAM, never map or hand out the hole, and run
+# programs whose pages lie above the first GiB and above 4 GiB; the swap and compaction tests of `make qemu-test` need memory pressure and so are not run here.
+BIGRAM_HOLE := -fw_cfg name=opt/metallium/ram-hole-start,string=3221225472 -fw_cfg name=opt/metallium/ram-hole-size,string=1073741824
+bigram-test: kernel disk
+	@$(MAKE) --no-print-directory table-test session-test RAM_MIB=6144 QEMU_EXTRA='$(BIGRAM_HOLE)'
+	@python3 -c "import re,sys; t=open('build-table.log',errors='replace').read(); m=re.search(r'MMU on; 6144 MiB RAM, (\\d+) frames free', t); n=int(m.group(1)) if m else 0; ok=1_200_000<n<=1_310_720 and 'PANIC' not in t; print('[bigram] 6144 MiB with a 1 GiB hole: %d frames free (a hole-free 6 GiB would have about 1.57 million): %s' % (n, 'PASS' if ok else 'FAIL')); print('== BIG RAM: ALL PASS ==' if ok else '== BIG RAM: FAILED =='); sys.exit(0 if ok else 1)"
 
 # The data volume's encryption end to end: one disk booted five times (see tools/volume-test.py)
 volume-test: kernel disk

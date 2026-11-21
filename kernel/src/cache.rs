@@ -14,6 +14,7 @@ pub fn line() -> usize {
 /// Write back `addr..addr+len` so a device that reads memory sees what the CPU wrote.
 pub fn clean(addr: usize, len: usize) {
     let step = line();
+    let addr = crate::frame::phys::cache_va(addr);
     let mut a = addr & !(step - 1);
     while a < addr + len {
         // SAFETY: `dc cvac` on one line inside the caller's `addr..addr+len`; a clean only writes back, it never alters data.
@@ -33,6 +34,7 @@ pub fn invalidate(addr: usize, len: usize) {
     // SAFETY: barrier only; orders the caller's device-written status load before the invalidates below.
     unsafe { asm!("dsb ld", options(nostack)) };
     let step = line();
+    let addr = crate::frame::phys::cache_va(addr);
     let mut a = addr & !(step - 1);
     while a < addr + len {
         // SAFETY: `dc ivac` on a line inside the caller's range; per the doc contract the range is whole queue entries in a page that

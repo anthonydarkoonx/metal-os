@@ -12,6 +12,9 @@ use crate::*;
 const SL_GPU: u64 = 1;
 const SL_KBD: u64 = 4;
 const SL_STORE: u64 = 30;
+/// The session service's endpoint (the screen task has a send right to it; nothing receives until a session service runs: only in `opt/metallium/only=14` (`make greeter-test`) one
+/// is started, so only there is the slot passed on: a call on an endpoint nobody receives on would wait for ever; 0 tells a greeter there is no service).
+const SL_SESSIONS: u64 = 29;
 
 /// How the volume is (`state`, flags), or `None` if the store cannot be asked.
 pub fn volume_status() -> Option<(u64, u64)> {
@@ -58,19 +61,25 @@ fn present() {
     let _ = call(SL_GPU, [GPU_FLUSH2, (W as u64) << 32 | (H as u64) << 48, 0]);
 }
 
-/// Returns at once unless the volume is locked; then asks for the passphrase until it opens. `fb` is the W x H scanout buffer.
+/// Runs the greeter if there is something to ask: the volume is locked (until it opens), or a session service is running (accounts: setup, login). With no greeter linked in, the
+/// built-in prompt only unlocks a locked volume. `fb` is the W x H scanout buffer.
 pub fn unlock_screen(fb: *mut u32) {
-    if volume_status().map_or(true, |(s, _)| s != state::LOCKED) {
-        return;
-    }
+    let locked = volume_status().map_or(false, |(s, _)| s == state::LOCKED);
+    // (a session service answers only in the test mode `only=14` for now: a call on an endpoint nobody receives on would wait for ever, so the slot is passed on only there)
+    let sessions = if sysinfo(2)[3] == 14 { SL_SESSIONS } else { 0 };
     #[cfg(greeter)]
-    {
+    if locked || sessions != 0 {
         println!("[greeter] handing the screen to the greeter");
-        metallium_greeter_boot::metallium_greeter_run(SL_GPU, SL_KBD, SL_STORE, 2, 0xBC00_0000);
+        metallium_greeter_boot::metallium_greeter_run(SL_GPU, SL_KBD, SL_STORE, sessions, 2, fb as usize);
         if volume_status().map_or(true, |(s, _)| s != state::LOCKED) {
             return;
         }
         println!("[greeter] the greeter returned with the volume still locked: the built-in prompt follows");
+    }
+    #[cfg(not(greeter))]
+    let _ = sessions;
+    if !locked {
+        return;
     }
     // SAFETY: `fb` is the `W * H` scanout buffer the screen task mapped.
     let fb = unsafe { core::slice::from_raw_parts_mut(fb, W * H) };

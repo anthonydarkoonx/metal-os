@@ -60,7 +60,7 @@ chaos: kernel disk
 	 echo "== CHAOS (seed $(CHAOS_SEED)): ALL PASS ==" || { echo "== CHAOS (seed $(CHAOS_SEED)): FAILED (qemu rc=$$rc), see build-chaos.log =="; exit 1; }
 
 
-.PHONY: session-test-encrypted session-test table-test greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
+.PHONY: greeter-test session-test-encrypted session-test table-test greeter-lib qemu-test-encrypted volume-test elf-boot-test usb-test usb-test-many usb-test-hub usb-test-noncoherent scale scale-run desktop-programs desktop-lib clippy stack-guard aslr-replay print-qemu quick-programs programs fuzz quick-bench quick-sched qemu-test-noncoherent chaos all user kernel disk erofs-check map-check qemu-test-up inherit-ab provenance-check run run-window test host-test qemu-test clean
 
 all: kernel
 
@@ -104,6 +104,8 @@ endif
 # A greeter can take over the screen while the encrypted data volume is locked (docs/GREETER-INTERFACE.md): `make run-window GREETER=../greeter` builds that
 # repository's `metallium-greeter-boot` crate and links it into the screen task. Without GREETER the built-in text prompt asks for the passphrase.
 GREETER ?=
+# (cargo features of the greeter crate, e.g. `log-key` for `make greeter-test`)
+GREETER_FEATURES ?=
 ifneq ($(GREETER),)
 GREETER_DIR := $(abspath $(GREETER))
 GREETER_OUT := $(GREETER_DIR)/target-metallium-os/$(TARGET)/release
@@ -111,7 +113,7 @@ GREETER_REPO := "https://github.com/anthonydarkoonx/metallium-os"
 GREETER_FLAGS := --cfg greeter --extern metallium_greeter_boot=$(GREETER_OUT)/libmetallium_greeter_boot.rlib $$(for d in $(GREETER_OUT)/deps $(GREETER_OUT)/build/*/*/out; do test -d $$d && printf -- '-L dependency=%s ' $$d; done)
 greeter-lib:
 	cp -f $(GREETER_DIR)/Cargo.lock $(GREETER_DIR)/Cargo.lock.metallium-os-bak 2>/dev/null || true
-	cd $(GREETER_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metallium-greeter-boot --target-dir target-metallium-os --config 'profile.release.lto="fat"' \
+	cd $(GREETER_DIR) && RUSTFLAGS='-C relocation-model=pic -Zembed-metadata=yes' cargo build --release --target $(TARGET) -p metallium-greeter-boot $(if $(GREETER_FEATURES),--features $(GREETER_FEATURES)) --target-dir target-metallium-os --config 'profile.release.lto="fat"' \
 	  --config 'patch.$(GREETER_REPO).metallium-driver-rt.path="$(CURDIR)/libs/metallium-driver-rt"' \
 	  --config 'patch.$(GREETER_REPO).metallium-gfx.path="$(CURDIR)/libs/metallium-gfx"'; rc=$$?; \
 	  if [ -f $(GREETER_DIR)/Cargo.lock.metallium-os-bak ]; then mv $(GREETER_DIR)/Cargo.lock.metallium-os-bak $(GREETER_DIR)/Cargo.lock; fi; exit $$rc
@@ -583,6 +585,13 @@ session-test: kernel disk
 session-test-encrypted: kernel disk
 	@head -c 32 /dev/urandom > build-device-secret.bin
 	@python3 tools/session-test.py '$(QEMU) -fw_cfg name=opt/metallium/device-secret,file=build-device-secret.bin' encrypted; rc=$$?; rm -f build-device-secret.bin; exit $$rc
+
+# The greeter end to end: `make greeter-test GREETER=../greeter` builds that repository's crate with its `log-key` feature (the test types the recovery key back, which it reads from
+# the console: a real image never prints it) and types at the screens through QMP (tools/greeter-test.py)
+greeter-test:
+	@test -n "$(GREETER)" || { echo "greeter-test needs GREETER=<the greeter repository>"; exit 1; }
+	@$(MAKE) --no-print-directory user kernel disk GREETER=$(GREETER) GREETER_FEATURES=log-key
+	@python3 tools/greeter-test.py '$(QEMU)'
 
 # The data volume's encryption end to end: one disk booted five times (see tools/volume-test.py)
 volume-test: kernel disk

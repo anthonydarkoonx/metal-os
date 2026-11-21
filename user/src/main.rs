@@ -119,6 +119,10 @@ fn client() -> ! {
             programs::scale_tests(); // make scale: every slot of a table of 1024 tasks
             exit(0)
         }
+        14 => {
+            programs::greeter_test(); // make greeter-test: the greeter's screens, driven by the harness
+            exit(0)
+        }
         13 => {
             programs::session_test(); // make session-test: the session service
             exit(0)

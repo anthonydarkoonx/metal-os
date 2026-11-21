@@ -49,6 +49,8 @@ pub const EP_BLK: u16 = 2;
 pub const EP_ROFS: u16 = 3;
 pub const EP_LFS: u16 = 4;
 pub const EP_VFS: u16 = 5;
+/// The session service (`sessiond`): the greeter calls it to make accounts and log in; the boot flow (or a test conductor) hands the receive right to the service it starts.
+pub const EP_SESSIONS: u16 = 14;
 /// Benchmark pairs: server request endpoint and client start endpoint, per pair 0..4.
 pub const EP_BENCH_SRV: u16 = 6;
 pub const EP_BENCH_GO: u16 = 10;

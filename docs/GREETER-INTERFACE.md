@@ -12,7 +12,7 @@ builds that repository's crate `metallium-greeter-boot` (`make greeter-lib`: `ca
 `DESKTOP=`.
 
 ```rust
-pub fn metallium_greeter_run(gpu: u64, input: u64, store: u64, framebuffer: u64, fb_handle: usize)
+pub fn metallium_greeter_run(gpu: u64, input: u64, store: u64, sessions: u64, framebuffer: u64, fb_handle: usize)
 ```
 
 | Argument | Meaning |
@@ -20,6 +20,7 @@ pub fn metallium_greeter_run(gpu: u64, input: u64, store: u64, framebuffer: u64,
 | `gpu` | slot of the display driver's endpoint (`GPU_INFO`, `GPU_FLUSH2`; `metallium_driver_rt::proto::gpu`) |
 | `input` | slot of the input driver's endpoint (`KBD_POLL` for characters, `INPUT_POLL` / `INPUT_WAIT` for events; `proto::input`) |
 | `store` | slot of the data store's endpoint: the right to ask about and unlock the volume (`proto::volume`) |
+| `sessions` | slot of the session service's endpoint (`sessiond`: accounts, login, recovery; its protocol is in `programs/src/bin/sessiond.rs`), or 0 if the system has none yet: then the greeter only unlocks the volume |
 | `framebuffer`, `fb_handle` | slot of the scanout buffer's memory capability and the handle it is mapped at (the screen task has mapped it; `metallium_driver_rt::mem_map` if the greeter wants its own mapping) |
 
 It **returns** once the volume is open (`LFS_STATUS` reports `state::UNLOCKED` or `PLAIN`); the screen task then carries on (the console, or the desktop). If it returns

@@ -1400,7 +1400,7 @@ pub fn session_test() {
     let _ = mem_map(10, 0x8034_0000, true);
     let v = Vfs::new(9, 0x8034_0000);
     let img = (0..20).find_map(|_| v.read_file("/system/bin/sessiond").ok().filter(|b| b.len() > 32).or_else(|| { sleep(20); None })).unwrap_or_default();
-    let ctl = svc(EP_CREATE, FACTORY_SLOT, 0, 0, 0, 0)[0] as i64;
+    let ctl = 29i64; // the static session-service endpoint (the conductor's slot 29), the one the greeter calls
     let rq = Req::new().fs().heap(4096).budget(8000).give_masked(0, ctl as u8, 0b111).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF).give_masked(4, 7, 0xFFFF); // (its slot 4: the data store, for the account domains; slot 7 is a program's standard output)
     let tid = if img.is_empty() || ctl < 0 { -1 } else { rq.go(&img) };
     println!("[session] sessiond started: task {tid}");
@@ -1505,4 +1505,19 @@ pub fn session_test() {
     let bob_new = act(2, false, 0, "bob", b"bobs-changed-passphrase");
     println!("[session] TEST a user changes the passphrase from the user's own session: {}", verdict(own[0] == 0 && bob_out[0] == 0 && bob_old[0] == 7 && bob_new[0] == 0));
     println!("[session] done");
+}
+
+/// `make greeter-test` (`opt/metallium/only=14`): the conductor starts the session service and then leaves the machine to the greeter (the screen task runs it, with the service's
+/// endpoint) and to the harness typing at it (tools/greeter-test.py).
+pub fn greeter_test() {
+    sleep(30);
+    let _ = mem_map(10, 0x8034_0000, true);
+    let v = Vfs::new(9, 0x8034_0000);
+    let img = (0..20).find_map(|_| v.read_file("/system/bin/sessiond").ok().filter(|b| b.len() > 32).or_else(|| { sleep(20); None })).unwrap_or_default();
+    let rq = Req::new().fs().heap(4096).budget(8000).give_masked(0, 29, 0b111).give_masked(5, FACTORY_SLOT as u8, 0xFFFF).give_masked(6, SPAWN_SLOT as u8, 0xFFFF).give_masked(4, 7, 0xFFFF);
+    let tid = if img.is_empty() { -1 } else { rq.go(&img) };
+    println!("[client] session service started for the greeter test: task {tid}");
+    loop {
+        sleep(1000);
+    }
 }

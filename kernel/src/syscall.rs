@@ -502,6 +502,7 @@ fn ep_name(e: u16) -> &'static str {
         ipc::EP_LFS => "data files",
         ipc::EP_VFS => "file system",
         6..=9 => "benchmark",
+        ipc::EP_SESSIONS => "session service",
         ipc::EP_BENCH_GO..=15 => "benchmark go",
         ipc::EP_AUDIO => "audio service",
         ipc::EP_GPU => "display driver",
